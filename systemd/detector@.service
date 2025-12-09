@@ -1,0 +1,19 @@
+[Unit]
+Description=Animal Tracker detector (%i)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/wildlife_ssd
+
+[Service]
+Type=simple
+User=jetson
+WorkingDirectory=/home/jetson/animaltracker
+EnvironmentFile=/home/jetson/animaltracker/config/secrets.env
+ExecStart=/home/jetson/animaltracker/.venv/bin/python -m animaltracker.cli run \
+    --config /home/jetson/animaltracker/config/cameras.yml \
+    --camera %i
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

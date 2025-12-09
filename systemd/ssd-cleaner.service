@@ -1,0 +1,12 @@
+[Unit]
+Description=Animal Tracker SSD cleanup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jetson
+WorkingDirectory=/home/jetson/animaltracker
+EnvironmentFile=/home/jetson/animaltracker/config/secrets.env
+ExecStart=/home/jetson/animaltracker/.venv/bin/python -m animaltracker.cli cleanup \
+    --config /home/jetson/animaltracker/config/cameras.yml

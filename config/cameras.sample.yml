@@ -1,0 +1,68 @@
+general:
+  storage_root: /mnt/wildlife_ssd
+  logs_root: /home/jetson/animaltracker/logs
+  metrics_port: 9500
+  clip:
+    pre_seconds: 5
+    post_seconds: 5
+    format: mp4
+    codec: h264
+  exclusion_list:
+    - squirrel
+  notification:
+    pushover_app_token_env: PUSHOVER_APP_TOKEN
+    pushover_user_key_env: PUSHOVER_USER_KEY
+  retention:
+    min_days: 7
+    max_days: 30
+    max_utilization_pct: 80
+
+cameras:
+  - id: cam1
+    name: "Front Gate"
+    location: "North Fence"
+    rtsp:
+      uri: "rtsp://{USERNAME}:{PASSWORD}@192.168.1.201:554/Streaming/Channels/101"
+      transport: tcp
+      latency_ms: 0
+    onvif:
+      host: 192.168.1.201
+      port: 80
+      profile: "Profile_1"
+      username_env: CAM1_ONVIF_USER
+      password_env: CAM1_ONVIF_PASS
+    thresholds:
+      confidence: 0.5
+      min_frames: 3
+    include_species:
+      - deer
+      - bear
+    exclude_species:
+      - squirrel
+    notification:
+      priority: 0
+      sound: pushover
+
+  - id: cam2
+    name: "Creek Crossing"
+    location: "South Ridge"
+    rtsp:
+      uri: "rtsp://{USERNAME}:{PASSWORD}@192.168.1.202:554/live"
+      transport: udp
+      latency_ms: 100
+    onvif:
+      host: 192.168.1.202
+      port: 80
+      profile: "main"
+      username_env: CAM2_ONVIF_USER
+      password_env: CAM2_ONVIF_PASS
+    thresholds:
+      confidence: 0.45
+      min_frames: 2
+    include_species:
+      - coyote
+      - bobcat
+    exclude_species: []
+    notification:
+      priority: 1
+      sound: siren

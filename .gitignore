@@ -1,0 +1,25 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+.env/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Runtime outputs
+logs/
+clips/
+*.log
+
+# Sensitive config overrides
+config/cameras.yml
+config/secrets.env
+config/*.env

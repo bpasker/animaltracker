@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly SSD cleanup scheduler
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=1h
+Unit=ssd-cleaner.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "animaltracker"
+version = "0.1.0"
+description = "Multi-camera RTSP animal detection pipeline for Jetson Nano"
+authors = [{name = "Animal Tracker"}]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "opencv-python-headless>=4.8",
+    "numpy>=1.23",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "tqdm>=4.66",
+    "onvif-zeep>=0.2.12",
+    "ultralytics>=8.3.0",
+    "prometheus-client>=0.17",
+    "aiohttp>=3.9",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+jetson = [
+    "jetson-stats>=4.2",
+    "psutil>=5.9",
+]
+
+dynamic = ["scripts"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+animaltracker = ["py.typed"]

@@ -13,9 +13,10 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 class WebServer:
-    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, port: int = 8080):
+    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080):
         self.workers = workers
         self.storage_root = storage_root
+        self.logs_root = logs_root
         self.port = port
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_index)
@@ -187,7 +188,21 @@ class WebServer:
         return web.Response(body=buffer.tobytes(), content_type='image/jpeg')
 
     async def start(self):
-        runner = web.AppRunner(self.app)
+        # Setup access logger
+        access_logger = logging.getLogger('web_access')
+        access_logger.setLevel(logging.INFO)
+        access_logger.propagate = False
+        
+        # Ensure logs directory exists
+        self.logs_root.mkdir(parents=True, exist_ok=True)
+        log_file = self.logs_root / 'web_access.log'
+        
+        handler = logging.FileHandler(log_file)
+        formatter = logging.Formatter('%(asctime)s - %(message)s')
+        handler.setFormatter(formatter)
+        access_logger.addHandler(handler)
+
+        runner = web.AppRunner(self.app, access_log=access_logger)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', self.port)
         await site.start()

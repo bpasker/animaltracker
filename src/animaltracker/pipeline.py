@@ -226,6 +226,7 @@ class PipelineOrchestrator:
         web_server = WebServer(
             worker_map, 
             storage_root=Path(self.runtime.general.storage_root),
+            logs_root=Path(self.runtime.general.logs_root),
             port=8080
         )
         

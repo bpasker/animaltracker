@@ -213,6 +213,7 @@ class WebServer:
                             <td>{size_mb:.1f} MB</td>
                             <td>
                                 <a class="clip-link" href="/clips/{clip['path']}" target="_blank">Play</a>
+                                <a class="clip-link" href="/clips/{clip['path']}" download style="margin-left: 10px;">Download</a>
                                 <button class="delete-btn" onclick="deleteClip('{clip['path']}')">Delete</button>
                             </td>
                         </tr>

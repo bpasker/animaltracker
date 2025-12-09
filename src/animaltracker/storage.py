@@ -38,29 +38,19 @@ class StorageManager:
         return path
 
     def write_clip(self, frames: List, output_path: Path, fps: int = 15) -> None:
-        """Encode frames using cv2.VideoWriter."""
+        """Encode frames using two-step process for browser compatibility."""
         if not frames:
             LOGGER.warning("No frames available for clip %s; skipping", output_path)
             return
             
         height, width = frames[0][1].shape[:2]
-        tmp_path = output_path.with_suffix(".tmp.mp4")
+        # 1. Write to temporary AVI using MJPG (fast, safe, widely supported by OpenCV)
+        temp_avi = output_path.with_suffix(".temp.avi")
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        out = cv2.VideoWriter(str(temp_avi), fourcc, fps, (width, height))
         
-        # Try H.264 (avc1) first as it's required for web playback
-        # Fallback to mp4v (MPEG-4) if H.264 is not available
-        codecs = ['avc1', 'h264', 'mp4v']
-        out = None
-        
-        for codec in codecs:
-            fourcc = cv2.VideoWriter_fourcc(*codec)
-            out = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
-            if out.isOpened():
-                LOGGER.info("Encoding clip to %s using %s (%dx%d @ %d fps)", output_path, codec, width, height, fps)
-                break
-            out.release()
-            
-        if not out or not out.isOpened():
-            LOGGER.error("Failed to open VideoWriter for %s (tried: %s)", tmp_path, codecs)
+        if not out.isOpened():
+            LOGGER.error("Failed to open MJPG VideoWriter for %s", temp_avi)
             return
 
         try:
@@ -69,14 +59,42 @@ class StorageManager:
         finally:
             out.release()
             
-        if tmp_path.exists():
-            size = tmp_path.stat().st_size
-            if size > 0:
-                tmp_path.rename(output_path)
-                LOGGER.info("Saved clip %s (%d bytes)", output_path, size)
+        if not temp_avi.exists() or temp_avi.stat().st_size == 0:
+            LOGGER.error("Failed to create intermediate AVI %s", temp_avi)
+            if temp_avi.exists(): temp_avi.unlink()
+            return
+
+        # 2. Convert to browser-friendly MP4 (H.264 + YUV420p) using FFmpeg CLI
+        # This avoids the 'malloc' crash from piping raw frames and ensures web compatibility
+        tmp_mp4 = output_path.with_suffix(".tmp.mp4")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel", "error",
+            "-i", str(temp_avi),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",  # Critical for browser playback
+            "-preset", "veryfast",
+            "-crf", "23",
+            str(tmp_mp4)
+        ]
+        
+        LOGGER.info("Transcoding clip to %s", output_path)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            if tmp_mp4.exists() and tmp_mp4.stat().st_size > 0:
+                tmp_mp4.rename(output_path)
+                LOGGER.info("Saved clip %s (%d bytes)", output_path, output_path.stat().st_size)
             else:
-                LOGGER.error("Generated clip is empty: %s", tmp_path)
-                tmp_path.unlink()
+                LOGGER.error("FFmpeg produced empty file for %s", output_path)
+        except subprocess.CalledProcessError as e:
+            LOGGER.error("FFmpeg failed: %s", e.stderr.decode())
+        finally:
+            # Cleanup intermediate file
+            if temp_avi.exists():
+                temp_avi.unlink()
+            if tmp_mp4.exists(): # If rename failed
+                tmp_mp4.unlink()
 
     def disk_usage_pct(self) -> float:
         stat = shutil.disk_usage(self.storage_root)

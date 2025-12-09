@@ -70,6 +70,22 @@ class OnvifClient:
         }
         ptz_service.ContinuousMove(request)
 
+    def ptz_move_absolute(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        ptz_service = self._camera.create_ptz_service()
+        
+        # Get status to find range (optional, but good for debugging)
+        # status = ptz_service.GetStatus({'ProfileToken': profile_token})
+        
+        request = ptz_service.create_type("AbsoluteMove")
+        request.ProfileToken = profile_token
+        request.Position = {
+            "PanTilt": {"x": pan, "y": tilt},
+            "Zoom": {"x": zoom},
+        }
+        ptz_service.AbsoluteMove(request)
+
     def ptz_stop(self, profile_token: str) -> None:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")

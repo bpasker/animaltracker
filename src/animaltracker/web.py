@@ -23,6 +23,7 @@ class WebServer:
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
+        self.app.router.add_post('/tracking/{camera_id}', self.handle_toggle_tracking)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
@@ -53,6 +54,9 @@ class WebServer:
                     .ptz-controls button { margin: 2px; padding: 5px 10px; font-size: 0.9em; background: #555; }
                     .ptz-controls button:hover { background: #666; }
                     .ptz-controls button:active { background: #888; }
+                    .tracking-toggle { margin-top: 10px; padding: 10px; background: #222; border-radius: 4px; }
+                    .tracking-toggle label { display: flex; align-items: center; justify-content: center; gap: 10px; cursor: pointer; }
+                    .tracking-toggle input { width: 20px; height: 20px; }
                 </style>
                 <script>
                     function refreshImages() {
@@ -71,6 +75,23 @@ class WebServer:
                             alert(text);
                         } catch (e) {
                             alert('Error saving clip: ' + e);
+                        }
+                    }
+
+                    async function toggleTracking(camId, checkbox) {
+                        try {
+                            const response = await fetch('/tracking/' + camId, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ enabled: checkbox.checked })
+                            });
+                            if (!response.ok) {
+                                alert('Failed to toggle tracking');
+                                checkbox.checked = !checkbox.checked; // Revert
+                            }
+                        } catch (e) {
+                            alert('Error toggling tracking: ' + e);
+                            checkbox.checked = !checkbox.checked; // Revert
                         }
                     }
 
@@ -124,12 +145,26 @@ class WebServer:
                     </div>
                 """
 
+            tracking_html = ""
+            if worker.camera.tracking.target_camera_id:
+                checked = "checked" if worker.camera.tracking.enabled else ""
+                target_cam = worker.camera.tracking.target_camera_id
+                tracking_html = f"""
+                    <div class="tracking-toggle">
+                        <label>
+                            <input type="checkbox" {checked} onchange="toggleTracking('{cam_id}', this)">
+                            Auto-Track {target_cam}
+                        </label>
+                    </div>
+                """
+
             html += f"""
                     <div class="camera-card">
                         <h2>{cam_name} ({cam_id})</h2>
                         <img src="/snapshot/{cam_id}" data-src="/snapshot/{cam_id}" alt="{cam_name}">
                         <br>
                         <button onclick="saveClip('{cam_id}')">Save Last 30s</button>
+                        {tracking_html}
                         {ptz_html}
                     </div>
             """
@@ -140,6 +175,22 @@ class WebServer:
         </html>
         """
         return web.Response(text=html, content_type='text/html')
+
+    async def handle_toggle_tracking(self, request):
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker:
+            return web.Response(status=404, text="Camera not found")
+            
+        try:
+            data = await request.json()
+            enabled = bool(data.get('enabled'))
+            worker.camera.tracking.enabled = enabled
+            LOGGER.info(f"Tracking on {camera_id} set to {enabled}")
+            return web.Response(text="OK")
+        except Exception as e:
+            return web.Response(status=400, text=str(e))
 
     async def handle_ptz(self, request):
         camera_id = request.match_info['camera_id']

@@ -102,6 +102,25 @@ class WebServer:
 
         # Find all mp4 files
         clips = []
+        
+        # 1. Check for manual clips in root
+        for clip_file in clips_dir.glob('*.mp4'):
+            stat = clip_file.stat()
+            rel_path = clip_file.relative_to(clips_dir)
+            # Try to parse camera from filename manual_cam1_123.mp4
+            parts = clip_file.name.split('_')
+            camera = parts[1] if len(parts) > 1 else 'unknown'
+            
+            clips.append({
+                'path': str(rel_path),
+                'camera': camera,
+                'date': 'Manual',
+                'filename': clip_file.name,
+                'time': datetime.fromtimestamp(stat.st_mtime),
+                'size': stat.st_size
+            })
+
+        # 2. Check for automated clips in subdirectories
         for cam_dir in clips_dir.iterdir():
             if not cam_dir.is_dir(): continue
             for date_dir in cam_dir.iterdir():

@@ -96,6 +96,7 @@ class StreamWorker:
             return
         detection = filtered[0]
         if self.event_state is None:
+            LOGGER.info("Started tracking %s on %s (%.2f)", detection.species, self.camera.id, detection.confidence)
             self.event_state = EventState(
                 camera=self.camera,
                 start_ts=ts,

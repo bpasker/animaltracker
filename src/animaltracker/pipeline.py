@@ -21,13 +21,12 @@ from .storage import StorageManager
 LOGGER = logging.getLogger(__name__)
 
 
-def build_gstreamer_pipeline(rtsp_uri: str, transport: str = "tcp", latency_ms: int = 0) -> str:
-    protocol_flag = "protocols=tcp" if transport.lower() == "tcp" else "protocols=udp"
-    # Use decodebin for robust multi-pad handling; quote URI to handle special chars
-    return (
-        f'rtspsrc location="{rtsp_uri}" {protocol_flag} latency={latency_ms} '
-        f"! decodebin ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1 sync=false"
-    )
+def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp") -> str:
+    """Build RTSP URI with FFmpeg env options for OpenCV CAP_FFMPEG backend."""
+    # FFmpeg uses RTSP_TRANSPORT env or query param; we set env before capture
+    import os
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
+    return rtsp_uri
 
 
 @dataclass
@@ -70,12 +69,9 @@ class StreamWorker:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         LOGGER.info("Starting worker for %s", self.camera.id)
-        pipeline = build_gstreamer_pipeline(
-            self.camera.rtsp.uri,
-            self.camera.rtsp.transport,
-            self.camera.rtsp.latency_ms,
-        )
-        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        # Use FFmpeg backend (works without GStreamer-enabled OpenCV)
+        rtsp_uri = build_ffmpeg_uri(self.camera.rtsp.uri, self.camera.rtsp.transport)
+        cap = cv2.VideoCapture(rtsp_uri, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open RTSP stream for {self.camera.id}")
         try:

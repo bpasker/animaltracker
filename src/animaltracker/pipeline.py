@@ -78,9 +78,11 @@ class StreamWorker:
         if not cap.isOpened():
             raise RuntimeError(f"Unable to open RTSP stream for {self.camera.id}")
         try:
+            loop = asyncio.get_running_loop()
             while not stop_event.is_set():
-                await asyncio.sleep(0)
-                ret, frame = cap.read()
+                # Offload blocking OpenCV read to thread to keep web server responsive
+                ret, frame = await loop.run_in_executor(None, cap.read)
+                
                 if not ret:
                     LOGGER.warning("Frame grab failed for %s; retrying", self.camera.id)
                     await asyncio.sleep(0.1)

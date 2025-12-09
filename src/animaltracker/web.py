@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 from aiohttp import web
 from typing import Dict, TYPE_CHECKING
+from pathlib import Path
+from datetime import datetime
 
 if TYPE_CHECKING:
     from .pipeline import StreamWorker
@@ -11,12 +13,20 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 class WebServer:
-    def __init__(self, workers: Dict[str, 'StreamWorker'], port: int = 8080):
+    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, port: int = 8080):
         self.workers = workers
+        self.storage_root = storage_root
         self.port = port
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
+        self.app.router.add_get('/recordings', self.handle_recordings)
+        
+        # Serve clips directory statically
+        clips_path = self.storage_root / 'clips'
+        # Ensure it exists so static route doesn't fail on startup
+        clips_path.mkdir(parents=True, exist_ok=True)
+        self.app.router.add_static('/clips', clips_path, show_index=True)
 
     async def handle_index(self, request):
         html = """
@@ -24,7 +34,10 @@ class WebServer:
             <head>
                 <title>Animal Tracker Dashboard</title>
                 <style>
-                    body { font-family: sans-serif; background: #222; color: #eee; }
+                    body { font-family: sans-serif; background: #222; color: #eee; margin: 0; padding: 20px; }
+                    .nav { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid #444; }
+                    .nav a { color: #4CAF50; text-decoration: none; font-size: 1.2em; margin-right: 20px; font-weight: bold; }
+                    .nav a:hover { text-decoration: underline; }
                     .camera-grid { display: flex; flex-wrap: wrap; gap: 20px; }
                     .camera-card { background: #333; padding: 10px; border-radius: 8px; }
                     img { max-width: 100%; height: auto; border-radius: 4px; }
@@ -42,6 +55,10 @@ class WebServer:
                 </script>
             </head>
             <body>
+                <div class="nav">
+                    <a href="/">Live View</a>
+                    <a href="/recordings">Recordings</a>
+                </div>
                 <h1>Animal Tracker Live View</h1>
                 <div class="camera-grid">
         """
@@ -62,6 +79,89 @@ class WebServer:
         """
         return web.Response(text=html, content_type='text/html')
 
+    async def handle_recordings(self, request):
+        clips_dir = self.storage_root / 'clips'
+        if not clips_dir.exists():
+            return web.Response(text="No recordings found (clips directory missing)", content_type='text/html')
+
+        # Find all mp4 files
+        clips = []
+        for cam_dir in clips_dir.iterdir():
+            if not cam_dir.is_dir(): continue
+            for date_dir in cam_dir.iterdir():
+                if not date_dir.is_dir(): continue
+                for clip_file in date_dir.glob('*.mp4'):
+                    stat = clip_file.stat()
+                    # Path relative to storage_root/clips for the URL
+                    rel_path = clip_file.relative_to(clips_dir)
+                    clips.append({
+                        'path': str(rel_path),
+                        'camera': cam_dir.name,
+                        'date': date_dir.name,
+                        'filename': clip_file.name,
+                        'time': datetime.fromtimestamp(stat.st_mtime),
+                        'size': stat.st_size
+                    })
+
+        # Sort by time descending
+        clips.sort(key=lambda x: x['time'], reverse=True)
+
+        html = """
+        <html>
+            <head>
+                <title>Recordings - Animal Tracker</title>
+                <style>
+                    body { font-family: sans-serif; background: #222; color: #eee; margin: 0; padding: 20px; }
+                    .nav { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid #444; }
+                    .nav a { color: #4CAF50; text-decoration: none; font-size: 1.2em; margin-right: 20px; font-weight: bold; }
+                    .nav a:hover { text-decoration: underline; }
+                    table { width: 100%; border-collapse: collapse; background: #333; }
+                    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #444; }
+                    th { background: #2a2a2a; }
+                    tr:hover { background: #3a3a3a; }
+                    a.clip-link { color: #64B5F6; text-decoration: none; }
+                    a.clip-link:hover { text-decoration: underline; }
+                </style>
+            </head>
+            <body>
+                <div class="nav">
+                    <a href="/">Live View</a>
+                    <a href="/recordings">Recordings</a>
+                </div>
+                <h1>Recent Recordings</h1>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Camera</th>
+                            <th>File</th>
+                            <th>Size</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
+        
+        for clip in clips:
+            size_mb = clip['size'] / (1024 * 1024)
+            html += f"""
+                        <tr>
+                            <td>{clip['time'].strftime('%Y-%m-%d %H:%M:%S')}</td>
+                            <td>{clip['camera']}</td>
+                            <td>{clip['filename']}</td>
+                            <td>{size_mb:.1f} MB</td>
+                            <td><a class="clip-link" href="/clips/{clip['path']}" target="_blank">Play</a></td>
+                        </tr>
+            """
+            
+        html += """
+                    </tbody>
+                </table>
+            </body>
+        </html>
+        """
+        return web.Response(text=html, content_type='text/html')
+
     async def handle_snapshot(self, request):
         camera_id = request.match_info['camera_id']
         worker = self.workers.get(camera_id)
@@ -69,8 +169,18 @@ class WebServer:
         if not worker or worker.latest_frame is None:
             return web.Response(status=404, text="Camera not found or no frame available")
             
-        # Encode frame to JPEG
-        success, buffer = cv2.imencode('.jpg', worker.latest_frame)
+        # Resize frame for faster web loading (max width 640px)
+        frame = worker.latest_frame
+        height, width = frame.shape[:2]
+        if width > 640:
+            scale = 640 / width
+            new_height = int(height * scale)
+            frame = cv2.resize(frame, (640, new_height), interpolation=cv2.INTER_AREA)
+
+        # Encode frame to JPEG with lower quality (70%)
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+        success, buffer = cv2.imencode('.jpg', frame, encode_param)
+        
         if not success:
             return web.Response(status=500, text="Failed to encode frame")
             

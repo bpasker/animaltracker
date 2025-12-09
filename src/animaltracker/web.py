@@ -23,6 +23,7 @@ class WebServer:
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_get('/recordings', self.handle_recordings)
+        self.app.router.add_delete('/recordings', self.handle_delete_recording)
         
         # Serve clips directory statically
         clips_path = self.storage_root / 'clips'
@@ -156,7 +157,26 @@ class WebServer:
                     tr:hover { background: #3a3a3a; }
                     a.clip-link { color: #64B5F6; text-decoration: none; }
                     a.clip-link:hover { text-decoration: underline; }
+                    .delete-btn { background: #f44336; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-left: 10px; }
+                    .delete-btn:hover { background: #d32f2f; }
                 </style>
+                <script>
+                    async function deleteClip(path) {
+                        if (!confirm('Are you sure you want to delete this clip?')) return;
+                        try {
+                            const response = await fetch('/recordings?path=' + encodeURIComponent(path), { method: 'DELETE' });
+                            const text = await response.text();
+                            if (response.ok) {
+                                alert(text);
+                                location.reload();
+                            } else {
+                                alert('Error: ' + text);
+                            }
+                        } catch (e) {
+                            alert('Error deleting clip: ' + e);
+                        }
+                    }
+                </script>
             </head>
             <body>
                 <div class="nav">
@@ -185,7 +205,10 @@ class WebServer:
                             <td>{clip['camera']}</td>
                             <td>{clip['filename']}</td>
                             <td>{size_mb:.1f} MB</td>
-                            <td><a class="clip-link" href="/clips/{clip['path']}" target="_blank">Play</a></td>
+                            <td>
+                                <a class="clip-link" href="/clips/{clip['path']}" target="_blank">Play</a>
+                                <button class="delete-btn" onclick="deleteClip('{clip['path']}')">Delete</button>
+                            </td>
                         </tr>
             """
             
@@ -233,6 +256,25 @@ class WebServer:
             return web.Response(status=500, text="Failed to save clip (buffer empty?)")
             
         return web.Response(text=f"Clip saved: {filename}")
+
+    async def handle_delete_recording(self, request):
+        rel_path = request.query.get('path')
+        if not rel_path:
+            return web.Response(status=400, text="Missing path parameter")
+        
+        # Security check: prevent path traversal
+        if '..' in rel_path or rel_path.startswith('/'):
+             return web.Response(status=403, text="Invalid path")
+
+        file_path = self.storage_root / 'clips' / rel_path
+        try:
+            if file_path.exists() and file_path.is_file():
+                file_path.unlink()
+                return web.Response(text=f"Deleted {rel_path}")
+            else:
+                return web.Response(status=404, text="File not found")
+        except Exception as e:
+            return web.Response(status=500, text=f"Error deleting file: {e}")
 
     async def start(self):
         # Setup access logger

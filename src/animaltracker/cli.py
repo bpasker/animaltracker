@@ -12,12 +12,33 @@ from .onvif_client import OnvifClient
 from .pipeline import PipelineOrchestrator
 from .storage import StorageManager
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 logging.basicConfig(level=logging.INFO,
                     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
 
 
+def _load_secrets(config_path: str) -> None:
+    """Load secrets from secrets.env in the same directory as config."""
+    if load_dotenv is None:
+        LOGGER.warning("python-dotenv not installed; skipping automatic .env loading")
+        return
+        
+    config_dir = Path(config_path).parent
+    secrets_path = config_dir / "secrets.env"
+    if secrets_path.exists():
+        LOGGER.info("Loading secrets from %s", secrets_path)
+        load_dotenv(secrets_path)
+    else:
+        LOGGER.debug("No secrets.env found at %s", secrets_path)
+
+
 def cmd_run(args: argparse.Namespace) -> None:
+    _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
     orchestrator = PipelineOrchestrator(
         runtime=runtime,
@@ -30,6 +51,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_discover(args: argparse.Namespace) -> None:
+    _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
     for camera in runtime.cameras:
         username, password = camera.onvif.credentials()
@@ -52,6 +74,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
 
 
 def cmd_cleanup(args: argparse.Namespace) -> None:
+    _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
     storage = StorageManager(
         storage_root=Path(runtime.general.storage_root),

@@ -20,6 +20,7 @@ dependencies = [
     "prometheus-client>=0.17",
     "aiohttp>=3.9",
     "pydantic>=2.7",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

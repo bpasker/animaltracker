@@ -1,5 +1,5 @@
 general:
-  storage_root: /mnt/wildlife_ssd
+  storage_root: /home/jetson/animaltracker/storage
   logs_root: /home/jetson/animaltracker/logs
   metrics_port: 9500
   clip:

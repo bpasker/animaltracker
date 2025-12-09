@@ -96,19 +96,17 @@ class WebServer:
         """
         return web.Response(text=html, content_type='text/html')
 
-    async def handle_recordings(self, request):
+    def _scan_recordings(self):
         clips_dir = self.storage_root / 'clips'
         if not clips_dir.exists():
-            return web.Response(text="No recordings found (clips directory missing)", content_type='text/html')
+            return []
 
-        # Find all mp4 files
         clips = []
         
         # 1. Check for manual clips in root
         for clip_file in clips_dir.glob('*.mp4'):
             stat = clip_file.stat()
             rel_path = clip_file.relative_to(clips_dir)
-            # Try to parse camera from filename manual_cam1_123.mp4
             parts = clip_file.name.split('_')
             camera = parts[1] if len(parts) > 1 else 'unknown'
             
@@ -124,23 +122,31 @@ class WebServer:
         # 2. Check for automated clips in subdirectories
         for cam_dir in clips_dir.iterdir():
             if not cam_dir.is_dir(): continue
-            for date_dir in cam_dir.iterdir():
-                if not date_dir.is_dir(): continue
-                for clip_file in date_dir.glob('*.mp4'):
-                    stat = clip_file.stat()
-                    # Path relative to storage_root/clips for the URL
-                    rel_path = clip_file.relative_to(clips_dir)
-                    clips.append({
-                        'path': str(rel_path),
-                        'camera': cam_dir.name,
-                        'date': date_dir.name,
-                        'filename': clip_file.name,
-                        'time': datetime.fromtimestamp(stat.st_mtime),
-                        'size': stat.st_size
-                    })
+            
+            # Use rglob to find all mp4 files recursively (handles year/month/day structure)
+            for clip_file in cam_dir.rglob('*.mp4'):
+                stat = clip_file.stat()
+                rel_path = clip_file.relative_to(clips_dir)
+                
+                clips.append({
+                    'path': str(rel_path),
+                    'camera': cam_dir.name,
+                    'date': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d'),
+                    'filename': clip_file.name,
+                    'time': datetime.fromtimestamp(stat.st_mtime),
+                    'size': stat.st_size
+                })
 
         # Sort by time descending
         clips.sort(key=lambda x: x['time'], reverse=True)
+        return clips
+
+    async def handle_recordings(self, request):
+        loop = asyncio.get_running_loop()
+        clips = await loop.run_in_executor(None, self._scan_recordings)
+        
+        if not clips and not (self.storage_root / 'clips').exists():
+             return web.Response(text="No recordings found (clips directory missing)", content_type='text/html')
 
         html = """
         <html>
@@ -261,24 +267,37 @@ class WebServer:
             
         return web.Response(text=f"Clip saved: {filename}")
 
-    async def handle_delete_recording(self, request):
-        rel_path = request.query.get('path')
-        if not rel_path:
-            return web.Response(status=400, text="Missing path parameter")
-        
+    def _delete_file(self, rel_path: str) -> tuple[bool, str]:
         # Security check: prevent path traversal
         if '..' in rel_path or rel_path.startswith('/'):
-             return web.Response(status=403, text="Invalid path")
+             return False, "Invalid path"
 
         file_path = self.storage_root / 'clips' / rel_path
         try:
             if file_path.exists() and file_path.is_file():
                 file_path.unlink()
-                return web.Response(text=f"Deleted {rel_path}")
+                return True, f"Deleted {rel_path}"
             else:
-                return web.Response(status=404, text="File not found")
+                return False, "File not found"
         except Exception as e:
-            return web.Response(status=500, text=f"Error deleting file: {e}")
+            return False, f"Error deleting file: {e}"
+
+    async def handle_delete_recording(self, request):
+        rel_path = request.query.get('path')
+        if not rel_path:
+            return web.Response(status=400, text="Missing path parameter")
+        
+        loop = asyncio.get_running_loop()
+        success, message = await loop.run_in_executor(None, self._delete_file, rel_path)
+        
+        if success:
+            return web.Response(text=message)
+        elif message == "File not found":
+            return web.Response(status=404, text=message)
+        elif message == "Invalid path":
+            return web.Response(status=403, text=message)
+        else:
+            return web.Response(status=500, text=message)
 
     async def start(self):
         # Setup access logger

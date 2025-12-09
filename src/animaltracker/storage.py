@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+import cv2
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
@@ -37,44 +38,38 @@ class StorageManager:
         return path
 
     def write_clip(self, frames: List, output_path: Path, fps: int = 15) -> None:
-        """Encode frames using ffmpeg via subprocess."""
+        """Encode frames using cv2.VideoWriter."""
         if not frames:
             LOGGER.warning("No frames available for clip %s; skipping", output_path)
             return
+            
+        height, width = frames[0][1].shape[:2]
         tmp_path = output_path.with_suffix(".tmp.mp4")
-        cmd = [
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "bgr24",
-            "-s",
-            f"{frames[0][1].shape[1]}x{frames[0][1].shape[0]}",
-            "-r",
-            str(fps),
-            "-i",
-            "-",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "23",
-            str(tmp_path),
-        ]
-        LOGGER.info("Encoding clip to %s", output_path)
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        
+        # Use mp4v (MPEG-4) or avc1 (H.264) depending on availability
+        # On many systems 'mp4v' is safe for .mp4 container
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        
+        LOGGER.info("Encoding clip to %s (%dx%d @ %d fps)", output_path, width, height, fps)
+        out = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
+        
+        if not out.isOpened():
+            LOGGER.error("Failed to open VideoWriter for %s", tmp_path)
+            # Fallback to avc1 if mp4v fails
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            out = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
+            if not out.isOpened():
+                LOGGER.error("Failed to open VideoWriter with avc1 fallback either")
+                return
+
         try:
             for _, frame in frames:
-                proc.stdin.write(frame.tobytes())  # type: ignore[arg-type]
+                out.write(frame)
         finally:
-            if proc.stdin:
-                proc.stdin.close()
-            proc.wait()
-        tmp_path.rename(output_path)
+            out.release()
+            
+        if tmp_path.exists():
+            tmp_path.rename(output_path)
 
     def disk_usage_pct(self) -> float:
         stat = shutil.disk_usage(self.storage_root)

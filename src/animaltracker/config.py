@@ -48,7 +48,7 @@ class ONVIFSettings(BaseModel):
 
 class RTSPSettings(BaseModel):
     uri: str
-    transport: str = Field(default="tcp", regex="^(tcp|udp)$")
+    transport: str = Field(default="tcp", pattern="^(tcp|udp)$")
     latency_ms: int = Field(default=0, ge=0)
 
 

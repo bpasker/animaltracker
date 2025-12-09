@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,11 +65,37 @@ class StreamWorker:
         self.detector = detector
         self.notifier = notifier
         self.storage = storage
-        clip_seconds = runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds
+        # Ensure buffer is at least 30s for manual clips
+        clip_seconds = max(30.0, runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds)
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
         self.event_state: Optional[EventState] = None
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
+
+    def save_manual_clip(self) -> Optional[str]:
+        """Save the last 30 seconds of video buffer as a manual clip."""
+        frames = self.clip_buffer.dump()
+        if not frames:
+            return None
+            
+        # Filter for last 30 seconds
+        now = time.time()
+        cutoff = now - 30.0
+        recent_frames = [f for f in frames if f[0] >= cutoff]
+        
+        if not recent_frames:
+            return None
+            
+        filename = f"manual_{self.camera.id}_{int(now)}.mp4"
+        path = self.storage.storage_root / "clips" / filename
+        
+        # Run in thread to avoid blocking loop
+        threading.Thread(
+            target=self.storage.write_clip,
+            args=(recent_frames, path)
+        ).start()
+        
+        return filename
 
     async def run(self, stop_event: asyncio.Event) -> None:
         LOGGER.info("Starting worker for %s", self.camera.id)

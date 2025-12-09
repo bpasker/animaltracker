@@ -21,6 +21,7 @@ class WebServer:
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
+        self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_get('/recordings', self.handle_recordings)
         
         # Serve clips directory statically
@@ -43,6 +44,8 @@ class WebServer:
                     .camera-card { background: #333; padding: 10px; border-radius: 8px; }
                     img { max-width: 100%; height: auto; border-radius: 4px; }
                     h2 { margin-top: 0; }
+                    button { background: #4CAF50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+                    button:hover { background: #45a049; }
                 </style>
                 <script>
                     function refreshImages() {
@@ -53,6 +56,16 @@ class WebServer:
                         });
                     }
                     setInterval(refreshImages, 2000); // Refresh every 2 seconds
+
+                    async function saveClip(camId) {
+                        try {
+                            const response = await fetch('/save_clip/' + camId, { method: 'POST' });
+                            const text = await response.text();
+                            alert(text);
+                        } catch (e) {
+                            alert('Error saving clip: ' + e);
+                        }
+                    }
                 </script>
             </head>
             <body>
@@ -70,6 +83,8 @@ class WebServer:
                     <div class="camera-card">
                         <h2>{cam_name} ({cam_id})</h2>
                         <img src="/snapshot/{cam_id}" data-src="/snapshot/{cam_id}" alt="{cam_name}">
+                        <br>
+                        <button onclick="saveClip('{cam_id}')">Save Last 30s</button>
                     </div>
             """
             
@@ -186,6 +201,19 @@ class WebServer:
             return web.Response(status=500, text="Failed to encode frame")
             
         return web.Response(body=buffer.tobytes(), content_type='image/jpeg')
+
+    async def handle_save_clip(self, request):
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker:
+            return web.Response(status=404, text="Camera not found")
+            
+        filename = worker.save_manual_clip()
+        if not filename:
+            return web.Response(status=500, text="Failed to save clip (buffer empty?)")
+            
+        return web.Response(text=f"Clip saved: {filename}")
 
     async def start(self):
         # Setup access logger

@@ -203,7 +203,11 @@ class PipelineOrchestrator:
         
         # Start web server
         worker_map = {w.camera.id: w for w in workers}
-        web_server = WebServer(worker_map, port=8080)
+        web_server = WebServer(
+            worker_map, 
+            storage_root=Path(self.runtime.general.storage_root),
+            port=8080
+        )
         
         await asyncio.gather(
             web_server.start(),

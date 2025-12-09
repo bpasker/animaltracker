@@ -77,6 +77,7 @@ class StreamWorker:
         clip_seconds = max(30.0, runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds)
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
         self.event_state: Optional[EventState] = None
+        self.pending_detection_start_ts: Optional[float] = None
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
         
@@ -228,12 +229,23 @@ class StreamWorker:
             self.peer_worker.track_target(cx, cy)
 
         if not filtered:
+            self.pending_detection_start_ts = None
             await self._maybe_close_event(ts)
             return
         
         # Use all filtered detections to update state
         primary = filtered[0]
         if self.event_state is None:
+            # Check for minimum duration
+            if self.pending_detection_start_ts is None:
+                self.pending_detection_start_ts = ts
+                return # Wait for next frame
+            
+            if ts - self.pending_detection_start_ts < self.camera.thresholds.min_duration:
+                return # Still waiting
+            
+            # Duration met, start event
+            self.pending_detection_start_ts = None
             LOGGER.info("Started tracking %s on %s (%.2f)", primary.species, self.camera.id, primary.confidence)
             self.event_state = EventState(
                 camera=self.camera,

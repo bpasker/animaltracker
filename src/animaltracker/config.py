@@ -56,6 +56,7 @@ class RTSPSettings(BaseModel):
 class ThresholdSettings(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
     min_frames: int = Field(default=3, ge=1)
+    min_duration: float = Field(default=2.0, ge=0)
 
 
 class CameraNotificationSettings(BaseModel):

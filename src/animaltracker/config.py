@@ -70,6 +70,7 @@ class CameraConfig(BaseModel):
     rtsp: RTSPSettings
     onvif: ONVIFSettings
     thresholds: ThresholdSettings = ThresholdSettings()
+    detect_enabled: bool = True
     include_species: List[str] = Field(default_factory=list)
     exclude_species: List[str] = Field(default_factory=list)
     notification: CameraNotificationSettings = CameraNotificationSettings()

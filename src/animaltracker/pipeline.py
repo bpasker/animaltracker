@@ -140,7 +140,8 @@ class StreamWorker:
                     if frame_count % skip_factor != 0:
                         continue
 
-                    await self._process_frame(frame, frame_ts)
+                    if self.camera.detect_enabled:
+                        await self._process_frame(frame, frame_ts)
             finally:
                 # Offload release to thread
                 await loop.run_in_executor(None, cap.release)

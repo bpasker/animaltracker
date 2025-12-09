@@ -67,6 +67,39 @@ class StorageManager:
         # 2. Convert to browser-friendly MP4 (H.264 + YUV420p) using FFmpeg CLI
         # This avoids the 'malloc' crash from piping raw frames and ensures web compatibility
         tmp_mp4 = output_path.with_suffix(".tmp.mp4")
+        
+        # Check if ffmpeg is available
+        if shutil.which("ffmpeg") is None:
+            LOGGER.warning("ffmpeg not found; falling back to OpenCV H.264 encoding (may not play in all browsers)")
+            # Fallback: Try to write directly with OpenCV 'avc1'
+            # We reuse the frames we already have, or re-read the AVI? 
+            # Re-reading AVI is safer than keeping frames in memory if they were large.
+            # But here we already wrote them to AVI. Let's just try to convert AVI -> MP4 using OpenCV
+            
+            cap = cv2.VideoCapture(str(temp_avi))
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+            out = cv2.VideoWriter(str(tmp_mp4), fourcc, fps, (width, height))
+            
+            if not out.isOpened():
+                LOGGER.error("Failed to open fallback VideoWriter")
+                temp_avi.unlink()
+                return
+                
+            try:
+                while True:
+                    ret, frame = cap.read()
+                    if not ret: break
+                    out.write(frame)
+            finally:
+                cap.release()
+                out.release()
+                temp_avi.unlink()
+                
+            if tmp_mp4.exists() and tmp_mp4.stat().st_size > 0:
+                tmp_mp4.rename(output_path)
+                LOGGER.info("Saved clip %s (fallback encoding)", output_path)
+            return
+
         cmd = [
             "ffmpeg",
             "-y",
@@ -87,8 +120,9 @@ class StorageManager:
                 LOGGER.info("Saved clip %s (%d bytes)", output_path, output_path.stat().st_size)
             else:
                 LOGGER.error("FFmpeg produced empty file for %s", output_path)
-        except subprocess.CalledProcessError as e:
-            LOGGER.error("FFmpeg failed: %s", e.stderr.decode())
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            err_msg = e.stderr.decode() if isinstance(e, subprocess.CalledProcessError) else str(e)
+            LOGGER.error("FFmpeg failed: %s", err_msg)
         finally:
             # Cleanup intermediate file
             if temp_avi.exists():

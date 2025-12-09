@@ -24,6 +24,7 @@ class WebServer:
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
+        self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
         
         # Serve clips directory statically
         clips_path = self.storage_root / 'clips'
@@ -165,6 +166,10 @@ class WebServer:
                     a.clip-link:hover { text-decoration: underline; }
                     .delete-btn { background: #f44336; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-left: 10px; }
                     .delete-btn:hover { background: #d32f2f; }
+                    .bulk-actions { margin: 20px 0; padding: 10px; background: #333; border-radius: 4px; display: flex; align-items: center; gap: 10px; }
+                    .bulk-delete-btn { background: #d32f2f; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+                    .bulk-delete-btn:hover { background: #b71c1c; }
+                    .bulk-delete-btn:disabled { background: #555; cursor: not-allowed; }
                 </style>
                 <script>
                     async function deleteClip(path) {
@@ -182,6 +187,42 @@ class WebServer:
                             alert('Error deleting clip: ' + e);
                         }
                     }
+
+                    function toggleAll(source) {
+                        const checkboxes = document.querySelectorAll('input[name="clip_select"]');
+                        checkboxes.forEach(cb => cb.checked = source.checked);
+                        updateBulkButton();
+                    }
+
+                    function updateBulkButton() {
+                        const checked = document.querySelectorAll('input[name="clip_select"]:checked');
+                        const btn = document.getElementById('bulkDeleteBtn');
+                        btn.disabled = checked.length === 0;
+                        btn.textContent = checked.length > 0 ? `Delete Selected (${checked.length})` : 'Delete Selected';
+                    }
+
+                    async function bulkDelete() {
+                        const checked = document.querySelectorAll('input[name="clip_select"]:checked');
+                        if (checked.length === 0) return;
+
+                        if (!confirm(`Are you sure you want to delete ${checked.length} clips?`)) return;
+
+                        const paths = Array.from(checked).map(cb => cb.value);
+                        
+                        try {
+                            const response = await fetch('/recordings/bulk_delete', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ paths: paths })
+                            });
+                            
+                            const result = await response.json();
+                            alert(`Deleted ${result.deleted_count} of ${result.total_requested} clips.`);
+                            location.reload();
+                        } catch (e) {
+                            alert('Error performing bulk delete: ' + e);
+                        }
+                    }
                 </script>
             </head>
             <body>
@@ -190,9 +231,15 @@ class WebServer:
                     <a href="/recordings">Recordings</a>
                 </div>
                 <h1>Recent Recordings</h1>
+                
+                <div class="bulk-actions">
+                    <button id="bulkDeleteBtn" class="bulk-delete-btn" onclick="bulkDelete()" disabled>Delete Selected</button>
+                </div>
+
                 <table>
                     <thead>
                         <tr>
+                            <th style="width: 40px;"><input type="checkbox" onclick="toggleAll(this)"></th>
                             <th>Time</th>
                             <th>Camera</th>
                             <th>File</th>
@@ -207,6 +254,7 @@ class WebServer:
             size_mb = clip['size'] / (1024 * 1024)
             html += f"""
                         <tr>
+                            <td><input type="checkbox" name="clip_select" value="{clip['path']}" onclick="updateBulkButton()"></td>
                             <td>{clip['time'].strftime('%Y-%m-%d %H:%M:%S')}</td>
                             <td>{clip['camera']}</td>
                             <td>{clip['filename']}</td>
@@ -299,6 +347,31 @@ class WebServer:
             return web.Response(status=403, text=message)
         else:
             return web.Response(status=500, text=message)
+
+    async def handle_bulk_delete(self, request):
+        try:
+            data = await request.json()
+            paths = data.get('paths', [])
+        except Exception:
+            return web.Response(status=400, text="Invalid JSON body")
+
+        if not paths:
+            return web.Response(status=400, text="No paths provided")
+
+        loop = asyncio.get_running_loop()
+        results = []
+        
+        for rel_path in paths:
+            success, message = await loop.run_in_executor(None, self._delete_file, rel_path)
+            results.append({'path': rel_path, 'success': success, 'message': message})
+
+        # Count successes
+        deleted_count = sum(1 for r in results if r['success'])
+        return web.json_response({
+            'deleted_count': deleted_count,
+            'total_requested': len(paths),
+            'results': results
+        })
 
     async def start(self):
         # Setup access logger

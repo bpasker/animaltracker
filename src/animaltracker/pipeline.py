@@ -45,7 +45,8 @@ class EventState:
         self.last_detection_ts = frame_ts
         if detection.confidence > self.max_confidence:
             self.max_confidence = detection.confidence
-        self.frames.append((frame_ts, frame))
+        # Frames are now appended in the main loop to ensure full framerate
+        # self.frames.append((frame_ts, frame))
 
     @property
     def duration(self) -> float:
@@ -183,6 +184,10 @@ class StreamWorker:
                     frame_ts = time.time()
                     self.clip_buffer.push(frame_ts, frame)
                     
+                    # Capture every frame for active events (even if inference is skipped)
+                    if self.event_state is not None:
+                        self.event_state.frames.append((frame_ts, frame))
+                    
                     # Skip inference on some frames to save CPU
                     frame_count += 1
                     if frame_count % skip_factor != 0:
@@ -229,7 +234,11 @@ class StreamWorker:
                 max_confidence=detection.confidence,
                 last_detection_ts=ts,
             )
-            self.event_state.frames.extend(self.clip_buffer.dump())
+            # Add pre-event frames from buffer, filtered by pre_seconds
+            buffered = self.clip_buffer.dump()
+            cutoff = ts - self.runtime.general.clip.pre_seconds
+            self.event_state.frames.extend([f for f in buffered if f[0] >= cutoff])
+            
         self.event_state.update(detection, ts, frame)
 
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
@@ -250,7 +259,7 @@ class StreamWorker:
         if self.event_state is None:
             return
         idle = ts - self.event_state.last_detection_ts
-        if idle < 3.0:
+        if idle < self.runtime.general.clip.post_seconds:
             return
         clip_path = self.storage.build_clip_path(
             self.camera.id,

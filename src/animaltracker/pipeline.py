@@ -145,7 +145,13 @@ class StreamWorker:
                 await asyncio.sleep(1)  # Brief pause before reconnect
 
     async def _process_frame(self, frame: np.ndarray, ts: float) -> None:
-        detections = self.detector.infer(frame, conf_threshold=self.camera.thresholds.confidence)
+        loop = asyncio.get_running_loop()
+        detections = await loop.run_in_executor(
+            None, 
+            self.detector.infer, 
+            frame, 
+            self.camera.thresholds.confidence
+        )
         filtered = self._filter_detections(detections)
         if not filtered:
             self._maybe_close_event(ts)

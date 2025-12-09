@@ -227,17 +227,21 @@ class WebServer:
         if not worker or worker.latest_frame is None:
             return web.Response(status=404, text="Camera not found or no frame available")
             
-        # Resize frame for faster web loading (max width 640px)
-        frame = worker.latest_frame
-        height, width = frame.shape[:2]
-        if width > 640:
-            scale = 640 / width
-            new_height = int(height * scale)
-            frame = cv2.resize(frame, (640, new_height), interpolation=cv2.INTER_AREA)
+        # Offload image processing to thread to avoid blocking event loop
+        loop = asyncio.get_running_loop()
+        
+        def process_image(img):
+            height, width = img.shape[:2]
+            if width > 640:
+                scale = 640 / width
+                new_height = int(height * scale)
+                img = cv2.resize(img, (640, new_height), interpolation=cv2.INTER_AREA)
 
-        # Encode frame to JPEG with lower quality (70%)
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
-        success, buffer = cv2.imencode('.jpg', frame, encode_param)
+            # Encode frame to JPEG with lower quality (70%)
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+            return cv2.imencode('.jpg', img, encode_param)
+
+        success, buffer = await loop.run_in_executor(None, process_image, worker.latest_frame)
         
         if not success:
             return web.Response(status=500, text="Failed to encode frame")

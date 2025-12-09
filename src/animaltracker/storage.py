@@ -46,21 +46,22 @@ class StorageManager:
         height, width = frames[0][1].shape[:2]
         tmp_path = output_path.with_suffix(".tmp.mp4")
         
-        # Use mp4v (MPEG-4) or avc1 (H.264) depending on availability
-        # On many systems 'mp4v' is safe for .mp4 container
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # Try H.264 (avc1) first as it's required for web playback
+        # Fallback to mp4v (MPEG-4) if H.264 is not available
+        codecs = ['avc1', 'h264', 'mp4v']
+        out = None
         
-        LOGGER.info("Encoding clip to %s (%dx%d @ %d fps)", output_path, width, height, fps)
-        out = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
-        
-        if not out.isOpened():
-            LOGGER.error("Failed to open VideoWriter for %s", tmp_path)
-            # Fallback to avc1 if mp4v fails
-            fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        for codec in codecs:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
             out = cv2.VideoWriter(str(tmp_path), fourcc, fps, (width, height))
-            if not out.isOpened():
-                LOGGER.error("Failed to open VideoWriter with avc1 fallback either")
-                return
+            if out.isOpened():
+                LOGGER.info("Encoding clip to %s using %s (%dx%d @ %d fps)", output_path, codec, width, height, fps)
+                break
+            out.release()
+            
+        if not out or not out.isOpened():
+            LOGGER.error("Failed to open VideoWriter for %s (tried: %s)", tmp_path, codecs)
+            return
 
         try:
             for _, frame in frames:
@@ -69,7 +70,13 @@ class StorageManager:
             out.release()
             
         if tmp_path.exists():
-            tmp_path.rename(output_path)
+            size = tmp_path.stat().st_size
+            if size > 0:
+                tmp_path.rename(output_path)
+                LOGGER.info("Saved clip %s (%d bytes)", output_path, size)
+            else:
+                LOGGER.error("Generated clip is empty: %s", tmp_path)
+                tmp_path.unlink()
 
     def disk_usage_pct(self) -> float:
         stat = shutil.disk_usage(self.storage_root)

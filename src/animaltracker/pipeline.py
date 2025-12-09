@@ -77,6 +77,10 @@ class StreamWorker:
         LOGGER.info("Starting worker for %s", self.camera.id)
         rtsp_uri = build_ffmpeg_uri(self.camera.rtsp.uri, self.camera.rtsp.transport)
         
+        # Frame skipping counter
+        frame_count = 0
+        skip_factor = self.camera.rtsp.frame_skip
+
         while not stop_event.is_set():
             cap = cv2.VideoCapture(rtsp_uri, cv2.CAP_FFMPEG)
             if not cap.isOpened():
@@ -103,6 +107,12 @@ class StreamWorker:
 
                     frame_ts = time.time()
                     self.clip_buffer.push(frame_ts, frame)
+                    
+                    # Skip inference on some frames to save CPU
+                    frame_count += 1
+                    if frame_count % skip_factor != 0:
+                        continue
+
                     await self._process_frame(frame, frame_ts)
             finally:
                 cap.release()

@@ -48,6 +48,9 @@ class ONVIFSettings(BaseModel):
 
 class RTSPSettings(BaseModel):
     uri: str
+    transport: str = "tcp"
+    latency_ms: int = 0
+    frame_skip: int = Field(default=1, ge=1, description="Process every Nth frame (1=all, 2=half, etc)")
     transport: str = Field(default="tcp", pattern="^(tcp|udp)$")
     latency_ms: int = Field(default=0, ge=0)
 

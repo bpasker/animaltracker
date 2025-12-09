@@ -17,6 +17,7 @@ from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, YoloDetector
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
+from .web import WebServer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ class StreamWorker:
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
         self.event_state: Optional[EventState] = None
         self._snapshot_taken = False
+        self.latest_frame: Optional[np.ndarray] = None
 
     async def run(self, stop_event: asyncio.Event) -> None:
         LOGGER.info("Starting worker for %s", self.camera.id)
@@ -83,6 +85,8 @@ class StreamWorker:
                     LOGGER.warning("Frame grab failed for %s; retrying", self.camera.id)
                     await asyncio.sleep(0.1)
                     continue
+                
+                self.latest_frame = frame
                 
                 if not self._snapshot_taken:
                     self.storage.save_snapshot(self.camera.id, frame)
@@ -194,4 +198,12 @@ class PipelineOrchestrator:
             )
             for cam in self.cameras
         ]
-        await asyncio.gather(*(worker.run(stop_event) for worker in workers))
+        
+        # Start web server
+        worker_map = {w.camera.id: w for w in workers}
+        web_server = WebServer(worker_map, port=8080)
+        
+        await asyncio.gather(
+            web_server.start(),
+            *(worker.run(stop_event) for worker in workers)
+        )

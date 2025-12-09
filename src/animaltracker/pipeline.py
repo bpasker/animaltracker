@@ -27,10 +27,7 @@ def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp") -> str:
     # FFmpeg uses RTSP_TRANSPORT env or query param; we set env before capture
     import os
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
-    
-    # Also append as query param if supported by underlying ffmpeg (safer)
-    separator = "&" if "?" in rtsp_uri else "?"
-    return f"{rtsp_uri}{separator}rtsp_transport={transport}"
+    return rtsp_uri
 
 
 @dataclass

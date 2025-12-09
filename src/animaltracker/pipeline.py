@@ -22,17 +22,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 def build_gstreamer_pipeline(rtsp_uri: str, transport: str = "tcp", latency_ms: int = 0) -> str:
-    protocol_flag = "protocols=tcp" if transport.lower() == "tcp" else ""
-    return " ".join([
-        f"rtspsrc location={rtsp_uri} {protocol_flag} latency={latency_ms} drop-on-late=true",
-        "! queue",
-        "! application/x-rtp,media=video,encoding-name=H264",
-        "! rtph264depay",
-        "! h264parse",
-        "! avdec_h264",
-        "! videoconvert",
-        "! appsink drop=1 sync=false",
-    ])
+    protocol_flag = "protocols=tcp" if transport.lower() == "tcp" else "protocols=udp"
+    # Use decodebin for robust multi-pad handling; quote URI to handle special chars
+    return (
+        f'rtspsrc location="{rtsp_uri}" {protocol_flag} latency={latency_ms} '
+        f"! decodebin ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1 sync=false"
+    )
 
 
 @dataclass

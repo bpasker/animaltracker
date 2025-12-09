@@ -27,7 +27,10 @@ def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp") -> str:
     # FFmpeg uses RTSP_TRANSPORT env or query param; we set env before capture
     import os
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
-    return rtsp_uri
+    
+    # Also append as query param if supported by underlying ffmpeg (safer)
+    separator = "&" if "?" in rtsp_uri else "?"
+    return f"{rtsp_uri}{separator}rtsp_transport={transport}"
 
 
 @dataclass
@@ -72,33 +75,40 @@ class StreamWorker:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         LOGGER.info("Starting worker for %s", self.camera.id)
-        # Use FFmpeg backend (works without GStreamer-enabled OpenCV)
         rtsp_uri = build_ffmpeg_uri(self.camera.rtsp.uri, self.camera.rtsp.transport)
-        cap = cv2.VideoCapture(rtsp_uri, cv2.CAP_FFMPEG)
-        if not cap.isOpened():
-            raise RuntimeError(f"Unable to open RTSP stream for {self.camera.id}")
-        try:
-            loop = asyncio.get_running_loop()
-            while not stop_event.is_set():
-                # Offload blocking OpenCV read to thread to keep web server responsive
-                ret, frame = await loop.run_in_executor(None, cap.read)
-                
-                if not ret:
-                    LOGGER.warning("Frame grab failed for %s; retrying", self.camera.id)
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                self.latest_frame = frame
-                
-                if not self._snapshot_taken:
-                    self.storage.save_snapshot(self.camera.id, frame)
-                    self._snapshot_taken = True
+        
+        while not stop_event.is_set():
+            cap = cv2.VideoCapture(rtsp_uri, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                await asyncio.sleep(5)
+                continue
 
-                frame_ts = time.time()
-                self.clip_buffer.push(frame_ts, frame)
-                await self._process_frame(frame, frame_ts)
-        finally:
-            cap.release()
+            LOGGER.info("Connected to stream for %s", self.camera.id)
+            try:
+                loop = asyncio.get_running_loop()
+                while not stop_event.is_set():
+                    # Offload blocking OpenCV read to thread to keep web server responsive
+                    ret, frame = await loop.run_in_executor(None, cap.read)
+                    
+                    if not ret:
+                        LOGGER.warning("Stream lost for %s; reconnecting...", self.camera.id)
+                        break
+                    
+                    self.latest_frame = frame
+                    
+                    if not self._snapshot_taken:
+                        self.storage.save_snapshot(self.camera.id, frame)
+                        self._snapshot_taken = True
+
+                    frame_ts = time.time()
+                    self.clip_buffer.push(frame_ts, frame)
+                    await self._process_frame(frame, frame_ts)
+            finally:
+                cap.release()
+            
+            if not stop_event.is_set():
+                await asyncio.sleep(1)  # Brief pause before reconnect
 
     async def _process_frame(self, frame: np.ndarray, ts: float) -> None:
         detections = self.detector.infer(frame, conf_threshold=self.camera.thresholds.confidence)

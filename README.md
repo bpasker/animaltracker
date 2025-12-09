@@ -64,6 +64,8 @@ If you don't know the RTSP URL for your camera, you can use the `discover` comma
 1.  Configure the camera's IP and ONVIF credentials in `config/cameras.yml`.
 2.  Run the discovery command:
     ```bash
+    cd ~/animaltracker/
+    source .venv/bin/activate
     python -m animaltracker.cli --config config/cameras.yml discover --inspect
     ```
 3.  The output will list all available profiles and their RTSP URIs. Copy the appropriate URI (prefer H.264/sub-streams for Jetson) back into your `config/cameras.yml`.
@@ -72,12 +74,14 @@ If you don't know the RTSP URL for your camera, you can use the `discover` comma
 
 ### Manual Run (Testing)
 ```bash
+cd ~/animaltracker/
 source .venv/bin/activate
 python -m animaltracker.cli --config config/cameras.yml run --model models/yolo11n.pt
 ```
 
 ### Test Notifications
 ```bash
+cd ~/animaltracker/
 source .venv/bin/activate
 python scripts/test_pushover.py
 ```

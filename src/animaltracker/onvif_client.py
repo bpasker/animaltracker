@@ -50,7 +50,7 @@ class OnvifClient:
     def get_status(self) -> Dict[str, Any]:
         if ONVIFCamera is None:
             return {"status": "unknown", "reason": "library-missing"}
-        dev_service = self._camera.create_device_service()
+        dev_service = self._camera.create_devicemgmt_service()
         info = dev_service.GetDeviceInformation()
         return {
             "manufacturer": getattr(info, "Manufacturer", "unknown"),

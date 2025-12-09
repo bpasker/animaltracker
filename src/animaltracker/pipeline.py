@@ -36,17 +36,23 @@ def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp") -> str:
 class EventState:
     camera: CameraConfig
     start_ts: float
-    species: str
+    species: set[str]
     max_confidence: float
     last_detection_ts: float
     frames: List[tuple[float, np.ndarray]] = field(default_factory=list)
 
-    def update(self, detection: Detection, frame_ts: float, frame: np.ndarray) -> None:
+    def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray) -> None:
         self.last_detection_ts = frame_ts
-        if detection.confidence > self.max_confidence:
-            self.max_confidence = detection.confidence
+        for det in detections:
+            self.species.add(det.species)
+            if det.confidence > self.max_confidence:
+                self.max_confidence = det.confidence
         # Frames are now appended in the main loop to ensure full framerate
         # self.frames.append((frame_ts, frame))
+
+    @property
+    def species_label(self) -> str:
+        return "+".join(sorted(self.species))
 
     @property
     def duration(self) -> float:
@@ -224,14 +230,16 @@ class StreamWorker:
         if not filtered:
             await self._maybe_close_event(ts)
             return
-        detection = filtered[0]
+        
+        # Use all filtered detections to update state
+        primary = filtered[0]
         if self.event_state is None:
-            LOGGER.info("Started tracking %s on %s (%.2f)", detection.species, self.camera.id, detection.confidence)
+            LOGGER.info("Started tracking %s on %s (%.2f)", primary.species, self.camera.id, primary.confidence)
             self.event_state = EventState(
                 camera=self.camera,
                 start_ts=ts,
-                species=detection.species,
-                max_confidence=detection.confidence,
+                species={d.species for d in filtered},
+                max_confidence=max(d.confidence for d in filtered),
                 last_detection_ts=ts,
             )
             # Add pre-event frames from buffer, filtered by pre_seconds
@@ -239,7 +247,7 @@ class StreamWorker:
             cutoff = ts - self.runtime.general.clip.pre_seconds
             self.event_state.frames.extend([f for f in buffered if f[0] >= cutoff])
             
-        self.event_state.update(detection, ts, frame)
+        self.event_state.update(filtered, ts, frame)
 
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
         includes = set(s.lower() for s in self.camera.include_species)
@@ -263,7 +271,7 @@ class StreamWorker:
             return
         clip_path = self.storage.build_clip_path(
             self.camera.id,
-            self.event_state.species,
+            self.event_state.species_label,
             self.event_state.start_ts,
             self.runtime.general.clip.format,
         )
@@ -277,7 +285,7 @@ class StreamWorker:
             LOGGER.info("Event for %s closed; clip at %s", ctx.camera_id, path)
 
         ctx = NotificationContext(
-            species=self.event_state.species,
+            species=self.event_state.species_label,
             confidence=self.event_state.max_confidence,
             camera_id=self.camera.id,
             camera_name=self.camera.name,

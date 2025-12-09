@@ -106,7 +106,10 @@ class StreamWorker:
         skip_factor = self.camera.rtsp.frame_skip
 
         while not stop_event.is_set():
-            cap = cv2.VideoCapture(rtsp_uri, cv2.CAP_FFMPEG)
+            loop = asyncio.get_running_loop()
+            # Offload connection to thread as it can block
+            cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_uri, cv2.CAP_FFMPEG)
+            
             if not cap.isOpened():
                 LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
                 await asyncio.sleep(5)
@@ -114,7 +117,6 @@ class StreamWorker:
 
             LOGGER.info("Connected to stream for %s", self.camera.id)
             try:
-                loop = asyncio.get_running_loop()
                 while not stop_event.is_set():
                     # Offload blocking OpenCV read to thread to keep web server responsive
                     ret, frame = await loop.run_in_executor(None, cap.read)
@@ -126,7 +128,8 @@ class StreamWorker:
                     self.latest_frame = frame
                     
                     if not self._snapshot_taken:
-                        self.storage.save_snapshot(self.camera.id, frame)
+                        # Offload snapshot saving to thread
+                        loop.run_in_executor(None, self.storage.save_snapshot, self.camera.id, frame.copy())
                         self._snapshot_taken = True
 
                     frame_ts = time.time()
@@ -139,7 +142,8 @@ class StreamWorker:
 
                     await self._process_frame(frame, frame_ts)
             finally:
-                cap.release()
+                # Offload release to thread
+                await loop.run_in_executor(None, cap.release)
             
             if not stop_event.is_set():
                 await asyncio.sleep(1)  # Brief pause before reconnect
@@ -154,7 +158,7 @@ class StreamWorker:
         )
         filtered = self._filter_detections(detections)
         if not filtered:
-            self._maybe_close_event(ts)
+            await self._maybe_close_event(ts)
             return
         detection = filtered[0]
         if self.event_state is None:
@@ -183,7 +187,7 @@ class StreamWorker:
             filtered.append(det)
         return filtered
 
-    def _maybe_close_event(self, ts: float) -> None:
+    async def _maybe_close_event(self, ts: float) -> None:
         if self.event_state is None:
             return
         idle = ts - self.event_state.last_detection_ts
@@ -195,7 +199,15 @@ class StreamWorker:
             self.event_state.start_ts,
             self.runtime.general.clip.format,
         )
-        self.storage.write_clip(self.event_state.frames, clip_path)
+        
+        # Offload clip writing and notification to thread
+        loop = asyncio.get_running_loop()
+        
+        def finalize_event(frames, path, ctx, priority, sound):
+            self.storage.write_clip(frames, path)
+            self.notifier.send(ctx, priority=priority, sound=sound)
+            LOGGER.info("Event for %s closed; clip at %s", ctx.camera_id, path)
+
         ctx = NotificationContext(
             species=self.event_state.species,
             confidence=self.event_state.max_confidence,
@@ -205,12 +217,17 @@ class StreamWorker:
             event_started_at=self.event_state.start_ts,
             event_duration=self.event_state.duration,
         )
-        self.notifier.send(
-            ctx,
-            priority=self.camera.notification.priority,
-            sound=self.camera.notification.sound,
+        
+        loop.run_in_executor(
+            None, 
+            finalize_event, 
+            self.event_state.frames, 
+            clip_path, 
+            ctx, 
+            self.camera.notification.priority, 
+            self.camera.notification.sound
         )
-        LOGGER.info("Event for %s closed; clip at %s", self.camera.id, clip_path)
+        
         self.event_state = None
 
 

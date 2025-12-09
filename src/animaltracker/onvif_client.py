@@ -69,3 +69,13 @@ class OnvifClient:
             "Zoom": {"x": zoom},
         }
         ptz_service.ContinuousMove(request)
+
+    def ptz_stop(self, profile_token: str) -> None:
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        ptz_service = self._camera.create_ptz_service()
+        request = ptz_service.create_type("Stop")
+        request.ProfileToken = profile_token
+        request.PanTilt = True
+        request.Zoom = True
+        ptz_service.Stop(request)

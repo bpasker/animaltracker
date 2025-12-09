@@ -22,6 +22,7 @@ class WebServer:
         self.app.router.add_get('/', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
+        self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
@@ -43,11 +44,15 @@ class WebServer:
                     .nav a { color: #4CAF50; text-decoration: none; font-size: 1.2em; margin-right: 20px; font-weight: bold; }
                     .nav a:hover { text-decoration: underline; }
                     .camera-grid { display: flex; flex-wrap: wrap; gap: 20px; }
-                    .camera-card { background: #333; padding: 10px; border-radius: 8px; }
+                    .camera-card { background: #333; padding: 10px; border-radius: 8px; text-align: center; }
                     img { max-width: 100%; height: auto; border-radius: 4px; }
                     h2 { margin-top: 0; }
                     button { background: #4CAF50; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
                     button:hover { background: #45a049; }
+                    .ptz-controls { margin-top: 10px; background: #222; padding: 10px; border-radius: 4px; }
+                    .ptz-controls button { margin: 2px; padding: 5px 10px; font-size: 0.9em; background: #555; }
+                    .ptz-controls button:hover { background: #666; }
+                    .ptz-controls button:active { background: #888; }
                 </style>
                 <script>
                     function refreshImages() {
@@ -68,6 +73,23 @@ class WebServer:
                             alert('Error saving clip: ' + e);
                         }
                     }
+
+                    async function sendPtz(camId, action, pan, tilt, zoom) {
+                        try {
+                            await fetch('/ptz/' + camId, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    action: action,
+                                    pan: pan,
+                                    tilt: tilt,
+                                    zoom: zoom
+                                })
+                            });
+                        } catch (e) {
+                            console.error('PTZ error:', e);
+                        }
+                    }
                 </script>
             </head>
             <body>
@@ -81,12 +103,34 @@ class WebServer:
         
         for cam_id, worker in self.workers.items():
             cam_name = worker.camera.name
+            ptz_html = ""
+            if worker.onvif_client and worker.onvif_profile_token:
+                ptz_html = f"""
+                    <div class="ptz-controls">
+                        <div>
+                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')">Up</button>
+                        </div>
+                        <div>
+                            <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')">Left</button>
+                            <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')">Right</button>
+                        </div>
+                        <div>
+                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')">Down</button>
+                        </div>
+                        <div style="margin-top: 5px; border-top: 1px solid #444; padding-top: 5px;">
+                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')">Zoom +</button>
+                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')">Zoom -</button>
+                        </div>
+                    </div>
+                """
+
             html += f"""
                     <div class="camera-card">
                         <h2>{cam_name} ({cam_id})</h2>
                         <img src="/snapshot/{cam_id}" data-src="/snapshot/{cam_id}" alt="{cam_name}">
                         <br>
                         <button onclick="saveClip('{cam_id}')">Save Last 30s</button>
+                        {ptz_html}
                     </div>
             """
             
@@ -96,6 +140,43 @@ class WebServer:
         </html>
         """
         return web.Response(text=html, content_type='text/html')
+
+    async def handle_ptz(self, request):
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker or not worker.onvif_client or not worker.onvif_profile_token:
+            return web.Response(status=400, text="Camera not found or ONVIF not configured")
+            
+        try:
+            data = await request.json()
+            action = data.get('action')
+            
+            loop = asyncio.get_running_loop()
+            
+            if action == 'move':
+                pan = float(data.get('pan', 0.0))
+                tilt = float(data.get('tilt', 0.0))
+                zoom = float(data.get('zoom', 0.0))
+                await loop.run_in_executor(
+                    None, 
+                    worker.onvif_client.ptz_move, 
+                    worker.onvif_profile_token, 
+                    pan, tilt, zoom
+                )
+            elif action == 'stop':
+                await loop.run_in_executor(
+                    None, 
+                    worker.onvif_client.ptz_stop, 
+                    worker.onvif_profile_token
+                )
+            else:
+                return web.Response(status=400, text="Invalid action")
+                
+            return web.Response(text="OK")
+        except Exception as e:
+            LOGGER.error(f"PTZ error: {e}")
+            return web.Response(status=500, text=str(e))
 
     def _scan_recordings(self):
         clips_dir = self.storage_root / 'clips'

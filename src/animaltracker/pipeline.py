@@ -18,6 +18,7 @@ from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, YoloDetector
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
+from .onvif_client import OnvifClient
 from .web import WebServer
 
 LOGGER = logging.getLogger(__name__)
@@ -71,6 +72,27 @@ class StreamWorker:
         self.event_state: Optional[EventState] = None
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
+        
+        # Initialize ONVIF client if configured
+        self.onvif_client: Optional[OnvifClient] = None
+        self.onvif_profile_token: Optional[str] = None
+        
+        if camera.onvif.host:
+            user, password = camera.onvif.credentials()
+            if user and password:
+                try:
+                    self.onvif_client = OnvifClient(
+                        host=camera.onvif.host,
+                        port=camera.onvif.port,
+                        username=user,
+                        password=password
+                    )
+                    # Cache the first profile token for PTZ
+                    profiles = self.onvif_client.get_profiles()
+                    if profiles:
+                        self.onvif_profile_token = profiles[0].metadata.get("token")
+                except Exception as e:
+                    LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
 
     def save_manual_clip(self) -> Optional[str]:
         """Save the last 30 seconds of video buffer as a manual clip."""

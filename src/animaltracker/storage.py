@@ -29,6 +29,13 @@ class StorageManager:
         filename = f"{int(event_ts)}_{species}.{ext}"
         return directory / filename
 
+    def save_snapshot(self, camera_id: str, frame) -> Path:
+        import cv2
+        path = self.logs_root / f"startup_{camera_id}.jpg"
+        cv2.imwrite(str(path), frame)
+        LOGGER.info("Saved startup snapshot to %s", path)
+        return path
+
     def write_clip(self, frames: List, output_path: Path, fps: int = 15) -> None:
         """Encode frames using ffmpeg via subprocess."""
         if not frames:

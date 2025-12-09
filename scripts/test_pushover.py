@@ -2,6 +2,10 @@ import os
 import sys
 import time
 import logging
+
+# Add src to path so we can import animaltracker
+sys.path.append(os.path.join(os.path.dirname(__file__), '../src'))
+
 from animaltracker.notification import PushoverNotifier, NotificationContext
 
 # Configure logging to see the output

@@ -66,6 +66,7 @@ class StreamWorker:
         clip_seconds = runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
         self.event_state: Optional[EventState] = None
+        self._snapshot_taken = False
 
     async def run(self, stop_event: asyncio.Event) -> None:
         LOGGER.info("Starting worker for %s", self.camera.id)
@@ -82,6 +83,11 @@ class StreamWorker:
                     LOGGER.warning("Frame grab failed for %s; retrying", self.camera.id)
                     await asyncio.sleep(0.1)
                     continue
+                
+                if not self._snapshot_taken:
+                    self.storage.save_snapshot(self.camera.id, frame)
+                    self._snapshot_taken = True
+
                 frame_ts = time.time()
                 self.clip_buffer.push(frame_ts, frame)
                 await self._process_frame(frame, frame_ts)

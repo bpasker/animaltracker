@@ -4,100 +4,105 @@ YOLO + RTSP + ONVIF pipeline for multi-camera animal detection on a Jetson Nano,
 
 ## Repository Layout
 - `rtsp_animal_monitoring_plan.md` – high-level implementation plan and phases.
-- `config/` – camera and runtime configuration files (sample included).
-- `scripts/` – setup helpers for provisioning the Jetson.
+- `config/` – camera and runtime configuration files.
+- `scripts/` – setup helpers and test scripts.
 - `src/animaltracker/` – Python package containing the streaming pipeline, ONVIF helpers, clip buffer, notifications, and cleaners.
 - `systemd/` – unit files for running the services on-device.
 
-## macOS Development Workflow
-1. **Create a virtual environment**
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install --upgrade pip
-   pip install -e .
-   ```
-2. **Configure cameras** by duplicating `config/cameras.sample.yml` to `config/cameras.yml` and filling in RTSP/ONVIF credentials.
-3. **Run local lint/tests** (optional, CPU-only):
-   ```bash
-   python -m animaltracker.cli discover --config config/cameras.yml
-   python -m animaltracker.cli run --config config/cameras.yml --dry-run
-   ```
-4. **Sync to Jetson** once ready:
-   ```bash
-   rsync -avz --exclude '.venv' . jetson-nano:/home/jetson/animaltracker
-   ```
+## Jetson Nano Setup (Ubuntu 20.04 / Python 3.10)
 
-## Jetson Nano Setup Commands
-SSH into the Jetson (`ssh jetson-nano`) and execute the following once per device.
-
+### 1. System Dependencies
 ```bash
-sudo apt update && sudo apt install -y python3-venv python3-pip python3-opencv \
-    gstreamer1.0-tools gstreamer1.0-plugins-{base,good,bad} \
-    gstreamer1.0-nvcodec ffmpeg libssl-dev libffi-dev pkg-config \
-    libyaml-dev git curl wget
+sudo apt update && sudo apt install -y \
+    python3-venv python3-pip \
+    ffmpeg libsm6 libxext6 \
+    libxml2-dev libxslt1-dev \
+    git curl wget
+```
 
-# Optional but recommended: install ONVIF client dependencies
-sudo apt install -y libxml2-dev libxslt1-dev
+### 2. Project Setup
+```bash
+# Clone repo (if not already done)
+git clone https://github.com/bpasker/animaltracker.git
+cd animaltracker
 
-# Mount SSD (example assumes already partitioned as /dev/nvme0n1p1)
-sudo mkdir -p /mnt/wildlife_ssd
-sudo blkid /dev/nvme0n1p1 | sudo tee /etc/wildlife_ssd.blkid
-sudo sh -c "echo '/dev/nvme0n1p1 /mnt/wildlife_ssd ext4 defaults,noatime 0 2' >> /etc/fstab"
-sudo mount -a
-sudo chown jetson:jetson /mnt/wildlife_ssd
+# Create directories
+mkdir -p ~/animaltracker/storage ~/animaltracker/logs ~/animaltracker/models
 
-# Create project user directories
-mkdir -p ~/animaltracker ~/animaltracker/config ~/animaltracker/logs
-
-# Python environment
-cd ~/animaltracker
+# Create Virtual Environment
 python3 -m venv .venv
 source .venv/bin/activate
+
+# Install Dependencies (Pinned for compatibility)
 pip install --upgrade pip wheel setuptools
-pip install -e .[jetson]
-
-# Install YOLO runtime (Ultralytics)
-pip install ultralytics==8.3.4
-# Jetson-specific torch wheel (example for JetPack 5.x / PyTorch 2.1)
-wget https://developer.download.nvidia.com/compute/redist/jp/v51/pytorch/torch-2.1.0-cp38-cp38-linux_aarch64.whl
-pip install torch-2.1.0-cp38-cp38-linux_aarch64.whl torchvision torchaudio
-
-# Set up environment files
-cp config/cameras.sample.yml config/cameras.yml  # edit with real values
-cp config/secrets.sample.env config/secrets.env  # contains Pushover/ONVIF secrets
-
-# Enable systemd units
-sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable detector@cam1.service
-sudo systemctl enable ssd-cleaner.service ssd-cleaner.timer
-sudo systemctl start ssd-cleaner.timer
+# Note: We pin numpy<2 and opencv-python-headless<4.10 for compatibility
+pip install -e .
 ```
 
-> Adjust the torch wheel URL to match your JetPack + Python version; refer to NVIDIA PyTorch for Jetson docs.
-
-## Key Commands During Operation
-- Manual pipeline run: `source .venv/bin/activate && python -m animaltracker.cli run --config config/cameras.yml`
-- ONVIF sweep: `python -m animaltracker.cli discover --iface eth0`
-- Cleanup job dry-run: `python -m animaltracker.cli cleanup --config config/cameras.yml --dry-run`
-- View metrics: `curl http://localhost:9500/metrics`
-
-## Configuration Files
-- `config/cameras.yml` – list of cameras, RTSP pipeline strings, thresholds, exclusion lists.
-- `config/secrets.env` – exported environment variables consumed by systemd units for Pushover keys, ONVIF passwords, etc.
-
-## Systemd Deployment Cheatsheet
+### 3. Download Model
+Download the YOLO11 Nano model (optimized for edge devices):
 ```bash
-sudo systemctl enable detector@cam1.service detector@cam2.service
-sudo systemctl restart detector@cam1.service
-sudo journalctl -u detector@cam1.service -f
+wget -O models/yolo11n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt
 ```
 
-## Testing & Validation
-- Use `tests/fixtures/*.mp4` (add your own) with `rtsp-simple-server` locally to simulate streams.
-- Run `pytest` (if you add tests) before deploying.
-- Validate ONVIF control via `python -m animaltracker.cli discover --inspect cam1`.
+### 4. Configuration
+1.  **Secrets**: Copy `config/secrets.sample.env` to `config/secrets.env` and edit:
+    ```bash
+    cp config/secrets.sample.env config/secrets.env
+    nano config/secrets.env
+    ```
+2.  **Cameras**: Copy `config/cameras.sample.yml` to `config/cameras.yml` and edit:
+    ```bash
+    cp config/cameras.sample.yml config/cameras.yml
+    nano config/cameras.yml
+    ```
+    *Tip: For Reolink TrackMix, use the sub-stream (`h264Preview_01_sub`) and TCP transport.*
+
+## Running the Application
+
+### Manual Run (Testing)
+```bash
+source .venv/bin/activate
+python -m animaltracker.cli --config config/cameras.yml run --model models/yolo11n.pt
+```
+
+### Test Notifications
+```bash
+source .venv/bin/activate
+python scripts/test_pushover.py
+```
+
+### Systemd Service (Auto-start)
+1.  Edit the service files in `systemd/` to match your user/paths if different from default.
+2.  Install services:
+    ```bash
+    sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+    
+    # Enable and start for specific cameras
+    sudo systemctl enable --now detector@cam1.service
+    sudo systemctl enable --now detector@cam2.service
+    
+    # Enable cleanup timer
+    sudo systemctl enable --now ssd-cleaner.timer
+    ```
+
+## Troubleshooting
+
+### "numpy.core.multiarray failed to import"
+Ensure you have compatible versions installed:
+```bash
+pip uninstall -y opencv-python opencv-python-headless numpy
+pip install "numpy<2" "opencv-python-headless<4.10"
+```
+
+### "Unable to open RTSP stream"
+- Check if the camera URL is correct (use VLC to verify).
+- Ensure `transport: tcp` is set in `cameras.yml`.
+- Try using the sub-stream (lower resolution, H.264) which is more stable on Jetson.
+
+### "PPS changed between slices" (FFmpeg/OpenCV)
+This usually happens with H.265 streams on software decoding. Switch to the H.264 sub-stream in your camera config.
 
 ## Next Steps
 - Flesh out YOLO model training/export pipeline.

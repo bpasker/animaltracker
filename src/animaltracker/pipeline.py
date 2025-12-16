@@ -15,7 +15,7 @@ import numpy as np
 from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
-from .detector import Detection, YoloDetector
+from .detector import Detection, BaseDetector, create_detector
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
@@ -64,7 +64,7 @@ class StreamWorker:
         self,
         camera: CameraConfig,
         runtime: RuntimeConfig,
-        detector: YoloDetector,
+        detector: BaseDetector,
         notifier: PushoverNotifier,
         storage: StorageManager,
     ) -> None:
@@ -160,6 +160,10 @@ class StreamWorker:
         # Frame skipping counter
         frame_count = 0
         skip_factor = self.camera.rtsp.frame_skip
+        
+        # Track if inference is in progress (for non-blocking detection)
+        inference_task: Optional[asyncio.Task] = None
+        pending_frame: Optional[tuple[np.ndarray, float]] = None
 
         while not stop_event.is_set():
             loop = asyncio.get_running_loop()
@@ -201,8 +205,28 @@ class StreamWorker:
                         continue
 
                     if self.camera.detect_enabled:
-                        await self._process_frame(frame, frame_ts)
+                        # Non-blocking inference: if previous inference is done, process result
+                        # and start new one. If still running, drop this frame for inference.
+                        if inference_task is not None:
+                            if inference_task.done():
+                                # Process completed inference result
+                                try:
+                                    await inference_task
+                                except Exception as e:
+                                    LOGGER.error("Inference error for %s: %s", self.camera.id, e)
+                                inference_task = None
+                            else:
+                                # Still running - drop this frame for inference (but it's still buffered)
+                                continue
+                        
+                        # Start new inference task
+                        inference_task = asyncio.create_task(
+                            self._process_frame(frame.copy(), frame_ts)
+                        )
             finally:
+                # Cancel any pending inference
+                if inference_task and not inference_task.done():
+                    inference_task.cancel()
                 # Offload release to thread
                 await loop.run_in_executor(None, cap.release)
             
@@ -327,7 +351,18 @@ class PipelineOrchestrator:
         camera_filter: Optional[List[str]] = None,
     ) -> None:
         self.runtime = runtime
-        self.detector = YoloDetector(model_path=model_path)
+        
+        # Create detector from config settings
+        detector_cfg = runtime.general.detector
+        self.detector = create_detector(
+            backend=detector_cfg.backend,
+            model_path=model_path or detector_cfg.model_path,
+            model_version=detector_cfg.speciesnet_version,
+            country=detector_cfg.country,
+            admin1_region=detector_cfg.admin1_region,
+        )
+        LOGGER.info(f"Using {self.detector.backend_name} detector backend")
+        
         self.notifier = PushoverNotifier(
             runtime.general.notification.pushover_app_token_env,
             runtime.general.notification.pushover_user_key_env,

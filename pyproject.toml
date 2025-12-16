@@ -28,6 +28,9 @@ jetson = [
     "jetson-stats>=4.2",
     "psutil>=5.9",
 ]
+speciesnet = [
+    "speciesnet>=1.0",
+]
 
 dynamic = ["scripts"]
 

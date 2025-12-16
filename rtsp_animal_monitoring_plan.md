@@ -1,7 +1,7 @@
 # RTSP Animal Monitoring Implementation Plan
 
 ## 1. Goals & Success Criteria
-- Detect animals in near real-time from an RTSP stream using the latest YOLO model on a Jetson Nano.
+- Detect animals in near real-time from an RTSP stream using CameraTrapAI on a Jetson Nano.
 - Identify animal class, capture short clips around each detection, and push notifications via Pushover.
 - Keep the pipeline resilient to RTSP dropouts and provide basic observability (metrics/logs).
 - Support multiple RTSP feeds concurrently with per-camera alerting, clip retention, and resource controls.
@@ -18,7 +18,7 @@
 
 ## 3. High-Level Architecture
 1. **RTSP Ingest**: GStreamer (or FFmpeg) pipeline running continuously, decoding frames on GPU.
-2. **Inference Engine**: YOLO model (e.g., YOLOv8) converted to TensorRT via Ultralytics export or DeepStream nvinfer plugin.
+2. **Inference Engine**: CameraTrapAI model or runtime; optionally integrate through DeepStream or a TensorRT engine where applicable.
 3. **Event Logic**: Detection aggregator decides when an animal event starts/ends and tags species/confidence.
 4. **Clip Buffer**: Circular frame buffer retains pre/post event footage, encodes to MP4/H.264 when an event fires.
 5. **Notification Service**: Sends Pushover message with metadata and clip link; optional upload to S3/NAS.
@@ -26,7 +26,7 @@
 7. **Multi-Camera Orchestrator**: Manages per-stream workers, schedules GPU time, and aggregates alerts for centralized control.
 
 ```
-RTSP Cameras (A…N) → Stream Workers → YOLO Inference → Event Logic
+RTSP Cameras (A…N) → Stream Workers → CameraTrapAI Inference → Event Logic
                            ↓                ↓
                   Circular Buffer     Notification Hub
                            ↓                ↓
@@ -40,11 +40,11 @@ RTSP Cameras (A…N) → Stream Workers → YOLO Inference → Event Logic
 - Optionally leverage NVIDIA DeepStream `deepstream-app` pipeline if more convenient.
 - Pair each RTSP URL with ONVIF-derived connection info to auto-refresh credentials and verify stream health/metadata before launching workers.
 
-### 4.2 YOLO Inference
-- Train/fine-tune YOLO model if needed for specific animal classes; export to ONNX then TensorRT.
+### 4.2 CameraTrapAI Inference
+- Train/fine-tune CameraTrapAI model if needed for specific animal classes; export to formats or runtimes your deployment uses (e.g., ONNX/TensorRT, or CameraTrapAI model format).
 - Run via:
   - **DeepStream**: `nvinfer` plugin referencing TensorRT engine, enabling batching and GPU inference.
-  - **Ultralytics + TensorRT**: Python loop loading TensorRT engine through `tensorrt` + `pycuda` for flexibility.
+  - **Ultralytics + TensorRT / CameraTrapAI**: Python loop loading TensorRT engine through `tensorrt` + `pycuda` or CameraTrapAI runtime for flexibility.
 - Maintain minimum 15 FPS throughput; adjust input resolution or use INT8 quantization if needed.
 
 ### 4.3 Detection Event Logic
@@ -103,8 +103,8 @@ RTSP Cameras (A…N) → Stream Workers → YOLO Inference → Event Logic
 
 ## 5. Implementation Phases & Checkpoints
 ### Phase 1 — Prototype Pipeline (Week 1)
-- **Objectives**: confirm RTSP ingest reliability, YOLO inference throughput, and clip extraction on a single stream.
-- **Tasks**: build minimal GStreamer → YOLO loop, log detections, write manual clip via ffmpeg, capture baseline GPU/FPS metrics.
+- **Objectives**: confirm RTSP ingest reliability, CameraTrapAI inference throughput, and clip extraction on a single stream.
+- **Tasks**: build minimal GStreamer → CameraTrapAI loop, log detections, write manual clip via ffmpeg, capture baseline GPU/FPS metrics.
 - **Exit criteria**: ≥15 FPS sustained, <70% GPU utilization, prototype clip playable, metrics/logging enabled, ONVIF discovery returns expected RTSP profile info for test camera.
 - **Tests**: replay canned RTSP sample, inject stream drop to verify reconnect, manually review detection output.
 
@@ -151,7 +151,7 @@ RTSP Cameras (A…N) → Stream Workers → YOLO Inference → Event Logic
 - **Notification spam** → enforce cooldown windows and severity-based routing.
 
 ## 8. Next Steps & Deliverables
-- Choose inference stack (DeepStream vs Ultralytics TensorRT) and finalize YOLO variant.
+- Choose inference stack (DeepStream vs CameraTrapAI/TensorRT) and finalize model variant.
 - Build proof-of-concept pipeline script and collect performance metrics.
 - Define clip storage retention rules and security (file permissions, optional encryption).
 - Implement SSD cleanup timer/service and document manual override commands.

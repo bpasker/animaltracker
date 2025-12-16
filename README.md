@@ -1,6 +1,6 @@
 # Animal Tracker RTSP Monitoring
 
-YOLO + RTSP + ONVIF pipeline for multi-camera animal detection on a Jetson Nano, developed from macOS and deployed remotely over SSH.
+CameraTrapAI + RTSP + ONVIF pipeline for multi-camera animal detection on a Jetson Nano, developed from macOS and deployed remotely over SSH.
 
 ## Repository Layout
 - `rtsp_animal_monitoring_plan.md` – high-level implementation plan and phases.
@@ -37,12 +37,18 @@ source .venv/bin/activate
 pip install --upgrade pip wheel setuptools
 # Note: We pin numpy<2 and opencv-python-headless<4.10 for compatibility
 pip install -e .
+# Install the CameraTrapAI runtime (or use the 'yolo' optional extra to enable Ultralytics):
+# pip install -e .[cameratrapai]
+# pip install -e .[yolo]
 ```
 
-### 3. Download Model
-Download the YOLO11 Nano model (optimized for edge devices):
+### 3. Install Model/Runtime
+Install the CameraTrapAI runtime and any models you plan to use. If you have a pre-trained CameraTrapAI model, place it in `models/` and pass the path with `--model`.
+
+For example, using pip:
 ```bash
-wget -O models/yolo11n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt
+pip install cameratrapai
+# Optionally add your model files to models/ or point to a registry key
 ```
 
 ### 4. Configuration
@@ -76,7 +82,7 @@ If you don't know the RTSP URL for your camera, you can use the `discover` comma
 ```bash
 cd ~/animaltracker/
 source .venv/bin/activate
-python -m animaltracker.cli --config config/cameras.yml run --model models/yolo11n.pt
+python -m animaltracker.cli --config config/cameras.yml run --engine cameratrapai --model models/your_ctai_model
 ```
 
 ### Test Notifications
@@ -119,6 +125,6 @@ pip install "numpy<2" "opencv-python-headless<4.10"
 This usually happens with H.265 streams on software decoding. Switch to the H.264 sub-stream in your camera config.
 
 ## Next Steps
-- Flesh out YOLO model training/export pipeline.
+- Flesh out CameraTrapAI model training/export pipeline.
 - Hook storage cleanup alerts into Pushover for disk thresholds.
 - Expand CLI to cover PTZ patrol scripts and remote firmware health checks.

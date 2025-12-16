@@ -43,6 +43,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     orchestrator = PipelineOrchestrator(
         runtime=runtime,
         model_path=args.model,
+        engine=args.engine,
         camera_filter=args.camera if args.camera else None,
     )
     target_cams = args.camera if args.camera else [cam.id for cam in runtime.cameras]
@@ -93,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_cmd = sub.add_parser("run", help="Run streaming pipeline")
-    run_cmd.add_argument("--model", default="yolov8n.pt", help="YOLO model path")
+    run_cmd.add_argument("--model", default=None, help="Model path or model key for the chosen engine")
+    run_cmd.add_argument("--engine", choices=["yolo", "cameratrapai"], default="cameratrapai", help="Detector engine to use")
     run_cmd.add_argument(
         "--camera",
         action="append",

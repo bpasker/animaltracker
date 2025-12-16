@@ -16,7 +16,7 @@ dependencies = [
     "requests>=2.31",
     "tqdm>=4.66",
     "onvif-zeep>=0.2.12",
-    "ultralytics>=8.3.0",
+    "cameratrapai>=0.1.0",
     "prometheus-client>=0.17",
     "aiohttp>=3.9",
     "pydantic>=2.7",
@@ -27,6 +27,14 @@ dependencies = [
 jetson = [
     "jetson-stats>=4.2",
     "psutil>=5.9",
+]
+
+yolo = [
+    "ultralytics>=8.3.0",
+]
+
+cameratrapai = [
+    "cameratrapai>=0.1.0",
 ]
 
 dynamic = ["scripts"]

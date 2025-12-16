@@ -15,7 +15,7 @@ import numpy as np
 from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
-from .detector import Detection, YoloDetector
+from .detector import Detection, create_detector, DetectorProtocol
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
@@ -64,7 +64,7 @@ class StreamWorker:
         self,
         camera: CameraConfig,
         runtime: RuntimeConfig,
-        detector: YoloDetector,
+        detector: DetectorProtocol,
         notifier: PushoverNotifier,
         storage: StorageManager,
     ) -> None:
@@ -323,11 +323,12 @@ class PipelineOrchestrator:
     def __init__(
         self,
         runtime: RuntimeConfig,
-        model_path: str = "yolov8n.pt",
+        model_path: str | None = None,
+        engine: str = "cameratrapai",
         camera_filter: Optional[List[str]] = None,
     ) -> None:
         self.runtime = runtime
-        self.detector = YoloDetector(model_path=model_path)
+        self.detector = create_detector(engine, model_path=model_path)
         self.notifier = PushoverNotifier(
             runtime.general.notification.pushover_app_token_env,
             runtime.general.notification.pushover_user_key_env,

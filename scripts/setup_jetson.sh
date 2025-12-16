@@ -25,7 +25,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip wheel setuptools
 pip install -e .[jetson]
-pip install ultralytics==8.3.4
+# Install CameraTrapAI runtime by default; uncomment the Yolo extra if you need Ultralytics
+pip install -e .[cameratrapai]
+# pip install -e .[yolo]  # optional: enables ultralytics
 
 if [[ ! -f config/cameras.yml ]]; then
   cp config/cameras.sample.yml config/cameras.yml

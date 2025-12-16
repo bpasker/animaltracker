@@ -128,9 +128,10 @@ class SpeciesNetDetector(BaseDetector):
         self.admin1_region = admin1_region
         self.model_version = model_version
         
-        # Initialize SpeciesNet model (downloads weights automatically)
+        # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
         LOGGER.info(f"Loading SpeciesNet {model_version}...")
-        self._model = SpeciesNet(model_name=f"google/speciesnet/pyTorch/{model_version}")
+        model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
+        self._model = SpeciesNet(model_name)
         LOGGER.info(f"SpeciesNet loaded (country={country}, region={admin1_region})")
     
     @property

@@ -21,6 +21,17 @@ class ClipSettings(BaseModel):
     codec: str = "h264"
 
 
+class DetectorSettings(BaseModel):
+    """Configuration for the detection backend."""
+    backend: str = Field(default="yolo", pattern="^(yolo|speciesnet)$")
+    # YOLO settings
+    model_path: str = "yolov8n.pt"
+    # SpeciesNet settings
+    speciesnet_version: str = "v4.0.2a"  # v4.0.2a (crop) or v4.0.2b (full-image)
+    country: Optional[str] = None  # ISO 3166-1 alpha-3 (e.g., "USA")
+    admin1_region: Optional[str] = None  # State code for US (e.g., "CA")
+
+
 class RetentionSettings(BaseModel):
     min_days: int = Field(default=7, ge=1)
     max_days: int = Field(default=30, ge=1)
@@ -98,6 +109,7 @@ class GeneralSettings(BaseModel):
     logs_root: str
     metrics_port: int = 9500
     clip: ClipSettings = ClipSettings()
+    detector: DetectorSettings = DetectorSettings()
     exclusion_list: List[str] = Field(default_factory=list)
     notification: NotificationSettings
     retention: RetentionSettings = RetentionSettings()

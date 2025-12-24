@@ -370,6 +370,7 @@ class PipelineOrchestrator:
         self.storage = StorageManager(
             storage_root=Path(self.runtime.general.storage_root),
             logs_root=Path(self.runtime.general.logs_root),
+            max_utilization_pct=self.runtime.general.retention.max_utilization_pct,
         )
         cameras = runtime.cameras
         if camera_filter:

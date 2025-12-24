@@ -189,10 +189,10 @@ class SpeciesNetDetector(BaseDetector):
             species = pred.get("prediction", "unknown")
             score = pred.get("prediction_score", 0.0)
             
-            # Skip low confidence or blanks
+            # Skip low confidence, blanks, or non-animal categories
             if score < conf_threshold:
                 continue
-            if species in ("blank", "unknown"):
+            if species.lower() in ("blank", "unknown", "empty", "vehicle"):
                 continue
             
             # Extract bounding box from detections if available
@@ -215,6 +215,10 @@ class SpeciesNetDetector(BaseDetector):
             
             # Map common SpeciesNet labels to simpler names
             display_species = self._simplify_species_name(species)
+            
+            # Double-check: skip blank/unknown after simplification too
+            if display_species.lower() in ("blank", "unknown", "empty"):
+                continue
             
             detections.append(Detection(
                 species=display_species,

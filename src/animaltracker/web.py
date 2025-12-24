@@ -5,7 +5,10 @@ import numpy as np
 from aiohttp import web
 from typing import Dict, TYPE_CHECKING
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# Central Standard Time (UTC-6)
+CST = timezone(timedelta(hours=-6), 'CST')
 
 if TYPE_CHECKING:
     from .pipeline import StreamWorker
@@ -387,7 +390,7 @@ class WebServer:
                 'camera': camera,
                 'date': 'Manual',
                 'filename': clip_file.name,
-                'time': datetime.fromtimestamp(stat.st_mtime),
+                'time': datetime.fromtimestamp(stat.st_mtime, tz=CST),
                 'size': stat.st_size,
                 'species': 'Manual clip'
             })
@@ -407,9 +410,9 @@ class WebServer:
                 clips.append({
                     'path': str(rel_path),
                     'camera': cam_dir.name,
-                    'date': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d'),
+                    'date': datetime.fromtimestamp(stat.st_mtime, tz=CST).strftime('%Y-%m-%d'),
                     'filename': clip_file.name,
-                    'time': datetime.fromtimestamp(stat.st_mtime),
+                    'time': datetime.fromtimestamp(stat.st_mtime, tz=CST),
                     'size': stat.st_size,
                     'species': species
                 })

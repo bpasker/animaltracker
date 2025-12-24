@@ -84,7 +84,6 @@ class StreamWorker:
         # Initialize ONVIF client if configured
         self.onvif_client: Optional[OnvifClient] = None
         self.onvif_profile_token: Optional[str] = None
-        self.peer_worker: Optional[StreamWorker] = None
         
         if camera.onvif.host:
             user, password = camera.onvif.credentials()
@@ -102,31 +101,6 @@ class StreamWorker:
                         self.onvif_profile_token = profiles[0].metadata.get("token")
                 except Exception as e:
                     LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
-
-    def track_target(self, x: float, y: float) -> None:
-        """Move PTZ to target coordinates (0..1)."""
-        if not self.onvif_client or not self.onvif_profile_token:
-            return
-            
-        # Map 0..1 to -1..1 (or configured scale)
-        # Center is 0.5 -> 0.0
-        pan = (x - 0.5) * self.camera.tracking.pan_scale
-        tilt = (y - 0.5) * self.camera.tracking.tilt_scale
-        
-        # Clamp to -1..1
-        pan = max(-1.0, min(1.0, pan))
-        tilt = max(-1.0, min(1.0, tilt))
-        
-        # Use AbsoluteMove if supported, otherwise this logic needs ContinuousMove with feedback loop
-        # For now, we assume AbsoluteMove works for "Slew to Cue"
-        try:
-            # Run in thread to avoid blocking
-            threading.Thread(
-                target=self.onvif_client.ptz_move_absolute,
-                args=(self.onvif_profile_token, pan, tilt, 0.0)
-            ).start()
-        except Exception as e:
-            LOGGER.warning(f"Failed to track target on {self.camera.id}: {e}")
 
     def save_manual_clip(self) -> Optional[str]:
         """Save the last 30 seconds of video buffer as a manual clip."""
@@ -242,15 +216,6 @@ class StreamWorker:
             self.camera.thresholds.confidence
         )
         filtered = self._filter_detections(detections)
-        
-        # Tracking Logic
-        if filtered and self.camera.tracking.enabled and self.peer_worker:
-            # Find the most confident detection
-            target = max(filtered, key=lambda d: d.confidence)
-            # Calculate centroid (0..1)
-            cx = (target.bbox[0] + target.bbox[2]) / 2
-            cy = (target.bbox[1] + target.bbox[3]) / 2
-            self.peer_worker.track_target(cx, cy)
 
         if not filtered:
             self.pending_detection_start_ts = None
@@ -509,16 +474,7 @@ class PipelineOrchestrator:
             for cam in self.cameras
         ]
         
-        # Link workers for tracking
         worker_map = {w.camera.id: w for w in workers}
-        for w in workers:
-            if w.camera.tracking.target_camera_id:
-                target = worker_map.get(w.camera.tracking.target_camera_id)
-                if target:
-                    w.peer_worker = target
-                    LOGGER.info(f"Linked camera {w.camera.id} to target {target.camera.id}")
-                else:
-                    LOGGER.warning(f"Target camera {w.camera.tracking.target_camera_id} not found for {w.camera.id}")
 
         # Start web server
         web_server = WebServer(

@@ -7,8 +7,45 @@ from typing import Dict, TYPE_CHECKING
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-# Central Standard Time (UTC-6)
-CST = timezone(timedelta(hours=-6), 'CST')
+# Central Time with automatic DST handling
+try:
+    from zoneinfo import ZoneInfo
+    CENTRAL_TZ = ZoneInfo("America/Chicago")
+except ImportError:
+    # Fallback for Python < 3.9: manual DST calculation
+    class CentralTime(timezone):
+        """Central Time with DST support (CST/CDT)."""
+        def __init__(self):
+            super().__init__(timedelta(hours=-6), 'CST')
+        
+        def utcoffset(self, dt):
+            if self._is_dst(dt):
+                return timedelta(hours=-5)  # CDT
+            return timedelta(hours=-6)  # CST
+        
+        def tzname(self, dt):
+            return 'CDT' if self._is_dst(dt) else 'CST'
+        
+        def _is_dst(self, dt):
+            """Check if DST is in effect (2nd Sunday March - 1st Sunday November)."""
+            if dt is None:
+                return False
+            year = dt.year
+            # DST starts 2nd Sunday of March at 2:00 AM
+            march_start = datetime(year, 3, 8)  # Earliest possible 2nd Sunday
+            while march_start.weekday() != 6:  # Find Sunday
+                march_start += timedelta(days=1)
+            dst_start = march_start.replace(hour=2)
+            
+            # DST ends 1st Sunday of November at 2:00 AM
+            nov_start = datetime(year, 11, 1)
+            while nov_start.weekday() != 6:  # Find Sunday
+                nov_start += timedelta(days=1)
+            dst_end = nov_start.replace(hour=2)
+            
+            return dst_start <= dt.replace(tzinfo=None) < dst_end
+    
+    CENTRAL_TZ = CentralTime()
 
 if TYPE_CHECKING:
     from .pipeline import StreamWorker
@@ -26,7 +63,6 @@ class WebServer:
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
-        self.app.router.add_post('/tracking/{camera_id}', self.handle_toggle_tracking)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
@@ -111,9 +147,30 @@ class WebServer:
                     .ptz-controls { 
                         margin-top: 12px; 
                         background: #222; 
-                        padding: 12px; 
-                        border-radius: 8px; 
+                        border-radius: 8px;
+                        overflow: hidden;
                     }
+                    .ptz-header {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        padding: 12px;
+                        cursor: pointer;
+                        user-select: none;
+                    }
+                    .ptz-header:hover { background: #333; }
+                    .ptz-header span { font-size: 0.9em; color: #aaa; }
+                    .ptz-toggle { 
+                        font-size: 0.8em; 
+                        color: #666;
+                        transition: transform 0.2s;
+                    }
+                    .ptz-controls.expanded .ptz-toggle { transform: rotate(180deg); }
+                    .ptz-content {
+                        display: none;
+                        padding: 0 12px 12px 12px;
+                    }
+                    .ptz-controls.expanded .ptz-content { display: block; }
                     .ptz-grid {
                         display: grid;
                         grid-template-columns: repeat(3, 1fr);
@@ -137,19 +194,6 @@ class WebServer:
                         border-top: 1px solid #333;
                     }
                     .ptz-zoom button { flex: 1; }
-                    .tracking-toggle { 
-                        margin-top: 12px; 
-                        padding: 12px; 
-                        background: #222; 
-                        border-radius: 8px; 
-                    }
-                    .tracking-toggle label { 
-                        display: flex; 
-                        align-items: center; 
-                        justify-content: space-between; 
-                        cursor: pointer;
-                        font-size: 0.95em;
-                    }
                     .toggle-switch {
                         position: relative;
                         width: 50px;
@@ -204,6 +248,11 @@ class WebServer:
                     }
                     setInterval(refreshImages, 2000);
 
+                    function togglePtz(element) {
+                        const ptzControls = element.closest('.ptz-controls');
+                        ptzControls.classList.toggle('expanded');
+                    }
+
                     async function saveClip(camId) {
                         try {
                             const response = await fetch('/save_clip/' + camId, { method: 'POST' });
@@ -211,23 +260,6 @@ class WebServer:
                             alert(text);
                         } catch (e) {
                             alert('Error saving clip: ' + e);
-                        }
-                    }
-
-                    async function toggleTracking(camId, checkbox) {
-                        try {
-                            const response = await fetch('/tracking/' + camId, {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({ enabled: checkbox.checked })
-                            });
-                            if (!response.ok) {
-                                alert('Failed to toggle tracking');
-                                checkbox.checked = !checkbox.checked;
-                            }
-                        } catch (e) {
-                            alert('Error toggling tracking: ' + e);
-                            checkbox.checked = !checkbox.checked;
                         }
                     }
 
@@ -264,37 +296,27 @@ class WebServer:
             if worker.onvif_client and worker.onvif_profile_token:
                 ptz_html = f"""
                     <div class="ptz-controls">
-                        <div class="ptz-grid">
-                            <div></div>
-                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▲</button>
-                            <div></div>
-                            <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', -1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">◄</button>
-                            <div></div>
-                            <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">►</button>
-                            <div></div>
-                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, -1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▼</button>
-                            <div></div>
+                        <div class="ptz-header" onclick="togglePtz(this)">
+                            <span>PTZ Controls</span>
+                            <span class="ptz-toggle">▼</span>
                         </div>
-                        <div class="ptz-zoom">
-                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom +</button>
-                            <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom -</button>
-                        </div>
-                    </div>
-                """
-
-            tracking_html = ""
-            if worker.camera.tracking.target_camera_id:
-                checked = "checked" if worker.camera.tracking.enabled else ""
-                target_cam = worker.camera.tracking.target_camera_id
-                tracking_html = f"""
-                    <div class="tracking-toggle">
-                        <label>
-                            <span>Auto-Track {target_cam}</span>
-                            <div class="toggle-switch">
-                                <input type="checkbox" {checked} onchange="toggleTracking('{cam_id}', this)">
-                                <span class="toggle-slider"></span>
+                        <div class="ptz-content">
+                            <div class="ptz-grid">
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▲</button>
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', -1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">◄</button>
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">►</button>
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, -1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▼</button>
+                                <div></div>
                             </div>
-                        </label>
+                            <div class="ptz-zoom">
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom +</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom -</button>
+                            </div>
+                        </div>
                     </div>
                 """
 
@@ -306,7 +328,6 @@ class WebServer:
                         </div>
                         <img src="/snapshot/{cam_id}" data-src="/snapshot/{cam_id}" alt="{cam_name}">
                         <button onclick="saveClip('{cam_id}')">Save Last 30s</button>
-                        {tracking_html}
                         {ptz_html}
                     </div>
             """
@@ -317,22 +338,6 @@ class WebServer:
         </html>
         """
         return web.Response(text=html, content_type='text/html')
-
-    async def handle_toggle_tracking(self, request):
-        camera_id = request.match_info['camera_id']
-        worker = self.workers.get(camera_id)
-        
-        if not worker:
-            return web.Response(status=404, text="Camera not found")
-            
-        try:
-            data = await request.json()
-            enabled = bool(data.get('enabled'))
-            worker.camera.tracking.enabled = enabled
-            LOGGER.info(f"Tracking on {camera_id} set to {enabled}")
-            return web.Response(text="OK")
-        except Exception as e:
-            return web.Response(status=400, text=str(e))
 
     async def handle_ptz(self, request):
         camera_id = request.match_info['camera_id']
@@ -390,7 +395,7 @@ class WebServer:
                 'camera': camera,
                 'date': 'Manual',
                 'filename': clip_file.name,
-                'time': datetime.fromtimestamp(stat.st_mtime, tz=CST),
+                'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
                 'size': stat.st_size,
                 'species': 'Manual clip'
             })
@@ -410,9 +415,9 @@ class WebServer:
                 clips.append({
                     'path': str(rel_path),
                     'camera': cam_dir.name,
-                    'date': datetime.fromtimestamp(stat.st_mtime, tz=CST).strftime('%Y-%m-%d'),
+                    'date': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ).strftime('%Y-%m-%d'),
                     'filename': clip_file.name,
-                    'time': datetime.fromtimestamp(stat.st_mtime, tz=CST),
+                    'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
                     'size': stat.st_size,
                     'species': species
                 })

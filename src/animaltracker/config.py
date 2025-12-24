@@ -78,14 +78,6 @@ class CameraNotificationSettings(BaseModel):
     sound: Optional[str] = None
 
 
-class TrackingSettings(BaseModel):
-    target_camera_id: Optional[str] = None
-    enabled: bool = False
-    # Mapping factors (simple linear map from 0..1 to -1..1)
-    pan_scale: float = 2.0  # (x - 0.5) * scale
-    tilt_scale: float = 2.0 # (y - 0.5) * scale
-
-
 class CameraConfig(BaseModel):
     id: str
     name: str
@@ -94,7 +86,6 @@ class CameraConfig(BaseModel):
     onvif: ONVIFSettings
     thresholds: ThresholdSettings = ThresholdSettings()
     detect_enabled: bool = True
-    tracking: TrackingSettings = TrackingSettings()
     include_species: List[str] = Field(default_factory=list)
     exclude_species: List[str] = Field(default_factory=list)
     notification: CameraNotificationSettings = CameraNotificationSettings()

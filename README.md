@@ -147,3 +147,8 @@ This usually happens with H.265 streams on software decoding. Switch to the H.26
 
 #CHECK GPU Usage
 nvidia-smi -l 1
+
+systemctl restart detector@cam2
+
+
+journalctl -u detector@cam2 --since "30 minutes ago"

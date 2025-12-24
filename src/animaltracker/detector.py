@@ -234,53 +234,157 @@ class SpeciesNetDetector(BaseDetector):
     def _simplify_species_name(self, taxonomy: str) -> str:
         """Convert taxonomy label to display-friendly name.
         
-        SpeciesNet returns labels like 'odocoileus_virginianus' (white-tailed deer).
-        This maps common ones to readable names.
+        SpeciesNet returns complex labels like:
+        - 'odocoileus_virginianus' (scientific name)
+        - '1F689929-...;;;;;;Animal' (UUID + hierarchy)
+        - 'B1352069-...;Aves;;;;;Bird' (UUID + taxonomy path)
+        
+        This extracts clean, human-readable names.
         """
+        import re
+        
         SPECIES_MAP = {
             # Deer
-            "odocoileus_virginianus": "deer",
-            "odocoileus_hemionus": "deer",
+            "odocoileus_virginianus": "whitetail deer",
+            "odocoileus_hemionus": "mule deer",
             "cervus_elaphus": "elk",
             "alces_alces": "moose",
             # Bears
-            "ursus_americanus": "bear",
-            "ursus_arctos": "bear",
+            "ursus_americanus": "black bear",
+            "ursus_arctos": "grizzly bear",
             # Cats
             "felis_catus": "cat",
-            "puma_concolor": "mountain_lion",
+            "puma_concolor": "mountain lion",
             "lynx_rufus": "bobcat",
+            "lynx_canadensis": "lynx",
             # Dogs/Canids
             "canis_familiaris": "dog",
             "canis_latrans": "coyote",
-            "vulpes_vulpes": "fox",
-            "urocyon_cinereoargenteus": "fox",
+            "canis_lupus": "wolf",
+            "vulpes_vulpes": "red fox",
+            "urocyon_cinereoargenteus": "gray fox",
             # Other mammals
             "procyon_lotor": "raccoon",
             "didelphis_virginiana": "opossum",
             "mephitis_mephitis": "skunk",
             "sylvilagus": "rabbit",
+            "sylvilagus_floridanus": "cottontail rabbit",
+            "lepus": "hare",
             "sciurus": "squirrel",
-            "sus_scrofa": "wild_boar",
-            # Birds
-            "meleagris_gallopavo": "turkey",
+            "sciurus_carolinensis": "gray squirrel",
+            "sus_scrofa": "wild boar",
+            "pecari_tajacu": "javelina",
+            "nasua_narica": "coati",
+            "taxidea_taxus": "badger",
+            "lontra_canadensis": "river otter",
+            "mustela": "weasel",
+            "neovison_vison": "mink",
+            "castor_canadensis": "beaver",
+            "erethizon_dorsatum": "porcupine",
+            "marmota": "marmot",
+            # Birds - common species
+            "meleagris_gallopavo": "wild turkey",
+            "aves": "bird",
+            "bird": "bird",
+            "corvus_brachyrhynchos": "american crow",
+            "corvus_corax": "common raven",
+            "haliaeetus_leucocephalus": "bald eagle",
+            "buteo_jamaicensis": "red-tailed hawk",
+            "buteo": "hawk",
+            "accipiter": "hawk",
+            "strix_varia": "barred owl",
+            "bubo_virginianus": "great horned owl",
+            "megascops": "screech owl",
+            "zenaida_macroura": "mourning dove",
+            "branta_canadensis": "canada goose",
+            "anas_platyrhynchos": "mallard duck",
+            "ardea_herodias": "great blue heron",
+            "cathartes_aura": "turkey vulture",
+            "coragyps_atratus": "black vulture",
+            "phasianus_colchicus": "pheasant",
+            "colinus_virginianus": "bobwhite quail",
+            "geococcyx_californianus": "roadrunner",
             # Humans/vehicles
             "homo_sapiens": "person",
             "human": "person",
+            "animal": "animal",
             "vehicle": "vehicle",
         }
         
-        # Check direct match
-        if taxonomy in SPECIES_MAP:
-            return SPECIES_MAP[taxonomy]
+        # Check direct match first
+        tax_lower = taxonomy.lower()
+        if tax_lower in SPECIES_MAP:
+            return SPECIES_MAP[tax_lower]
         
-        # Check if it starts with a known genus
+        # Handle SpeciesNet's complex taxonomy format with UUIDs and semicolons
+        # Format: UUID;Class;Order;Family;Genus;Species;CommonName
+        # Example: "1F689929-...;Aves;Passeriformes;Corvidae;Corvus;corvus_brachyrhynchos;American Crow"
+        # Or generic: "UUID;Aves;;;;;Bird"
+        
+        # Split by + to handle multiple detections
+        parts = taxonomy.split("+")
+        clean_names = []
+        
+        for part in parts:
+            # Remove UUID prefix (8-4-4-4-12 hex pattern)
+            part = re.sub(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[;]*', '', part)
+            
+            # Split by semicolons - taxonomy levels are: Class;Order;Family;Genus;Species;CommonName
+            segments = [s.strip() for s in part.split(";")]
+            
+            # Filter out empty and useless values
+            meaningful = []
+            for seg in segments:
+                seg_lower = seg.lower()
+                if seg_lower in ("no cv result", "unknown", "blank", "empty", ""):
+                    continue
+                # Skip if it looks like a UUID
+                if re.match(r'^[0-9a-fA-F-]+$', seg) and len(seg) > 10:
+                    continue
+                meaningful.append(seg)
+            
+            if not meaningful:
+                continue
+            
+            # Build a taxonomy string with available levels
+            # Priority: use common name if specific, otherwise build from class/order/family
+            taxonomy_parts = []
+            
+            # Check if we have a specific species (last meaningful segment that's in SPECIES_MAP or looks specific)
+            last_seg = meaningful[-1].lower()
+            if last_seg in SPECIES_MAP:
+                # Use the friendly name from our map
+                taxonomy_parts.append(SPECIES_MAP[last_seg])
+            else:
+                # Build from available taxonomy levels
+                for seg in meaningful:
+                    seg_lower = seg.lower()
+                    # Map known classes/orders to friendly names or keep as-is
+                    if seg_lower in SPECIES_MAP:
+                        taxonomy_parts.append(SPECIES_MAP[seg_lower])
+                    elif len(seg) > 1:
+                        clean_seg = seg.replace("_", "-").lower()
+                        # Only add if not redundant
+                        if clean_seg not in [t.lower() for t in taxonomy_parts]:
+                            taxonomy_parts.append(clean_seg)
+            
+            if taxonomy_parts:
+                # Join with underscore for filename compatibility, limit to 3 levels
+                name = "_".join(taxonomy_parts[:3])
+                if name not in clean_names:
+                    clean_names.append(name)
+        
+        if clean_names:
+            # Return names joined by + for multiple detections
+            return "+".join(clean_names)
+        
+        # Fallback: check if it starts with a known genus
         for key, value in SPECIES_MAP.items():
-            if taxonomy.startswith(key.split("_")[0]):
+            if tax_lower.startswith(key.split("_")[0]):
                 return value
         
-        # Return cleaned up version of taxonomy
-        return taxonomy.replace("_", " ")
+        # Last resort: clean up and return
+        return taxonomy.replace("_", "-").lower()[:50]  # Truncate if too long
 
 
 # ============================================================================

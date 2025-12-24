@@ -388,7 +388,8 @@ class WebServer:
                 'date': 'Manual',
                 'filename': clip_file.name,
                 'time': datetime.fromtimestamp(stat.st_mtime),
-                'size': stat.st_size
+                'size': stat.st_size,
+                'species': 'Manual clip'
             })
 
         # 2. Check for automated clips in subdirectories
@@ -400,18 +401,74 @@ class WebServer:
                 stat = clip_file.stat()
                 rel_path = clip_file.relative_to(clips_dir)
                 
+                # Parse species from filename (format: timestamp_species.mp4)
+                species = self._parse_species_from_filename(clip_file.name)
+                
                 clips.append({
                     'path': str(rel_path),
                     'camera': cam_dir.name,
                     'date': datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d'),
                     'filename': clip_file.name,
                     'time': datetime.fromtimestamp(stat.st_mtime),
-                    'size': stat.st_size
+                    'size': stat.st_size,
+                    'species': species
                 })
 
         # Sort by time descending
         clips.sort(key=lambda x: x['time'], reverse=True)
         return clips
+
+    def _parse_species_from_filename(self, filename: str) -> str:
+        """Extract clean species name from clip filename.
+        
+        Filename format: timestamp_species.mp4
+        Example: 1766587074_animal+bird.mp4 -> "Animal, Bird"
+        """
+        import re
+        
+        # Remove extension
+        name = filename.rsplit('.', 1)[0]
+        
+        # Split by underscore, species is after the timestamp
+        parts = name.split('_', 1)
+        if len(parts) < 2:
+            return 'Unknown'
+        
+        species_part = parts[1]
+        
+        # Handle complex SpeciesNet format with UUIDs and semicolons
+        # Remove UUIDs (8-4-4-4-12 hex pattern)
+        species_part = re.sub(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[;]*', '', species_part)
+        
+        # Split by + for multiple species
+        species_list = []
+        for part in species_part.split('+'):
+            # Split by semicolons and get meaningful parts
+            segments = [s.strip() for s in part.split(';') if s.strip()]
+            
+            for segment in reversed(segments):
+                seg_lower = segment.lower()
+                # Skip useless values
+                if seg_lower in ('no cv result', 'unknown', 'blank', 'empty', ''):
+                    continue
+                # Use the first meaningful segment
+                clean_name = segment.replace('_', ' ').title()
+                if clean_name and clean_name not in species_list:
+                    species_list.append(clean_name)
+                break
+        
+        if not species_list:
+            return 'Unknown'
+        
+        # Deduplicate and join
+        seen = set()
+        unique = []
+        for s in species_list:
+            if s.lower() not in seen:
+                seen.add(s.lower())
+                unique.append(s)
+        
+        return ', '.join(unique[:3])  # Limit to 3 species for display
 
     async def handle_recordings(self, request):
         loop = asyncio.get_running_loop()
@@ -477,10 +534,16 @@ class WebServer:
                         flex-shrink: 0;
                     }
                     .recording-info { flex: 1; min-width: 0; }
+                    .recording-species {
+                        font-weight: 700;
+                        font-size: 1.1em;
+                        color: #4CAF50;
+                        margin-bottom: 4px;
+                    }
                     .recording-camera {
-                        font-weight: 600;
-                        font-size: 1em;
-                        color: #fff;
+                        font-weight: 500;
+                        font-size: 0.9em;
+                        color: #ccc;
                         margin-bottom: 4px;
                     }
                     .recording-time {
@@ -662,10 +725,12 @@ class WebServer:
         for clip in clips:
             size_mb = clip['size'] / (1024 * 1024)
             escaped_path = clip['path'].replace("'", "\\'")
+            species_display = clip.get('species', 'Unknown')
             html += f"""
                     <div class="recording-card" onclick="playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}')">
                         <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
                         <div class="recording-info">
+                            <div class="recording-species">🐾 {species_display}</div>
                             <div class="recording-camera">{clip['camera']}</div>
                             <div class="recording-time">{clip['time'].strftime('%b %d, %Y at %I:%M %p')}</div>
                             <div class="recording-meta">{size_mb:.1f} MB</div>

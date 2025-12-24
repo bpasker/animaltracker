@@ -24,12 +24,69 @@ from .web import WebServer
 LOGGER = logging.getLogger(__name__)
 
 
-def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp") -> str:
-    """Build RTSP URI with FFmpeg env options for OpenCV CAP_FFMPEG backend."""
-    # FFmpeg uses RTSP_TRANSPORT env or query param; we set env before capture
+def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp", hwaccel: bool = False) -> str:
+    """Build RTSP URI with FFmpeg env options for OpenCV CAP_FFMPEG backend.
+    
+    Args:
+        rtsp_uri: RTSP stream URL
+        transport: tcp or udp
+        hwaccel: If True, enable CUDA hardware decoding (requires FFmpeg with CUDA support)
+    """
     import os
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
+    
+    if hwaccel:
+        # Enable CUDA hardware decoding via FFmpeg
+        # Format: "key1;value1|key2;value2"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            f"rtsp_transport;{transport}|"
+            f"hwaccel;cuda|"
+            f"hwaccel_output_format;cuda"
+        )
+    else:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
+    
     return rtsp_uri
+
+
+# Keep GStreamer pipelines for systems that have it (e.g., Jetson)
+def build_gstreamer_pipeline(rtsp_uri: str, transport: str = "tcp", latency_ms: int = 0) -> str:
+    """Build GStreamer pipeline string for NVDEC hardware decoding.
+    
+    Uses NVIDIA's nvv4l2decoder for hardware H264/H265 decoding on GTX/RTX GPUs.
+    Falls back to nvdec if nvv4l2decoder not available.
+    """
+    protocols = "tcp" if transport == "tcp" else "udp"
+    latency = max(latency_ms, 100)  # Minimum 100ms for stable streaming
+    
+    # GStreamer pipeline for NVDEC hardware decoding
+    # Works with GTX 1080, RTX series, Jetson, etc.
+    pipeline = (
+        f"rtspsrc location={rtsp_uri} protocols={protocols} latency={latency} ! "
+        f"rtph264depay ! h264parse ! "
+        f"nvv4l2decoder ! "
+        f"nvvidconv ! "
+        f"video/x-raw,format=BGRx ! "
+        f"videoconvert ! "
+        f"video/x-raw,format=BGR ! "
+        f"appsink drop=1 sync=0"
+    )
+    return pipeline
+
+
+def build_gstreamer_pipeline_nvdec(rtsp_uri: str, transport: str = "tcp", latency_ms: int = 0) -> str:
+    """Alternative GStreamer pipeline using nvdec (for desktop GPUs without nvv4l2decoder)."""
+    protocols = "tcp" if transport == "tcp" else "udp"
+    latency = max(latency_ms, 100)
+    
+    pipeline = (
+        f"rtspsrc location={rtsp_uri} protocols={protocols} latency={latency} ! "
+        f"rtph264depay ! h264parse ! "
+        f"nvdec ! "
+        f"videoconvert ! "
+        f"video/x-raw,format=BGR ! "
+        f"appsink drop=1 sync=0"
+    )
+    return pipeline
 
 
 @dataclass
@@ -129,7 +186,20 @@ class StreamWorker:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         LOGGER.info("Starting worker for %s", self.camera.id)
-        rtsp_uri = build_ffmpeg_uri(self.camera.rtsp.uri, self.camera.rtsp.transport)
+        
+        # Hardware decoding via FFmpeg CUDA (works with standard OpenCV + FFmpeg with CUDA)
+        use_hwaccel = self.camera.rtsp.hwaccel
+        rtsp_uri = build_ffmpeg_uri(
+            self.camera.rtsp.uri, 
+            self.camera.rtsp.transport,
+            hwaccel=use_hwaccel
+        )
+        capture_backend = cv2.CAP_FFMPEG
+        
+        if use_hwaccel:
+            LOGGER.info("Using FFmpeg CUDA hardware decoding for %s", self.camera.id)
+        else:
+            LOGGER.info("Using FFmpeg software decoding for %s", self.camera.id)
         
         # Frame skipping counter
         frame_count = 0
@@ -142,12 +212,27 @@ class StreamWorker:
         while not stop_event.is_set():
             loop = asyncio.get_running_loop()
             # Offload connection to thread as it can block
-            cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_uri, cv2.CAP_FFMPEG)
+            cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_uri, capture_backend)
             
             if not cap.isOpened():
-                LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
-                await asyncio.sleep(5)
-                continue
+                if use_hwaccel:
+                    # Fall back to software decoding if CUDA failed
+                    LOGGER.warning("CUDA hardware decoding failed for %s, falling back to software", self.camera.id)
+                    use_hwaccel = False
+                    rtsp_uri = build_ffmpeg_uri(
+                        self.camera.rtsp.uri,
+                        self.camera.rtsp.transport,
+                        hwaccel=False
+                    )
+                    cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_uri, capture_backend)
+                    if not cap.isOpened():
+                        LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                        await asyncio.sleep(5)
+                        continue
+                else:
+                    LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                    await asyncio.sleep(5)
+                    continue
 
             LOGGER.info("Connected to stream for %s", self.camera.id)
             try:

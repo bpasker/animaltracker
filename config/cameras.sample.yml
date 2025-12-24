@@ -38,6 +38,7 @@ cameras:
       uri: "rtsp://{USERNAME}:{PASSWORD}@192.168.1.201:554/Streaming/Channels/101"
       transport: tcp
       latency_ms: 0
+      hwaccel: false  # Set to true for NVDEC GPU decoding (requires GStreamer)
     onvif:
       host: 192.168.1.201
       port: 80

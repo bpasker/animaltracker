@@ -65,6 +65,7 @@ class RTSPSettings(BaseModel):
     frame_skip: int = Field(default=1, ge=1, description="Process every Nth frame (1=all, 2=half, etc)")
     transport: str = Field(default="tcp", pattern="^(tcp|udp)$")
     latency_ms: int = Field(default=0, ge=0)
+    hwaccel: bool = Field(default=False, description="Use NVDEC GPU hardware decoding (requires GStreamer)")
 
 
 class ThresholdSettings(BaseModel):

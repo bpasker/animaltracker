@@ -190,9 +190,11 @@ class SpeciesNetDetector(BaseDetector):
             score = pred.get("prediction_score", 0.0)
             
             # Skip low confidence, blanks, or non-animal categories
+            # SpeciesNet may return taxonomy paths like ";;;;;;blank" so check the last component
             if score < conf_threshold:
                 continue
-            if species.lower() in ("blank", "unknown", "empty", "vehicle"):
+            species_clean = species.lower().strip(";").split(";")[-1].strip()
+            if species_clean in ("blank", "unknown", "empty", "vehicle", ""):
                 continue
             
             # Extract bounding box from detections if available

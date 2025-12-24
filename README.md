@@ -87,17 +87,39 @@ python scripts/test_pushover.py
 ```
 
 ### Systemd Service (Auto-start)
-1.  Edit the service files in `systemd/` to match your user/paths if different from default.
-2.  Install services:
+
+The project includes systemd service templates for running the detector as a background service.
+
+1.  **Copy service files to systemd:**
     ```bash
-    sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+    sudo cp systemd/detector@.service /etc/systemd/system/
+    sudo cp systemd/ssd-cleaner.service systemd/ssd-cleaner.timer /etc/systemd/system/
+    ```
+
+2.  **Reload systemd:**
+    ```bash
     sudo systemctl daemon-reload
-    
-    # Enable and start for specific cameras
-    sudo systemctl enable --now detector@cam1.service
-    sudo systemctl enable --now detector@cam2.service
-    
-    # Enable cleanup timer
+    ```
+
+3.  **Enable and start for a specific camera:**
+    ```bash
+    # Replace 'front_yard' with your camera id from cameras.yml
+    sudo systemctl enable detector@front_yard
+    sudo systemctl start detector@front_yard
+    ```
+
+4.  **Check status:**
+    ```bash
+    sudo systemctl status detector@front_yard
+    ```
+
+5.  **View logs:**
+    ```bash
+    journalctl -u detector@front_yard -f
+    ```
+
+6.  **Enable cleanup timer (optional):**
+    ```bash
     sudo systemctl enable --now ssd-cleaner.timer
     ```
 

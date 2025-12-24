@@ -144,3 +144,6 @@ This usually happens with H.265 streams on software decoding. Switch to the H.26
 - Flesh out YOLO model training/export pipeline.
 - Hook storage cleanup alerts into Pushover for disk thresholds.
 - Expand CLI to cover PTZ patrol scripts and remote firmware health checks.
+
+#CHECK GPU Usage
+nvidia-smi -l 1

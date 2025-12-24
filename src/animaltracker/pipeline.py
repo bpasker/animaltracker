@@ -305,42 +305,159 @@ class StreamWorker:
         idle = ts - self.event_state.last_detection_ts
         if idle < self.runtime.general.clip.post_seconds:
             return
-        clip_path = self.storage.build_clip_path(
-            self.camera.id,
-            self.event_state.species_label,
-            self.event_state.start_ts,
-            self.runtime.general.clip.format,
-        )
         
-        # Offload clip writing and notification to thread
+        # Offload clip writing, post-analysis, and notification to thread
         loop = asyncio.get_running_loop()
+        post_analysis_enabled = self.runtime.general.clip.post_analysis
+        post_analysis_frames = self.runtime.general.clip.post_analysis_frames
         
-        def finalize_event(frames, path, ctx, priority, sound):
-            self.storage.write_clip(frames, path)
+        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound):
+            """Finalize event with optional post-clip species analysis."""
+            final_species = ctx_base['species']
+            final_confidence = ctx_base['confidence']
+            
+            # Step 1: Run post-clip analysis if enabled
+            if post_analysis_enabled:
+                refined_species, refined_confidence = self._analyze_clip_frames(
+                    frames, num_samples=post_analysis_frames
+                )
+                # Use refined species if we got a more specific identification
+                if refined_species:
+                    final_species = refined_species
+                    final_confidence = max(refined_confidence, ctx_base['confidence'])
+            
+            # Step 2: Build clip path with (potentially refined) species
+            clip_path = self.storage.build_clip_path(
+                camera_id,
+                final_species,
+                start_ts,
+                clip_format,
+            )
+            
+            # Step 3: Write the clip
+            self.storage.write_clip(frames, clip_path)
+            
+            # Step 4: Send notification with refined info
+            ctx = NotificationContext(
+                species=final_species,
+                confidence=final_confidence,
+                camera_id=ctx_base['camera_id'],
+                camera_name=ctx_base['camera_name'],
+                clip_path=str(clip_path),
+                event_started_at=ctx_base['event_started_at'],
+                event_duration=ctx_base['event_duration'],
+            )
             self.notifier.send(ctx, priority=priority, sound=sound)
-            LOGGER.info("Event for %s closed; clip at %s", ctx.camera_id, path)
+            LOGGER.info("Event for %s closed; clip at %s (species: %s)", 
+                       ctx.camera_id, clip_path, final_species)
 
-        ctx = NotificationContext(
-            species=self.event_state.species_label,
-            confidence=self.event_state.max_confidence,
-            camera_id=self.camera.id,
-            camera_name=self.camera.name,
-            clip_path=str(clip_path),
-            event_started_at=self.event_state.start_ts,
-            event_duration=self.event_state.duration,
-        )
+        ctx_base = {
+            'species': self.event_state.species_label,
+            'confidence': self.event_state.max_confidence,
+            'camera_id': self.camera.id,
+            'camera_name': self.camera.name,
+            'event_started_at': self.event_state.start_ts,
+            'event_duration': self.event_state.duration,
+        }
         
         loop.run_in_executor(
             None, 
             finalize_event, 
-            self.event_state.frames, 
-            clip_path, 
-            ctx, 
+            self.event_state.frames,
+            self.camera.id,
+            self.event_state.start_ts,
+            self.runtime.general.clip.format,
+            ctx_base, 
             self.camera.notification.priority, 
             self.camera.notification.sound
         )
         
         self.event_state = None
+
+    def _analyze_clip_frames(self, frames: List[tuple], num_samples: int = 5) -> tuple[str, float]:
+        """Analyze frames from a clip to get the most specific species identification.
+        
+        Samples frames evenly throughout the clip, runs detection on each,
+        and returns the most specific/confident identification.
+        
+        Args:
+            frames: List of (timestamp, frame) tuples
+            num_samples: Number of frames to analyze (default 5)
+            
+        Returns:
+            (species_label, confidence) - best identification found
+        """
+        if not frames:
+            return "", 0.0
+        
+        # Sample frames evenly throughout the clip
+        total_frames = len(frames)
+        if total_frames <= num_samples:
+            sample_indices = list(range(total_frames))
+        else:
+            step = total_frames / num_samples
+            sample_indices = [int(i * step) for i in range(num_samples)]
+        
+        # Collect all detections across sampled frames
+        all_detections = []
+        for idx in sample_indices:
+            _, frame = frames[idx]
+            try:
+                detections = self.detector.infer(frame, conf_threshold=0.3)  # Lower threshold for analysis
+                all_detections.extend(detections)
+            except Exception as e:
+                LOGGER.warning("Post-clip analysis failed on frame %d: %s", idx, e)
+                continue
+        
+        if not all_detections:
+            return "", 0.0
+        
+        # Score each unique species by specificity and confidence
+        # More specific = longer taxonomy name (more levels identified)
+        species_scores: dict[str, dict] = {}
+        for det in all_detections:
+            species = det.species
+            if species not in species_scores:
+                species_scores[species] = {
+                    'max_confidence': det.confidence,
+                    'count': 1,
+                    'specificity': len(species.split('_')),  # More underscores = more specific
+                    'taxonomy': det.taxonomy or species,
+                }
+            else:
+                species_scores[species]['count'] += 1
+                species_scores[species]['max_confidence'] = max(
+                    species_scores[species]['max_confidence'], 
+                    det.confidence
+                )
+        
+        # Filter out generic categories if we have more specific ones
+        generic_terms = {'animal', 'bird', 'mammal', 'aves'}
+        specific_species = [s for s in species_scores.keys() 
+                          if s.lower() not in generic_terms]
+        
+        if specific_species:
+            # Use only specific species
+            candidates = {s: species_scores[s] for s in specific_species}
+        else:
+            candidates = species_scores
+        
+        # Pick the best: prioritize specificity, then count, then confidence
+        best_species = max(
+            candidates.keys(),
+            key=lambda s: (
+                candidates[s]['specificity'],
+                candidates[s]['count'],
+                candidates[s]['max_confidence']
+            )
+        )
+        
+        best_confidence = candidates[best_species]['max_confidence']
+        
+        LOGGER.info("Post-clip analysis: %d detections across %d frames -> %s (%.2f)", 
+                   len(all_detections), len(sample_indices), best_species, best_confidence)
+        
+        return best_species, best_confidence
 
 
 class PipelineOrchestrator:

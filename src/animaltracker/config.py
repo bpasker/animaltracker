@@ -19,6 +19,9 @@ class ClipSettings(BaseModel):
     post_seconds: float = Field(default=5.0, ge=0)
     format: str = "mp4"
     codec: str = "h264"
+    # Post-clip analysis settings
+    post_analysis: bool = Field(default=True, description="Run species re-analysis on saved clips for better identification")
+    post_analysis_frames: int = Field(default=60, ge=1, le=120, description="Number of frames to analyze from each clip")
 
 
 class DetectorSettings(BaseModel):

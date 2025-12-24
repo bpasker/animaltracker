@@ -525,3 +525,11 @@ class WebServer:
         site = web.TCPSite(runner, '0.0.0.0', self.port)
         await site.start()
         LOGGER.info(f"Web server started on http://0.0.0.0:{self.port}")
+        
+        # Keep the server running until cancelled
+        try:
+            while True:
+                await asyncio.sleep(3600)  # Sleep for an hour, repeat forever
+        except asyncio.CancelledError:
+            LOGGER.info("Web server shutting down...")
+            await runner.cleanup()

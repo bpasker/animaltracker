@@ -13,11 +13,17 @@ from typing import List
 
 LOGGER = logging.getLogger(__name__)
 
+# Default storage thresholds
+DEFAULT_MIN_FREE_BYTES = 500 * 1024 * 1024  # 500 MB minimum free space
+DEFAULT_MAX_UTILIZATION_PCT = 80  # Don't use more than 80% of disk
+
 
 @dataclass
 class StorageManager:
     storage_root: Path
     logs_root: Path
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES
+    max_utilization_pct: int = DEFAULT_MAX_UTILIZATION_PCT
 
     def __post_init__(self) -> None:
         self.storage_root.mkdir(parents=True, exist_ok=True)
@@ -38,9 +44,18 @@ class StorageManager:
         return path
 
     def write_clip(self, frames: List, output_path: Path, fps: int = 15) -> None:
-        """Encode frames using two-step process for browser compatibility."""
+        """Encode frames using two-step process for browser compatibility.
+        
+        Ensures sufficient storage space before writing, removing old clips if needed.
+        """
         if not frames:
             LOGGER.warning("No frames available for clip %s; skipping", output_path)
+            return
+        
+        # Ensure we have enough space before writing
+        estimated_size = self.estimate_clip_size(frames, fps)
+        if not self.ensure_space_for_clip(estimated_size):
+            LOGGER.error("Skipping clip %s due to insufficient storage space", output_path)
             return
             
         height, width = frames[0][1].shape[:2]
@@ -146,3 +161,109 @@ class StorageManager:
                     path.unlink()
                 deleted.append(path)
         return deleted
+
+    def get_clips_sorted_by_age(self) -> List[Path]:
+        """Get all clip files sorted by modification time (oldest first)."""
+        clips = list(self.storage_root.glob("clips/*/*/*/*"))
+        clips = [p for p in clips if p.is_file() and p.suffix in (".mp4", ".avi", ".mkv")]
+        return sorted(clips, key=lambda p: p.stat().st_mtime)
+
+    def get_free_space(self) -> int:
+        """Get free space in bytes on the storage volume."""
+        stat = shutil.disk_usage(self.storage_root)
+        return stat.free
+
+    def get_total_space(self) -> int:
+        """Get total space in bytes on the storage volume."""
+        stat = shutil.disk_usage(self.storage_root)
+        return stat.total
+
+    def estimate_clip_size(self, frames: List, fps: int = 15) -> int:
+        """Estimate the size of a clip based on frame count and resolution.
+        
+        Uses empirical estimates for H.264 compression ratios.
+        Returns estimated size in bytes.
+        """
+        if not frames:
+            return 0
+        
+        # Get frame dimensions from first frame
+        height, width = frames[0][1].shape[:2]
+        frame_count = len(frames)
+        
+        # Estimate bytes per frame for H.264 at CRF 23 (medium quality)
+        # Rough estimate: 0.1 bits per pixel for decent quality H.264
+        bits_per_pixel = 0.1
+        bits_per_frame = width * height * bits_per_pixel
+        bytes_per_frame = bits_per_frame / 8
+        
+        # Add 20% overhead for container, headers, etc.
+        estimated_size = int(frame_count * bytes_per_frame * 1.2)
+        
+        # Minimum estimate of 100KB
+        return max(estimated_size, 100 * 1024)
+
+    def has_sufficient_space(self, required_bytes: int) -> bool:
+        """Check if there's enough free space for a new clip.
+        
+        Considers both absolute free space and utilization percentage.
+        """
+        stat = shutil.disk_usage(self.storage_root)
+        
+        # Check absolute free space
+        if stat.free < self.min_free_bytes + required_bytes:
+            return False
+        
+        # Check utilization percentage after writing
+        used_after = stat.used + required_bytes
+        utilization_after = (used_after / stat.total) * 100
+        if utilization_after > self.max_utilization_pct:
+            return False
+        
+        return True
+
+    def ensure_space_for_clip(self, required_bytes: int) -> bool:
+        """Ensure sufficient space exists for a new clip, removing old clips if needed.
+        
+        Removes oldest clips first until enough space is available or no clips remain.
+        
+        Returns:
+            True if sufficient space is available (or was freed)
+            False if unable to free enough space
+        """
+        if self.has_sufficient_space(required_bytes):
+            return True
+        
+        LOGGER.info(
+            "Insufficient storage space. Need %d bytes, have %d bytes free. "
+            "Cleaning up old clips...",
+            required_bytes, self.get_free_space()
+        )
+        
+        # Get clips sorted oldest first
+        old_clips = self.get_clips_sorted_by_age()
+        
+        freed_count = 0
+        for clip_path in old_clips:
+            if self.has_sufficient_space(required_bytes):
+                LOGGER.info("Freed enough space after removing %d old clips", freed_count)
+                return True
+            
+            try:
+                size = clip_path.stat().st_size
+                clip_path.unlink()
+                freed_count += 1
+                LOGGER.info("Removed old clip to free space: %s (%d bytes)", clip_path, size)
+            except OSError as e:
+                LOGGER.warning("Failed to remove clip %s: %s", clip_path, e)
+        
+        # Check one more time after removing all possible clips
+        if self.has_sufficient_space(required_bytes):
+            LOGGER.info("Freed enough space after removing %d old clips", freed_count)
+            return True
+        
+        LOGGER.error(
+            "Unable to free enough storage space. Still need %d bytes, have %d bytes free",
+            required_bytes, self.get_free_space()
+        )
+        return False

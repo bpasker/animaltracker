@@ -128,11 +128,10 @@ class SpeciesNetDetector(BaseDetector):
         self.admin1_region = admin1_region
         self.model_version = model_version
         
-        # Initialize SpeciesNet model
+        # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
         LOGGER.info(f"Loading SpeciesNet {model_version}...")
-        self._model = SpeciesNet(
-            model=f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
-        )
+        model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
+        self._model = SpeciesNet(model_name)
         LOGGER.info(f"SpeciesNet loaded (country={country}, region={admin1_region})")
     
     @property
@@ -150,19 +149,37 @@ class SpeciesNetDetector(BaseDetector):
         import cv2
         
         # SpeciesNet expects file paths, so we write to a temp file
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=True) as tmp:
-            cv2.imwrite(tmp.name, frame)
-            
-            # Build prediction request
-            predictions = self._model.predict(
-                filepaths=[tmp.name],
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+            cv2.imwrite(tmp_path, frame)
+        
+        try:
+            # Build prediction request - returns dict with "predictions" key
+            result = self._model.predict(
+                filepaths=[tmp_path],
                 country=self.country,
                 admin1_region=self.admin1_region,
             )
+        finally:
+            # Clean up temp file
+            import os
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
         
         detections: List[Detection] = []
         
-        for pred in predictions:
+        # Result is a dict like {"predictions": [{"filepath": ..., "prediction": ..., ...}]}
+        if result is None:
+            return detections
+            
+        predictions_list = result.get("predictions", []) if isinstance(result, dict) else []
+        
+        for pred in predictions_list:
+            if not isinstance(pred, dict):
+                continue
+                
             # Skip failures
             if pred.get("failures"):
                 LOGGER.warning(f"SpeciesNet prediction failed: {pred['failures']}")

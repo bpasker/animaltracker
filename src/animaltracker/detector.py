@@ -193,8 +193,9 @@ class SpeciesNetDetector(BaseDetector):
             # SpeciesNet may return taxonomy paths like ";;;;;;blank" so check the last component
             if score < conf_threshold:
                 continue
-            species_clean = species.lower().strip(";").split(";")[-1].strip()
-            if species_clean in ("blank", "unknown", "empty", "vehicle", ""):
+            species_clean = species.lower().strip(";").split(";")[-1].strip().replace(" ", "_")
+            skip_terms = ("blank", "unknown", "empty", "vehicle", "", "no_cv_result", "no cv result")
+            if species_clean in skip_terms or "no cv result" in species.lower():
                 continue
             
             # Extract bounding box from detections if available
@@ -218,8 +219,14 @@ class SpeciesNetDetector(BaseDetector):
             # Map common SpeciesNet labels to simpler names
             display_species = self._simplify_species_name(species)
             
-            # Double-check: skip blank/unknown after simplification too
-            if display_species.lower() in ("blank", "unknown", "empty"):
+            # Double-check: skip blank/unknown/generic after simplification too
+            skip_display = ("blank", "unknown", "empty", "no cv result", "no_cv_result")
+            display_lower = display_species.lower()
+            if display_lower in skip_display or "no cv result" in display_lower:
+                continue
+            # Also skip if it looks like a UUID (wasn't properly cleaned)
+            if len(display_species) > 30 and "-" in display_species and display_species.count("-") >= 3:
+                LOGGER.debug("Skipping UUID-like species: %s", display_species[:50])
                 continue
             
             detections.append(Detection(

@@ -462,16 +462,41 @@ class StreamWorker:
         if not all_detections:
             return "", 0.0
         
-        # Score each unique species by specificity and confidence
-        # More specific = longer taxonomy name (more levels identified)
-        species_scores: dict[str, dict] = {}
+        # Filter out invalid/generic detections before scoring
+        invalid_terms = {'unknown', 'blank', 'empty', 'no cv result', 'no_cv_result', 'vehicle'}
+        generic_terms = {'animal', 'bird', 'mammal', 'aves'}
+        
+        valid_detections = []
         for det in all_detections:
+            species_lower = det.species.lower()
+            # Skip invalid species
+            if species_lower in invalid_terms or 'no cv result' in species_lower:
+                continue
+            # Skip if looks like UUID (wasn't cleaned properly)
+            if len(det.species) > 30 and det.species.count('-') >= 3:
+                continue
+            valid_detections.append(det)
+        
+        if not valid_detections:
+            return "", 0.0
+        
+        # Score each unique species by specificity and confidence
+        # More specific = longer taxonomy (full species name vs just class)
+        species_scores: dict[str, dict] = {}
+        for det in valid_detections:
             species = det.species
             if species not in species_scores:
+                # Calculate specificity: count words, penalize generic terms
+                words = species.lower().replace('-', '_').split('_')
+                specificity = len([w for w in words if w and w not in generic_terms])
+                # Bonus for having a full binomial name (genus_species)
+                if '_' in species and len(species.split('_')) >= 2:
+                    specificity += 2
+                
                 species_scores[species] = {
                     'max_confidence': det.confidence,
                     'count': 1,
-                    'specificity': len(species.split('_')),  # More underscores = more specific
+                    'specificity': specificity,
                     'taxonomy': det.taxonomy or species,
                 }
             else:
@@ -482,7 +507,6 @@ class StreamWorker:
                 )
         
         # Filter out generic categories if we have more specific ones
-        generic_terms = {'animal', 'bird', 'mammal', 'aves'}
         specific_species = [s for s in species_scores.keys() 
                           if s.lower() not in generic_terms]
         
@@ -491,6 +515,9 @@ class StreamWorker:
             candidates = {s: species_scores[s] for s in specific_species}
         else:
             candidates = species_scores
+        
+        if not candidates:
+            return "", 0.0
         
         # Pick the best: prioritize specificity, then count, then confidence
         best_species = max(
@@ -504,8 +531,8 @@ class StreamWorker:
         
         best_confidence = candidates[best_species]['max_confidence']
         
-        LOGGER.info("Post-clip analysis: %d detections across %d frames -> %s (%.2f)", 
-                   len(all_detections), len(sample_indices), best_species, best_confidence)
+        LOGGER.info("Post-clip analysis: %d valid detections across %d frames -> %s (%.2f)", 
+                   len(valid_detections), len(sample_indices), best_species, best_confidence)
         
         return best_species, best_confidence
 

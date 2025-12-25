@@ -1207,8 +1207,120 @@ class WebServer:
                         color: #666;
                     }
                     
+                    /* Species selector styles */
+                    .species-selector {
+                        background: #1a1a1a;
+                        border: 1px solid #444;
+                        border-radius: 8px;
+                        max-height: 250px;
+                        overflow-y: auto;
+                    }
+                    .species-search {
+                        position: sticky;
+                        top: 0;
+                        background: #1a1a1a;
+                        padding: 10px;
+                        border-bottom: 1px solid #333;
+                    }
+                    .species-search input {
+                        width: 100%;
+                        padding: 8px 12px;
+                        border-radius: 6px;
+                        font-size: 0.9em;
+                    }
+                    .species-grid {
+                        display: grid;
+                        grid-template-columns: repeat(2, 1fr);
+                        gap: 2px;
+                        padding: 8px;
+                    }
+                    .species-item {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        padding: 10px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        transition: background 0.15s;
+                        user-select: none;
+                    }
+                    .species-item:hover { background: #333; }
+                    .species-item.selected { background: #2d4a2d; }
+                    .species-item input[type="checkbox"] {
+                        width: 18px;
+                        height: 18px;
+                        accent-color: #4CAF50;
+                        cursor: pointer;
+                    }
+                    .species-item label {
+                        cursor: pointer;
+                        font-size: 0.9em;
+                        flex: 1;
+                    }
+                    .species-category {
+                        grid-column: 1 / -1;
+                        padding: 8px 10px 4px;
+                        font-size: 0.75em;
+                        color: #888;
+                        text-transform: uppercase;
+                        letter-spacing: 0.5px;
+                        border-top: 1px solid #333;
+                        margin-top: 4px;
+                    }
+                    .species-category:first-child {
+                        border-top: none;
+                        margin-top: 0;
+                    }
+                    .species-category.recent-category {
+                        background: #3d2d1a;
+                        color: #ffa500;
+                        font-weight: 600;
+                        padding: 10px;
+                        border-radius: 6px;
+                        margin: 0;
+                        border-top: none;
+                    }
+                    .species-item.recent-item {
+                        background: #2d2520;
+                        border: 1px solid #4a3520;
+                    }
+                    .species-item.recent-item:hover {
+                        background: #3d3020;
+                    }
+                    .species-item.recent-item.selected {
+                        background: #2d4a2d;
+                        border-color: #4CAF50;
+                    }
+                    .detection-count {
+                        background: #ff6b35;
+                        color: #fff;
+                        font-size: 0.75em;
+                        font-weight: 600;
+                        padding: 2px 8px;
+                        border-radius: 10px;
+                        min-width: 24px;
+                        text-align: center;
+                    }
+                    .selected-count {
+                        font-size: 0.8em;
+                        color: #4CAF50;
+                        margin-top: 6px;
+                    }
+                    .clear-btn {
+                        background: #444;
+                        color: #fff;
+                        border: none;
+                        padding: 6px 12px;
+                        border-radius: 6px;
+                        font-size: 0.8em;
+                        cursor: pointer;
+                        margin-left: 8px;
+                    }
+                    .clear-btn:hover { background: #555; }
+                    
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 700px; margin: 0 auto; padding-bottom: 100px; }
+                        .species-grid { grid-template-columns: repeat(3, 1fr); }
                     }
                 </style>
             </head>
@@ -1239,6 +1351,32 @@ class WebServer:
                     let settings = {};
                     let originalSettings = {};
                     let currentCamera = null;
+                    
+                    // Predefined species list organized by category
+                    const SPECIES_LIST = {
+                        'Common Wildlife': [
+                            'deer', 'coyote', 'fox', 'raccoon', 'opossum', 'skunk', 'rabbit', 
+                            'squirrel', 'chipmunk', 'groundhog', 'armadillo', 'porcupine', 'beaver'
+                        ],
+                        'Large Mammals': [
+                            'bear', 'moose', 'elk', 'mountain lion', 'cougar', 'bobcat', 'lynx',
+                            'wolf', 'wild boar', 'javelina', 'bison', 'antelope'
+                        ],
+                        'Birds': [
+                            'bird', 'turkey', 'hawk', 'owl', 'eagle', 'vulture', 'crow', 
+                            'heron', 'duck', 'goose', 'pheasant', 'quail', 'dove', 'woodpecker'
+                        ],
+                        'Farm Animals': [
+                            'horse', 'cow', 'sheep', 'goat', 'pig', 'chicken', 'donkey', 'llama'
+                        ],
+                        'Pets & Domestic': [
+                            'dog', 'cat', 'person'
+                        ],
+                        'Other': [
+                            'snake', 'turtle', 'frog', 'lizard', 'alligator', 'fish',
+                            'bat', 'mouse', 'rat', 'mole', 'weasel', 'otter', 'mink', 'badger'
+                        ]
+                    };
                     
                     async function loadSettings() {
                         try {
@@ -1285,6 +1423,8 @@ class WebServer:
                     
                     function renderSettings(camId) {
                         const cam = settings.cameras[camId];
+                        const recentDetections = cam.recent_detections || {};
+                        
                         const html = `
                             <div class="settings-card">
                                 <h2>Detection Thresholds</h2>
@@ -1321,26 +1461,150 @@ class WebServer:
                             </div>
                             
                             <div class="settings-card">
-                                <h2>Species Filters</h2>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Include Species</label>
-                                    <textarea placeholder="Leave empty to include all species. Enter species names separated by commas or new lines."
-                                              onchange="updateSpeciesList('include_species', this.value)"
-                                              data-field="include_species">${(cam.include_species || []).join('\\n')}</textarea>
-                                    <div class="setting-description">Only detect these species (empty = all). Examples: deer, bird, cat, dog, person</div>
+                                <h2>Include Species</h2>
+                                <div class="setting-description" style="margin-bottom: 12px;">
+                                    Select species to detect. Leave all unchecked to detect everything.
                                 </div>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Exclude Species</label>
-                                    <textarea placeholder="Enter species names to exclude, separated by commas or new lines."
-                                              onchange="updateSpeciesList('exclude_species', this.value)"
-                                              data-field="exclude_species">${(cam.exclude_species || []).join('\\n')}</textarea>
-                                    <div class="setting-description">Never detect these species. Useful to filter out common nuisance detections.</div>
+                                <div class="selected-count" id="include-count">${getSelectedCountText(cam.include_species, 'include')}</div>
+                                ${renderSpeciesSelector('include_species', cam.include_species || [], null)}
+                            </div>
+                            
+                            <div class="settings-card">
+                                <h2>Exclude Species</h2>
+                                <div class="setting-description" style="margin-bottom: 12px;">
+                                    Select species to always ignore, even if detected.
                                 </div>
+                                <div class="selected-count" id="exclude-count">${getSelectedCountText(cam.exclude_species, 'exclude')}</div>
+                                ${renderSpeciesSelector('exclude_species', cam.exclude_species || [], recentDetections)}
                             </div>
                         `;
                         document.getElementById('settingsContent').innerHTML = html;
+                    }
+                    
+                    function getSelectedCountText(selected, type) {
+                        const count = (selected || []).length;
+                        if (type === 'include') {
+                            return count === 0 ? '✓ Detecting all species' : `${count} species selected`;
+                        } else {
+                            return count === 0 ? 'No species excluded' : `${count} species excluded`;
+                        }
+                    }
+                    
+                    function renderSpeciesSelector(field, selectedSpecies, recentDetections) {
+                        const selectedSet = new Set((selectedSpecies || []).map(s => s.toLowerCase()));
+                        let html = `<div class="species-selector">
+                            <div class="species-search">
+                                <input type="text" placeholder="Search species..." 
+                                       oninput="filterSpecies(this.value, '${field}')">
+                                <button class="clear-btn" onclick="clearAllSpecies('${field}')">Clear All</button>
+                            </div>
+                            <div class="species-grid" id="${field}-grid">`;
+                        
+                        // Show recent detections at the top for exclude_species
+                        if (recentDetections && Object.keys(recentDetections).length > 0) {
+                            html += `<div class="species-category recent-category">📊 Recent Alerts (tap to exclude)</div>`;
+                            
+                            // Sort by count descending
+                            const sorted = Object.entries(recentDetections).sort((a, b) => b[1] - a[1]);
+                            
+                            for (const [sp, count] of sorted) {
+                                const isSelected = selectedSet.has(sp.toLowerCase());
+                                const itemClass = isSelected ? 'species-item selected recent-item' : 'species-item recent-item';
+                                const displayName = sp.charAt(0).toUpperCase() + sp.slice(1);
+                                html += `
+                                    <div class="${itemClass}" onclick="toggleSpecies('${field}', '${sp}', this)" data-species="${sp.toLowerCase()}">
+                                        <input type="checkbox" ${isSelected ? 'checked' : ''} 
+                                               onclick="event.stopPropagation(); toggleSpecies('${field}', '${sp}', this.parentElement)">
+                                        <label>${displayName}</label>
+                                        <span class="detection-count">${count}</span>
+                                    </div>`;
+                            }
+                        }
+                        
+                        // Then show all species by category
+                        for (const [category, species] of Object.entries(SPECIES_LIST)) {
+                            html += `<div class="species-category">${category}</div>`;
+                            for (const sp of species) {
+                                const isSelected = selectedSet.has(sp.toLowerCase());
+                                const itemClass = isSelected ? 'species-item selected' : 'species-item';
+                                html += `
+                                    <div class="${itemClass}" onclick="toggleSpecies('${field}', '${sp}', this)" data-species="${sp.toLowerCase()}">
+                                        <input type="checkbox" ${isSelected ? 'checked' : ''} 
+                                               onclick="event.stopPropagation(); toggleSpecies('${field}', '${sp}', this.parentElement)">
+                                        <label>${sp.charAt(0).toUpperCase() + sp.slice(1)}</label>
+                                    </div>`;
+                            }
+                        }
+                        
+                        html += '</div></div>';
+                        return html;
+                    }
+                    
+                    function toggleSpecies(field, species, element) {
+                        const speciesList = settings.cameras[currentCamera][field] || [];
+                        const speciesLower = species.toLowerCase();
+                        const index = speciesList.findIndex(s => s.toLowerCase() === speciesLower);
+                        
+                        if (index >= 0) {
+                            speciesList.splice(index, 1);
+                            element.classList.remove('selected');
+                            element.querySelector('input').checked = false;
+                        } else {
+                            speciesList.push(speciesLower);
+                            element.classList.add('selected');
+                            element.querySelector('input').checked = true;
+                        }
+                        
+                        settings.cameras[currentCamera][field] = speciesList;
+                        updateSelectedCount(field);
+                    }
+                    
+                    function clearAllSpecies(field) {
+                        settings.cameras[currentCamera][field] = [];
+                        document.querySelectorAll(`#${field}-grid .species-item`).forEach(item => {
+                            item.classList.remove('selected');
+                            item.querySelector('input').checked = false;
+                        });
+                        updateSelectedCount(field);
+                    }
+                    
+                    function updateSelectedCount(field) {
+                        const count = (settings.cameras[currentCamera][field] || []).length;
+                        const type = field === 'include_species' ? 'include' : 'exclude';
+                        const countEl = document.getElementById(type + '-count');
+                        if (countEl) {
+                            countEl.textContent = getSelectedCountText(settings.cameras[currentCamera][field], type);
+                        }
+                    }
+                    
+                    function filterSpecies(query, field) {
+                        const queryLower = query.toLowerCase();
+                        const grid = document.getElementById(field + '-grid');
+                        const items = grid.querySelectorAll('.species-item');
+                        const categories = grid.querySelectorAll('.species-category');
+                        
+                        // Track which categories have visible items
+                        const categoryVisibility = {};
+                        
+                        items.forEach(item => {
+                            const label = item.querySelector('label').textContent.toLowerCase();
+                            const matches = label.includes(queryLower);
+                            item.style.display = matches ? '' : 'none';
+                        });
+                        
+                        // Hide empty categories
+                        categories.forEach(cat => {
+                            let nextEl = cat.nextElementSibling;
+                            let hasVisible = false;
+                            while (nextEl && !nextEl.classList.contains('species-category')) {
+                                if (nextEl.style.display !== 'none') {
+                                    hasVisible = true;
+                                    break;
+                                }
+                                nextEl = nextEl.nextElementSibling;
+                            }
+                            cat.style.display = hasVisible ? '' : 'none';
+                        });
                     }
                     
                     function updateSlider(slider, field) {
@@ -1354,15 +1618,6 @@ class WebServer:
                             value = parseInt(value);
                         }
                         settings.cameras[currentCamera].thresholds[field] = value;
-                    }
-                    
-                    function updateSpeciesList(field, value) {
-                        // Parse comma or newline separated list
-                        const species = value
-                            .split(/[,\\n]/)
-                            .map(s => s.trim().toLowerCase())
-                            .filter(s => s.length > 0);
-                        settings.cameras[currentCamera][field] = species;
                     }
                     
                     async function saveSettings() {
@@ -1417,6 +1672,10 @@ class WebServer:
 
     async def handle_get_settings(self, request):
         """API endpoint to get current settings for all cameras."""
+        # Get recent detections from clips
+        loop = asyncio.get_running_loop()
+        recent_detections = await loop.run_in_executor(None, self._get_recent_detections)
+        
         cameras = {}
         for cam_id, worker in self.workers.items():
             cam = worker.camera
@@ -1430,8 +1689,73 @@ class WebServer:
                 },
                 'include_species': list(cam.include_species),
                 'exclude_species': list(cam.exclude_species),
+                'recent_detections': recent_detections.get(cam_id, {}),
             }
         return web.json_response({'cameras': cameras})
+
+    def _get_recent_detections(self):
+        """Scan clips directory to get species detection counts per camera."""
+        import re
+        from collections import defaultdict
+        
+        clips_dir = self.storage_root / 'clips'
+        if not clips_dir.exists():
+            return {}
+        
+        # Count detections per camera per species
+        detections = defaultdict(lambda: defaultdict(int))
+        
+        for cam_dir in clips_dir.iterdir():
+            if not cam_dir.is_dir():
+                continue
+            
+            cam_id = cam_dir.name
+            
+            # Scan all clips in this camera's directory
+            for clip_file in cam_dir.rglob('*.mp4'):
+                species = self._extract_species_from_filename(clip_file.name)
+                for sp in species:
+                    if sp and sp.lower() not in ('unknown', 'manual clip', 'no cv result', 'blank', 'empty'):
+                        detections[cam_id][sp.lower()] += 1
+        
+        # Convert to regular dict and sort by count
+        result = {}
+        for cam_id, species_counts in detections.items():
+            sorted_species = sorted(species_counts.items(), key=lambda x: x[1], reverse=True)
+            result[cam_id] = {sp: count for sp, count in sorted_species[:20]}  # Top 20
+        
+        return result
+
+    def _extract_species_from_filename(self, filename: str) -> list:
+        """Extract species names from clip filename."""
+        import re
+        
+        # Remove extension
+        name = filename.rsplit('.', 1)[0]
+        
+        # Split by underscore, species is after the timestamp
+        parts = name.split('_', 1)
+        if len(parts) < 2:
+            return []
+        
+        species_part = parts[1]
+        
+        # Remove UUIDs
+        species_part = re.sub(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[;]*', '', species_part)
+        
+        species_list = []
+        for part in species_part.split('+'):
+            segments = [s.strip() for s in part.split(';') if s.strip()]
+            for segment in reversed(segments):
+                seg_lower = segment.lower()
+                if seg_lower in ('no cv result', 'unknown', 'blank', 'empty', ''):
+                    continue
+                clean_name = segment.replace('_', ' ').lower()
+                if clean_name and clean_name not in species_list:
+                    species_list.append(clean_name)
+                break
+        
+        return species_list
 
     async def handle_update_settings(self, request):
         """API endpoint to update settings for cameras."""

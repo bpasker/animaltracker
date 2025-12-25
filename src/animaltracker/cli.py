@@ -44,6 +44,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         runtime=runtime,
         model_path=args.model,
         camera_filter=args.camera if args.camera else None,
+        config_path=Path(args.config),
     )
     target_cams = args.camera if args.camera else [cam.id for cam in runtime.cameras]
     LOGGER.info("Launching pipeline for cameras: %s", ", ".join(target_cams))

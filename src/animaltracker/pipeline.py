@@ -543,8 +543,10 @@ class PipelineOrchestrator:
         runtime: RuntimeConfig,
         model_path: str = "yolov8n.pt",
         camera_filter: Optional[List[str]] = None,
+        config_path: Optional[Path] = None,
     ) -> None:
         self.runtime = runtime
+        self.config_path = config_path
         
         # Create detector from config settings
         detector_cfg = runtime.general.detector
@@ -593,7 +595,8 @@ class PipelineOrchestrator:
             worker_map, 
             storage_root=Path(self.runtime.general.storage_root),
             logs_root=Path(self.runtime.general.logs_root),
-            port=8080
+            port=8080,
+            config_path=self.config_path,
         )
         
         await asyncio.gather(

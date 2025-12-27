@@ -36,6 +36,106 @@ class StorageManager:
         filename = f"{int(event_ts)}_{species}.{ext}"
         return directory / filename
 
+    def build_thumbnail_path(self, clip_path: Path, species: str) -> Path:
+        """Build path for a detection thumbnail associated with a clip.
+        
+        Thumbnails are stored alongside clips with format: {clip_name}_thumb_{species}.jpg
+        """
+        # Create thumbnail filename based on clip name
+        clip_stem = clip_path.stem  # e.g., "1766587074_animal+bird"
+        thumb_filename = f"{clip_stem}_thumb_{species}.jpg"
+        return clip_path.parent / thumb_filename
+
+    def save_detection_thumbnails(
+        self, 
+        clip_path: Path, 
+        species_frames: dict
+    ) -> List[Path]:
+        """Save detection thumbnails for each species detected in a clip.
+        
+        Args:
+            clip_path: Path to the clip file
+            species_frames: Dict mapping species names to (frame, confidence, bbox) tuples
+                where bbox is [x1, y1, x2, y2] or None
+                
+        Returns:
+            List of saved thumbnail paths
+        """
+        saved_paths = []
+        
+        for species, (frame, confidence, bbox) in species_frames.items():
+            if frame is None:
+                continue
+                
+            thumb_path = self.build_thumbnail_path(clip_path, species)
+            
+            try:
+                # Draw bounding box if available
+                if bbox:
+                    frame = frame.copy()
+                    x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                    # Draw box with green color
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    # Add species label
+                    label = f"{species} ({confidence:.0%})"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.6
+                    thickness = 2
+                    (text_width, text_height), baseline = cv2.getTextSize(
+                        label, font, font_scale, thickness
+                    )
+                    # Background rectangle for text
+                    cv2.rectangle(
+                        frame, 
+                        (x1, y1 - text_height - 10), 
+                        (x1 + text_width + 4, y1), 
+                        (0, 255, 0), 
+                        -1
+                    )
+                    cv2.putText(
+                        frame, label, (x1 + 2, y1 - 5), 
+                        font, font_scale, (0, 0, 0), thickness
+                    )
+                
+                # Save thumbnail (maintain reasonable quality)
+                encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                cv2.imwrite(str(thumb_path), frame, encode_params)
+                saved_paths.append(thumb_path)
+                LOGGER.info("Saved detection thumbnail: %s", thumb_path)
+                
+            except Exception as e:
+                LOGGER.error("Failed to save thumbnail for %s: %s", species, e)
+                
+        return saved_paths
+
+    def get_clip_thumbnails(self, clip_path: Path) -> List[dict]:
+        """Get all thumbnails associated with a clip.
+        
+        Returns:
+            List of dicts with 'path', 'species', 'rel_path' for each thumbnail
+        """
+        thumbnails = []
+        clip_stem = clip_path.stem
+        clip_dir = clip_path.parent
+        
+        # Look for thumbnails matching this clip
+        for thumb_file in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
+            # Extract species from filename
+            # Format: {timestamp}_{original_species}_thumb_{specific_species}.jpg
+            parts = thumb_file.stem.split("_thumb_")
+            if len(parts) >= 2:
+                species = parts[-1].replace("_", " ").title()
+            else:
+                species = "Unknown"
+            
+            thumbnails.append({
+                'path': thumb_file,
+                'species': species,
+                'rel_path': thumb_file.relative_to(self.storage_root / "clips")
+            })
+        
+        return thumbnails
+
     def save_snapshot(self, camera_id: str, frame) -> Path:
         import cv2
         path = self.logs_root / f"startup_{camera_id}.jpg"

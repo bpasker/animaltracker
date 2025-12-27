@@ -97,6 +97,8 @@ class EventState:
     max_confidence: float
     last_detection_ts: float
     frames: List[tuple[float, np.ndarray]] = field(default_factory=list)
+    # Track best detection frame for each species (for thumbnails)
+    species_key_frames: dict = field(default_factory=dict)  # species -> (frame, confidence, bbox)
 
     def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray) -> None:
         self.last_detection_ts = frame_ts
@@ -104,6 +106,16 @@ class EventState:
             self.species.add(det.species)
             if det.confidence > self.max_confidence:
                 self.max_confidence = det.confidence
+            
+            # Track the best frame for each species (highest confidence)
+            current = self.species_key_frames.get(det.species)
+            if current is None or det.confidence > current[1]:
+                # Store a copy of the frame with detection info
+                self.species_key_frames[det.species] = (
+                    frame.copy(),
+                    det.confidence,
+                    det.bbox
+                )
         # Frames are now appended in the main loop to ensure full framerate
         # self.frames.append((frame_ts, frame))
 
@@ -361,7 +373,7 @@ class StreamWorker:
         post_analysis_enabled = self.runtime.general.clip.post_analysis
         post_analysis_frames = self.runtime.general.clip.post_analysis_frames
         
-        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound):
+        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames):
             """Finalize event with optional post-clip species analysis."""
             final_species = ctx_base['species']
             final_confidence = ctx_base['confidence']
@@ -387,7 +399,11 @@ class StreamWorker:
             # Step 3: Write the clip
             self.storage.write_clip(frames, clip_path)
             
-            # Step 4: Send notification with refined info
+            # Step 4: Save detection thumbnails for each species
+            if species_key_frames:
+                self.storage.save_detection_thumbnails(clip_path, species_key_frames)
+            
+            # Step 5: Send notification with refined info
             ctx = NotificationContext(
                 species=final_species,
                 confidence=final_confidence,
@@ -410,6 +426,9 @@ class StreamWorker:
             'event_duration': self.event_state.duration,
         }
         
+        # Copy species key frames before clearing event state
+        species_key_frames = dict(self.event_state.species_key_frames)
+        
         loop.run_in_executor(
             None, 
             finalize_event, 
@@ -419,7 +438,8 @@ class StreamWorker:
             self.runtime.general.clip.format,
             ctx_base, 
             self.camera.notification.priority, 
-            self.camera.notification.sound
+            self.camera.notification.sound,
+            species_key_frames
         )
         
         self.event_state = None

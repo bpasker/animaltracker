@@ -67,6 +67,7 @@ class WebServer:
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
         self.app.router.add_get('/recordings', self.handle_recordings)
+        self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
         # Settings page and API
@@ -405,7 +406,8 @@ class WebServer:
                 'filename': clip_file.name,
                 'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
                 'size': stat.st_size,
-                'species': 'Manual clip'
+                'species': 'Manual clip',
+                'thumbnails': []
             })
 
         # 2. Check for automated clips in subdirectories
@@ -420,6 +422,9 @@ class WebServer:
                 # Parse species from filename (format: timestamp_species.mp4)
                 species = self._parse_species_from_filename(clip_file.name)
                 
+                # Find associated thumbnails
+                thumbnails = self._get_thumbnails_for_clip(clip_file)
+                
                 clips.append({
                     'path': str(rel_path),
                     'camera': cam_dir.name,
@@ -427,12 +432,41 @@ class WebServer:
                     'filename': clip_file.name,
                     'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
                     'size': stat.st_size,
-                    'species': species
+                    'species': species,
+                    'thumbnails': thumbnails
                 })
 
         # Sort by time descending
         clips.sort(key=lambda x: x['time'], reverse=True)
         return clips
+
+    def _get_thumbnails_for_clip(self, clip_path: Path) -> list:
+        """Get all thumbnails associated with a clip file.
+        
+        Returns list of dicts with 'path' (relative to clips dir), 'species', 'url'
+        """
+        clips_dir = self.storage_root / 'clips'
+        clip_stem = clip_path.stem
+        clip_dir = clip_path.parent
+        thumbnails = []
+        
+        # Look for thumbnails matching this clip
+        for thumb_file in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
+            # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
+            parts = thumb_file.stem.split("_thumb_")
+            if len(parts) >= 2:
+                species = parts[-1].replace("_", " ").title()
+            else:
+                species = "Unknown"
+            
+            rel_path = thumb_file.relative_to(clips_dir)
+            thumbnails.append({
+                'path': str(rel_path),
+                'species': species,
+                'url': f"/clips/{rel_path}"
+            })
+        
+        return thumbnails
 
     def _parse_species_from_filename(self, filename: str) -> str:
         """Extract clean species name from clip filename.
@@ -555,6 +589,18 @@ class WebServer:
                         font-size: 1.1em;
                         color: #4CAF50;
                         margin-bottom: 4px;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        flex-wrap: wrap;
+                    }
+                    .thumbnail-badge {
+                        font-size: 0.75em;
+                        font-weight: 500;
+                        background: #333;
+                        color: #888;
+                        padding: 2px 8px;
+                        border-radius: 12px;
                     }
                     .recording-camera {
                         font-weight: 500;
@@ -742,18 +788,22 @@ class WebServer:
         for clip in clips:
             size_mb = clip['size'] / (1024 * 1024)
             escaped_path = clip['path'].replace("'", "\\'")
+            url_encoded_path = clip['path'].replace('#', '%23')
             species_display = clip.get('species', 'Unknown')
+            thumbnail_count = len(clip.get('thumbnails', []))
+            thumbnail_badge = f'<span class="thumbnail-badge">📸 {thumbnail_count}</span>' if thumbnail_count > 0 else ''
+            
             html += f"""
-                    <div class="recording-card" onclick="playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}')">
+                    <div class="recording-card" onclick="window.location.href='/recording/{url_encoded_path}'">
                         <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
                         <div class="recording-info">
-                            <div class="recording-species">🐾 {species_display}</div>
+                            <div class="recording-species">🐾 {species_display} {thumbnail_badge}</div>
                             <div class="recording-camera">{clip['camera']}</div>
                             <div class="recording-time">{clip['time'].strftime('%b %d, %Y at %I:%M %p')}</div>
                             <div class="recording-meta">{size_mb:.1f} MB</div>
                         </div>
                         <div class="recording-actions">
-                            <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}');" title="Play">
+                            <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}');" title="Quick Play">
                                 <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                             </button>
                             <button class="action-btn delete-btn" onclick="event.stopPropagation(); deleteClip('{escaped_path}');" title="Delete">
@@ -1014,6 +1064,344 @@ class WebServer:
             'total_requested': len(paths),
             'results': results
         })
+
+    async def handle_recording_detail(self, request):
+        """Render a detailed recording page with key detection photos."""
+        rel_path = request.match_info['path']
+        
+        # Security check
+        if '..' in rel_path:
+            return web.Response(status=403, text="Invalid path")
+        
+        loop = asyncio.get_running_loop()
+        clip_info = await loop.run_in_executor(None, self._get_clip_detail, rel_path)
+        
+        if clip_info is None:
+            return web.Response(status=404, text="Recording not found")
+        
+        # Build thumbnail gallery HTML
+        thumbnails_html = ""
+        if clip_info['thumbnails']:
+            thumbnails_html = """
+                <div class="detection-section">
+                    <h2>🔍 Detection Key Frames</h2>
+                    <p class="detection-hint">These are the frames used to identify each species.</p>
+                    <div class="thumbnail-gallery">
+            """
+            for thumb in clip_info['thumbnails']:
+                thumbnails_html += f"""
+                        <div class="thumbnail-card">
+                            <img src="{thumb['url']}" alt="{thumb['species']}" onclick="openImage('{thumb['url']}')">
+                            <div class="thumbnail-label">{thumb['species']}</div>
+                        </div>
+                """
+            thumbnails_html += """
+                    </div>
+                </div>
+            """
+        else:
+            thumbnails_html = """
+                <div class="detection-section">
+                    <h2>🔍 Detection Key Frames</h2>
+                    <p class="no-thumbnails">No detection thumbnails available for this recording.</p>
+                </div>
+            """
+        
+        html = f"""
+        <html>
+            <head>
+                <title>{clip_info['species']} - Recording Detail</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="apple-mobile-web-app-capable" content="yes">
+                <meta name="mobile-web-app-capable" content="yes">
+                <style>
+                    * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
+                    body {{ 
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                        background: #1a1a1a; 
+                        color: #eee; 
+                        margin: 0; 
+                        padding: 16px;
+                        padding-bottom: 100px;
+                    }}
+                    .nav {{ 
+                        display: flex;
+                        gap: 12px;
+                        margin-bottom: 20px; 
+                        padding-bottom: 16px; 
+                        border-bottom: 1px solid #333;
+                    }}
+                    .nav a {{ 
+                        color: #fff;
+                        background: #333;
+                        text-decoration: none; 
+                        font-size: 0.95em;
+                        font-weight: 500;
+                        padding: 10px 16px;
+                        border-radius: 8px;
+                        transition: background 0.2s;
+                    }}
+                    .nav a:hover, .nav a.active {{ background: #4CAF50; }}
+                    .back-btn {{
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 6px;
+                        color: #4CAF50;
+                        text-decoration: none;
+                        margin-bottom: 16px;
+                        font-size: 0.95em;
+                    }}
+                    .back-btn:hover {{ text-decoration: underline; }}
+                    h1 {{ font-size: 1.5em; margin: 0 0 8px 0; font-weight: 600; color: #4CAF50; }}
+                    h2 {{ font-size: 1.1em; margin: 20px 0 12px 0; font-weight: 600; color: #ccc; }}
+                    
+                    .recording-header {{
+                        margin-bottom: 20px;
+                    }}
+                    .recording-meta {{
+                        color: #aaa;
+                        font-size: 0.9em;
+                        margin-bottom: 4px;
+                    }}
+                    .recording-meta span {{
+                        margin-right: 16px;
+                    }}
+                    
+                    .video-section {{
+                        background: #000;
+                        border-radius: 12px;
+                        overflow: hidden;
+                        margin-bottom: 20px;
+                    }}
+                    .video-section video {{
+                        width: 100%;
+                        display: block;
+                    }}
+                    
+                    .action-buttons {{
+                        display: flex;
+                        gap: 12px;
+                        margin-bottom: 24px;
+                    }}
+                    .action-btn {{
+                        flex: 1;
+                        padding: 14px;
+                        border: none;
+                        border-radius: 10px;
+                        font-weight: 600;
+                        font-size: 0.95em;
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        gap: 8px;
+                        text-decoration: none;
+                        color: white;
+                    }}
+                    .action-btn.download {{ background: #2196F3; }}
+                    .action-btn.delete {{ background: #f44336; }}
+                    .action-btn:active {{ opacity: 0.8; }}
+                    .action-btn svg {{ width: 18px; height: 18px; }}
+                    
+                    .detection-section {{
+                        background: #2a2a2a;
+                        border-radius: 12px;
+                        padding: 16px;
+                        margin-bottom: 20px;
+                    }}
+                    .detection-section h2 {{
+                        margin: 0 0 8px 0;
+                        color: #fff;
+                    }}
+                    .detection-hint {{
+                        color: #888;
+                        font-size: 0.85em;
+                        margin: 0 0 16px 0;
+                    }}
+                    .no-thumbnails {{
+                        color: #666;
+                        font-style: italic;
+                        margin: 0;
+                    }}
+                    
+                    .thumbnail-gallery {{
+                        display: grid;
+                        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                        gap: 12px;
+                    }}
+                    .thumbnail-card {{
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        overflow: hidden;
+                    }}
+                    .thumbnail-card img {{
+                        width: 100%;
+                        aspect-ratio: 16/9;
+                        object-fit: cover;
+                        cursor: pointer;
+                        transition: transform 0.2s;
+                    }}
+                    .thumbnail-card img:hover {{
+                        transform: scale(1.02);
+                    }}
+                    .thumbnail-label {{
+                        padding: 10px 12px;
+                        font-size: 0.9em;
+                        font-weight: 600;
+                        color: #4CAF50;
+                        text-align: center;
+                    }}
+                    
+                    /* Image lightbox */
+                    .lightbox {{
+                        display: none;
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        bottom: 0;
+                        background: rgba(0, 0, 0, 0.95);
+                        z-index: 1000;
+                        justify-content: center;
+                        align-items: center;
+                        padding: 20px;
+                    }}
+                    .lightbox.active {{ display: flex; }}
+                    .lightbox img {{
+                        max-width: 100%;
+                        max-height: 100%;
+                        border-radius: 8px;
+                    }}
+                    .lightbox-close {{
+                        position: absolute;
+                        top: 16px;
+                        right: 16px;
+                        background: #333;
+                        border: none;
+                        color: #fff;
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 8px;
+                        font-size: 1.5em;
+                        cursor: pointer;
+                    }}
+                    
+                    @media (min-width: 768px) {{
+                        body {{ padding: 24px; max-width: 900px; margin: 0 auto; }}
+                        .thumbnail-gallery {{ grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="nav">
+                    <a href="/">Live View</a>
+                    <a href="/recordings" class="active">Recordings</a>
+                    <a href="/settings">Settings</a>
+                </div>
+                
+                <a href="/recordings" class="back-btn">← Back to Recordings</a>
+                
+                <div class="recording-header">
+                    <h1>🐾 {clip_info['species']}</h1>
+                    <div class="recording-meta">
+                        <span>📷 {clip_info['camera']}</span>
+                        <span>📅 {clip_info['time'].strftime('%b %d, %Y at %I:%M %p')}</span>
+                        <span>📦 {clip_info['size_mb']:.1f} MB</span>
+                    </div>
+                </div>
+                
+                <div class="video-section">
+                    <video controls playsinline autoplay>
+                        <source src="/clips/{clip_info['path']}" type="video/mp4">
+                        Your browser does not support video playback.
+                    </video>
+                </div>
+                
+                <div class="action-buttons">
+                    <a class="action-btn download" href="/clips/{clip_info['path']}" download="{clip_info['filename']}">
+                        <svg fill="currentColor" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                        Download
+                    </a>
+                    <button class="action-btn delete" onclick="deleteRecording()">
+                        <svg fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                        Delete
+                    </button>
+                </div>
+                
+                {thumbnails_html}
+                
+                <!-- Image Lightbox -->
+                <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+                    <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
+                    <img id="lightbox-img" src="" alt="Detection frame">
+                </div>
+                
+                <script>
+                    function openImage(url) {{
+                        document.getElementById('lightbox-img').src = url;
+                        document.getElementById('lightbox').classList.add('active');
+                        document.body.style.overflow = 'hidden';
+                    }}
+                    
+                    function closeLightbox() {{
+                        document.getElementById('lightbox').classList.remove('active');
+                        document.body.style.overflow = '';
+                    }}
+                    
+                    document.addEventListener('keydown', (e) => {{
+                        if (e.key === 'Escape') closeLightbox();
+                    }});
+                    
+                    async function deleteRecording() {{
+                        if (!confirm('Are you sure you want to delete this recording?')) return;
+                        
+                        try {{
+                            const response = await fetch('/recordings?path=' + encodeURIComponent('{clip_info['path']}'), {{
+                                method: 'DELETE'
+                            }});
+                            
+                            if (response.ok) {{
+                                window.location.href = '/recordings';
+                            }} else {{
+                                const text = await response.text();
+                                alert('Error: ' + text);
+                            }}
+                        }} catch (e) {{
+                            alert('Error deleting recording: ' + e);
+                        }}
+                    }}
+                </script>
+            </body>
+        </html>
+        """
+        return web.Response(text=html, content_type='text/html')
+
+    def _get_clip_detail(self, rel_path: str) -> dict | None:
+        """Get detailed information about a specific clip."""
+        clips_dir = self.storage_root / 'clips'
+        clip_path = clips_dir / rel_path
+        
+        if not clip_path.exists() or not clip_path.is_file():
+            return None
+        
+        stat = clip_path.stat()
+        species = self._parse_species_from_filename(clip_path.name)
+        thumbnails = self._get_thumbnails_for_clip(clip_path)
+        
+        # Determine camera from path
+        parts = rel_path.split('/')
+        camera = parts[0] if len(parts) > 1 else 'unknown'
+        
+        return {
+            'path': rel_path,
+            'filename': clip_path.name,
+            'camera': camera,
+            'species': species,
+            'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
+            'size': stat.st_size,
+            'size_mb': stat.st_size / (1024 * 1024),
+            'thumbnails': thumbnails
+        }
 
     async def handle_settings_page(self, request):
         """Render the settings page HTML."""

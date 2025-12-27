@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -10,6 +11,8 @@ import cv2
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
+
+from .species_names import get_common_name
 
 LOGGER = logging.getLogger(__name__)
 
@@ -141,17 +144,15 @@ class StorageManager:
             if len(parts) >= 2:
                 species_part = parts[-1]
                 # Check if there's an index suffix (e.g., "cardinal_1" or "cardinal_2")
-                # Try to split off trailing number
-                import re
                 match = re.match(r'^(.+?)(?:_(\d+))?$', species_part)
                 if match:
                     species_name = match.group(1)
                     detection_num = match.group(2)
-                    species = species_name.replace("_", " ").title()
+                    species = get_common_name(species_name)
                     if detection_num:
                         species = f"{species} #{int(detection_num) + 1}"
                 else:
-                    species = species_part.replace("_", " ").title()
+                    species = get_common_name(species_part)
             else:
                 species = "Unknown"
             

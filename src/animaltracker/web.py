@@ -2,12 +2,15 @@ import asyncio
 import logging
 import cv2
 import json
+import re
 import numpy as np
 import yaml
 from aiohttp import web
 from typing import Dict, TYPE_CHECKING
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+
+from .species_names import get_common_name, format_species_display
 
 # Central Time with automatic DST handling
 try:
@@ -461,7 +464,10 @@ class WebServer:
             # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
             parts = thumb_file.stem.split("_thumb_")
             if len(parts) >= 2:
-                species = parts[-1].replace("_", " ").title()
+                raw_species = parts[-1]
+                # Remove trailing index numbers (e.g., "bird_1" -> "bird")
+                raw_species = re.sub(r'_\d+$', '', raw_species)
+                species = get_common_name(raw_species)
             else:
                 species = "Unknown"
             
@@ -479,7 +485,7 @@ class WebServer:
         """Extract clean species name from clip filename.
         
         Filename format: timestamp_species.mp4
-        Example: 1766587074_animal+bird.mp4 -> "Animal, Bird"
+        Example: 1766587074_bird_passeriformes_cardinalidae.mp4 -> "Cardinal"
         """
         import re
         
@@ -503,16 +509,14 @@ class WebServer:
             # Split by semicolons and get meaningful parts
             segments = [s.strip() for s in part.split(';') if s.strip()]
             
-            for segment in reversed(segments):
-                seg_lower = segment.lower()
-                # Skip useless values
-                if seg_lower in ('no cv result', 'unknown', 'blank', 'empty', ''):
-                    continue
-                # Use the first meaningful segment
-                clean_name = segment.replace('_', ' ').title()
-                if clean_name and clean_name not in species_list:
-                    species_list.append(clean_name)
-                break
+            # Get the raw species identifier (join all meaningful parts)
+            raw_species = '_'.join(seg for seg in segments if seg.lower() not in ('no cv result', 'unknown', 'blank', 'empty', ''))
+            
+            if raw_species:
+                # Use the common name mapping
+                common_name = get_common_name(raw_species)
+                if common_name and common_name not in species_list:
+                    species_list.append(common_name)
         
         if not species_list:
             return 'Unknown'

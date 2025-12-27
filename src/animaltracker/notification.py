@@ -8,6 +8,8 @@ from typing import Optional
 
 import requests
 
+from .species_names import get_common_name
+
 LOGGER = logging.getLogger(__name__)
 PUSHOVER_ENDPOINT = "https://api.pushover.net/1/messages.json"
 
@@ -44,12 +46,13 @@ class PushoverNotifier:
 
     def send(self, ctx: NotificationContext, priority: int = 0, sound: Optional[str] = None) -> None:
         message = self._format_message(ctx)
-        LOGGER.info("Dispatching Pushover alert for %s (%s)", ctx.species, ctx.camera_id)
+        common_name = get_common_name(ctx.species)
+        LOGGER.info("Dispatching Pushover alert for %s (%s)", common_name, ctx.camera_id)
         files = None
         data = {
             "token": self._app_token,
             "user": self._user_key,
-            "title": f"{ctx.species.title()} detected @ {ctx.camera_name}",
+            "title": f"{common_name} detected @ {ctx.camera_name}",
             "message": message,
             "priority": priority,
             "sound": sound or "pushover",
@@ -62,8 +65,9 @@ class PushoverNotifier:
 
     @staticmethod
     def _format_message(ctx: NotificationContext) -> str:
+        common_name = get_common_name(ctx.species)
         return (
-            f"Species: {ctx.species}\n"
+            f"Species: {common_name}\n"
             f"Confidence: {ctx.confidence:.2f}\n"
             f"Camera: {ctx.camera_name} ({ctx.camera_id})\n"
             f"Duration: {ctx.event_duration:.1f}s\n"

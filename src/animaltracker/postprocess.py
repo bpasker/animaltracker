@@ -438,10 +438,14 @@ class ClipPostProcessor:
         saved = []
         clip_stem = clip_path.stem
         
+        LOGGER.info("Saving thumbnails for clip: %s (stem=%s, parent=%s)", 
+                   clip_path, clip_stem, clip_path.parent)
+        
         # First, remove old thumbnails for this clip
         for old_thumb in clip_path.parent.glob(f"{clip_stem}_thumb_*.jpg"):
             try:
                 old_thumb.unlink()
+                LOGGER.debug("Removed old thumbnail: %s", old_thumb)
             except Exception as e:
                 LOGGER.warning("Failed to remove old thumbnail %s: %s", old_thumb, e)
         
@@ -461,6 +465,7 @@ class ClipPostProcessor:
                     thumb_name = f"{clip_stem}_thumb_{clean_species}_{idx}.jpg"
                 
                 thumb_path = clip_path.parent / thumb_name
+                LOGGER.debug("Attempting to save thumbnail: %s", thumb_path)
                 
                 try:
                     # Draw bounding box on frame
@@ -470,9 +475,15 @@ class ClipPostProcessor:
                     )
                     
                     # Save thumbnail
-                    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                    cv2.imwrite(str(thumb_path), annotated, encode_params)
-                    saved.append(thumb_path)
+                    cv2.imwrite(str(thumb_path), annotated)
+                    
+                    if thumb_path.exists():
+                        saved.append(thumb_path)
+                        LOGGER.info("Saved thumbnail: %s (size: %d bytes)", 
+                                   thumb_path, thumb_path.stat().st_size)
+                    else:
+                        LOGGER.error("Failed to save thumbnail %s - file doesn't exist after imwrite", 
+                                    thumb_path)
                     
                 except Exception as e:
                     LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e)
@@ -554,10 +565,15 @@ class ClipPostProcessor:
                     )
                     
                     # Save thumbnail
-                    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                    cv2.imwrite(str(thumb_path), annotated, encode_params)
-                    saved.append(thumb_path)
-                    LOGGER.info("Saved sample frame thumbnail: %s", thumb_path)
+                    cv2.imwrite(str(thumb_path), annotated)
+                    
+                    if thumb_path.exists():
+                        saved.append(thumb_path)
+                        LOGGER.info("Saved sample frame thumbnail: %s (size: %d bytes)", 
+                                   thumb_path, thumb_path.stat().st_size)
+                    else:
+                        LOGGER.error("Failed to save sample thumbnail %s - file doesn't exist after imwrite", 
+                                    thumb_path)
                     
                 except Exception as e:
                     LOGGER.error("Failed to save sample thumbnail %s: %s", thumb_path, e)

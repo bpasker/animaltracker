@@ -451,8 +451,13 @@ class WebServer:
         clip_dir = clip_path.parent
         thumbnails = []
         
+        # Debug: Log what we're looking for
+        glob_pattern = f"{clip_stem}_thumb_*.jpg"
+        LOGGER.debug("Looking for thumbnails in %s with pattern: %s", clip_dir, glob_pattern)
+        
         # Look for thumbnails matching this clip
-        for thumb_file in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
+        for thumb_file in clip_dir.glob(glob_pattern):
+            LOGGER.debug("Found thumbnail: %s", thumb_file)
             # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
             parts = thumb_file.stem.split("_thumb_")
             if len(parts) >= 2:
@@ -467,6 +472,7 @@ class WebServer:
                 'url': f"/clips/{rel_path}"
             })
         
+        LOGGER.debug("Total thumbnails found: %d", len(thumbnails))
         return thumbnails
 
     def _parse_species_from_filename(self, filename: str) -> str:
@@ -1111,6 +1117,10 @@ class WebServer:
         result = await loop.run_in_executor(None, do_reprocess)
         
         if result.success:
+            # Log thumbnail paths for debugging
+            LOGGER.info("Reprocess complete. Thumbnails saved: %s", 
+                       [str(p) for p in result.thumbnails_saved])
+            
             return web.json_response({
                 'success': True,
                 'original_species': result.original_species,
@@ -1122,6 +1132,7 @@ class WebServer:
                 'filtered_detections': result.filtered_detections,
                 'species_found': list(result.species_results.keys()),
                 'thumbnails_saved': len(result.thumbnails_saved),
+                'thumbnail_paths': [str(p) for p in result.thumbnails_saved],  # Add actual paths for debugging
                 'renamed': result.new_path is not None,
                 'new_path': str(result.new_path.relative_to(self.storage_root / 'clips')) if result.new_path else None,
             })
@@ -1468,7 +1479,10 @@ class WebServer:
                                 msg += `Frames analyzed: ${{result.frames_analyzed}}/${{result.total_frames}}\\n`;
                                 msg += `Raw detections: ${{result.raw_detections}} (filtered: ${{result.filtered_detections}})\\n`;
                                 msg += `Valid species found: ${{result.species_found.join(', ') || 'None'}}\\n`;
-                                msg += `Thumbnails saved: ${{result.thumbnails_saved}}`;
+                                msg += `Thumbnails saved: ${{result.thumbnails_saved}}\\n`;
+                                if (result.thumbnail_paths && result.thumbnail_paths.length > 0) {{
+                                    msg += `Thumbnail files: ${{result.thumbnail_paths.join(', ')}}`;
+                                }}
                                 
                                 if (result.renamed) {{
                                     msg += `\\n\\nFile was renamed. Redirecting...`;

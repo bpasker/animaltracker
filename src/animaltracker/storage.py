@@ -112,9 +112,8 @@ class StorageManager:
                             font, font_scale, (0, 0, 0), thickness
                         )
                     
-                    # Save thumbnail (maintain reasonable quality)
-                    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                    cv2.imwrite(str(thumb_path), frame, encode_params)
+                    # Save thumbnail
+                    cv2.imwrite(str(thumb_path), frame)
                     saved_paths.append(thumb_path)
                     LOGGER.info("Saved detection thumbnail: %s", thumb_path)
                     

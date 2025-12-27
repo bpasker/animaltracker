@@ -89,6 +89,10 @@ def build_gstreamer_pipeline_nvdec(rtsp_uri: str, transport: str = "tcp", latenc
     return pipeline
 
 
+# Maximum number of key frames to keep per species
+MAX_KEY_FRAMES_PER_SPECIES = 3
+
+
 @dataclass
 class EventState:
     camera: CameraConfig
@@ -97,8 +101,9 @@ class EventState:
     max_confidence: float
     last_detection_ts: float
     frames: List[tuple[float, np.ndarray]] = field(default_factory=list)
-    # Track best detection frame for each species (for thumbnails)
-    species_key_frames: dict = field(default_factory=dict)  # species -> (frame, confidence, bbox)
+    # Track top N detection frames for each species (for thumbnails)
+    # species -> list of (frame, confidence, bbox) tuples, sorted by confidence desc
+    species_key_frames: dict = field(default_factory=dict)
 
     def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray) -> None:
         self.last_detection_ts = frame_ts
@@ -107,15 +112,28 @@ class EventState:
             if det.confidence > self.max_confidence:
                 self.max_confidence = det.confidence
             
-            # Track the best frame for each species (highest confidence)
-            current = self.species_key_frames.get(det.species)
-            if current is None or det.confidence > current[1]:
-                # Store a copy of the frame with detection info
-                self.species_key_frames[det.species] = (
+            # Track top N frames for each species (highest confidence)
+            if det.species not in self.species_key_frames:
+                self.species_key_frames[det.species] = []
+            
+            frames_list = self.species_key_frames[det.species]
+            
+            # Check if this detection is better than what we have
+            # or if we have room for more
+            min_confidence = min((f[1] for f in frames_list), default=0.0)
+            
+            if len(frames_list) < MAX_KEY_FRAMES_PER_SPECIES or det.confidence > min_confidence:
+                # Add this detection
+                frames_list.append((
                     frame.copy(),
                     det.confidence,
                     det.bbox
-                )
+                ))
+                
+                # Sort by confidence descending and keep only top N
+                frames_list.sort(key=lambda x: x[1], reverse=True)
+                self.species_key_frames[det.species] = frames_list[:MAX_KEY_FRAMES_PER_SPECIES]
+        
         # Frames are now appended in the main loop to ensure full framerate
         # self.frames.append((frame_ts, frame))
 

@@ -88,6 +88,89 @@ def cmd_cleanup(args: argparse.Namespace) -> None:
         LOGGER.info("Deleted %d old clips", len(deleted))
 
 
+def cmd_reprocess(args: argparse.Namespace) -> None:
+    """Reprocess clips to improve species classifications."""
+    from .detector import create_detector
+    from .postprocess import process_all_clips, ClipPostProcessor
+    
+    _load_secrets(args.config)
+    runtime = load_runtime_config(args.config)
+    
+    # Create detector
+    detector_cfg = runtime.general.detector
+    detector = create_detector(
+        backend=detector_cfg.backend,
+        model_path=args.model or detector_cfg.model_path,
+        model_version=detector_cfg.speciesnet_version,
+        country=detector_cfg.country,
+        admin1_region=detector_cfg.admin1_region,
+    )
+    LOGGER.info("Using %s detector for reprocessing", detector.backend_name)
+    
+    storage_root = Path(runtime.general.storage_root)
+    
+    if args.clip:
+        # Process single clip
+        clip_path = Path(args.clip)
+        if not clip_path.is_absolute():
+            clip_path = storage_root / 'clips' / clip_path
+        
+        processor = ClipPostProcessor(
+            detector=detector,
+            storage_root=storage_root,
+            sample_rate=args.sample_rate,
+        )
+        
+        result = processor.process_clip(
+            clip_path,
+            update_filename=not args.no_rename,
+            regenerate_thumbnails=not args.no_thumbnails,
+        )
+        
+        if result.success:
+            LOGGER.info("Processed: %s", result.original_path.name)
+            LOGGER.info("  Original species: %s", result.original_species)
+            LOGGER.info("  New species: %s (%.1f%% confidence)", 
+                       result.new_species, result.confidence * 100)
+            LOGGER.info("  Frames analyzed: %d/%d", 
+                       result.frames_analyzed, result.total_frames)
+            LOGGER.info("  Species found: %s", 
+                       ", ".join(result.species_results.keys()) or "None")
+            if result.new_path:
+                LOGGER.info("  Renamed to: %s", result.new_path.name)
+            LOGGER.info("  Thumbnails saved: %d", len(result.thumbnails_saved))
+        else:
+            LOGGER.error("Failed: %s - %s", result.original_path, result.error)
+    else:
+        # Process all clips
+        results = process_all_clips(
+            storage_root=storage_root,
+            detector=detector,
+            camera_filter=args.camera if args.camera else None,
+            update_filenames=not args.no_rename,
+            regenerate_thumbnails=not args.no_thumbnails,
+            sample_rate=args.sample_rate,
+        )
+        
+        # Print summary
+        successful = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+        updated = [r for r in results if r.new_path is not None]
+        
+        LOGGER.info("=" * 50)
+        LOGGER.info("Reprocessing Summary:")
+        LOGGER.info("  Total clips: %d", len(results))
+        LOGGER.info("  Successful: %d", len(successful))
+        LOGGER.info("  Failed: %d", len(failed))
+        LOGGER.info("  Classifications updated: %d", len(updated))
+        
+        if updated:
+            LOGGER.info("\nUpdated classifications:")
+            for r in updated:
+                LOGGER.info("  %s: %s -> %s", 
+                           r.original_path.name, r.original_species, r.new_species)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Animal Tracker CLI")
     parser.add_argument("--config", default="config/cameras.yml", help="Config file path")
@@ -109,6 +192,35 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_cmd = sub.add_parser("cleanup", help="Prune old clips")
     cleanup_cmd.add_argument("--dry-run", action="store_true")
     cleanup_cmd.set_defaults(func=cmd_cleanup)
+
+    reprocess_cmd = sub.add_parser("reprocess", help="Reprocess clips to improve classifications")
+    reprocess_cmd.add_argument("--model", help="Model path (overrides config)")
+    reprocess_cmd.add_argument(
+        "--camera",
+        action="append",
+        help="Only reprocess clips from this camera (repeatable); default=all",
+    )
+    reprocess_cmd.add_argument(
+        "--clip",
+        help="Reprocess a single clip (path relative to clips/ or absolute)",
+    )
+    reprocess_cmd.add_argument(
+        "--sample-rate",
+        type=int,
+        default=5,
+        help="Analyze every Nth frame (default=5, lower=more thorough but slower)",
+    )
+    reprocess_cmd.add_argument(
+        "--no-rename",
+        action="store_true",
+        help="Don't rename clips even if species changes",
+    )
+    reprocess_cmd.add_argument(
+        "--no-thumbnails",
+        action="store_true",
+        help="Don't regenerate detection thumbnails",
+    )
+    reprocess_cmd.set_defaults(func=cmd_reprocess)
 
     return parser
 

@@ -70,6 +70,7 @@ class WebServer:
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
+        self.app.router.add_post('/recordings/reprocess', self.handle_reprocess)
         # Settings page and API
         self.app.router.add_get('/settings', self.handle_settings_page)
         self.app.router.add_get('/api/settings', self.handle_get_settings)
@@ -1065,6 +1066,69 @@ class WebServer:
             'results': results
         })
 
+    async def handle_reprocess(self, request):
+        """Reprocess a clip to improve species classification."""
+        try:
+            data = await request.json()
+            clip_path = data.get('path')
+            sample_rate = data.get('sample_rate', 5)
+        except Exception:
+            return web.Response(status=400, text="Invalid JSON body")
+        
+        if not clip_path:
+            return web.Response(status=400, text="Missing 'path' parameter")
+        
+        # Security check
+        if '..' in clip_path:
+            return web.Response(status=403, text="Invalid path")
+        
+        full_path = self.storage_root / 'clips' / clip_path
+        if not full_path.exists():
+            return web.Response(status=404, text="Clip not found")
+        
+        # Get detector from first worker (they all share the same one)
+        if not self.workers:
+            return web.Response(status=500, text="No workers available")
+        
+        detector = next(iter(self.workers.values())).detector
+        
+        # Run reprocessing in thread pool
+        loop = asyncio.get_running_loop()
+        
+        def do_reprocess():
+            from .postprocess import ClipPostProcessor
+            processor = ClipPostProcessor(
+                detector=detector,
+                storage_root=self.storage_root,
+                sample_rate=sample_rate,
+            )
+            return processor.process_clip(
+                full_path,
+                update_filename=True,
+                regenerate_thumbnails=True,
+            )
+        
+        result = await loop.run_in_executor(None, do_reprocess)
+        
+        if result.success:
+            return web.json_response({
+                'success': True,
+                'original_species': result.original_species,
+                'new_species': result.new_species,
+                'confidence': result.confidence,
+                'frames_analyzed': result.frames_analyzed,
+                'total_frames': result.total_frames,
+                'species_found': list(result.species_results.keys()),
+                'thumbnails_saved': len(result.thumbnails_saved),
+                'renamed': result.new_path is not None,
+                'new_path': str(result.new_path.relative_to(self.storage_root / 'clips')) if result.new_path else None,
+            })
+        else:
+            return web.json_response({
+                'success': False,
+                'error': result.error,
+            }, status=500)
+
     async def handle_recording_detail(self, request):
         """Render a detailed recording page with key detection photos."""
         rel_path = request.match_info['path']
@@ -1200,7 +1264,9 @@ class WebServer:
                     }}
                     .action-btn.download {{ background: #2196F3; }}
                     .action-btn.delete {{ background: #f44336; }}
+                    .action-btn.reprocess {{ background: #9C27B0; }}
                     .action-btn:active {{ opacity: 0.8; }}
+                    .action-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
                     .action-btn svg {{ width: 18px; height: 18px; }}
                     
                     .detection-section {{
@@ -1322,6 +1388,10 @@ class WebServer:
                         <svg fill="currentColor" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                         Download
                     </a>
+                    <button class="action-btn reprocess" id="reprocessBtn" onclick="reprocessRecording()">
+                        <svg fill="currentColor" viewBox="0 0 24 24"><path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8c-.45-.83-.7-1.79-.7-2.8 0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>
+                        <span id="reprocessText">Reanalyze</span>
+                    </button>
                     <button class="action-btn delete" onclick="deleteRecording()">
                         <svg fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                         Delete
@@ -1368,6 +1438,52 @@ class WebServer:
                             }}
                         }} catch (e) {{
                             alert('Error deleting recording: ' + e);
+                        }}
+                    }}
+                    
+                    async function reprocessRecording() {{
+                        const btn = document.getElementById('reprocessBtn');
+                        const textEl = document.getElementById('reprocessText');
+                        
+                        btn.disabled = true;
+                        textEl.textContent = 'Analyzing...';
+                        
+                        try {{
+                            const response = await fetch('/recordings/reprocess', {{
+                                method: 'POST',
+                                headers: {{ 'Content-Type': 'application/json' }},
+                                body: JSON.stringify({{
+                                    path: '{clip_info['path']}',
+                                    sample_rate: 3  // More thorough analysis
+                                }})
+                            }});
+                            
+                            const result = await response.json();
+                            
+                            if (result.success) {{
+                                let msg = `Analysis complete!\\n\\n`;
+                                msg += `Species: ${{result.new_species}} (${{(result.confidence * 100).toFixed(1)}}% confidence)\\n`;
+                                msg += `Frames analyzed: ${{result.frames_analyzed}}/${{result.total_frames}}\\n`;
+                                msg += `Species found: ${{result.species_found.join(', ') || 'None'}}\\n`;
+                                msg += `Thumbnails updated: ${{result.thumbnails_saved}}`;
+                                
+                                if (result.renamed) {{
+                                    msg += `\\n\\nFile was renamed. Redirecting...`;
+                                    alert(msg);
+                                    window.location.href = '/recording/' + result.new_path;
+                                }} else {{
+                                    alert(msg);
+                                    window.location.reload();
+                                }}
+                            }} else {{
+                                alert('Reprocessing failed: ' + result.error);
+                                btn.disabled = false;
+                                textEl.textContent = 'Reanalyze';
+                            }}
+                        }} catch (e) {{
+                            alert('Error reprocessing: ' + e);
+                            btn.disabled = false;
+                            textEl.textContent = 'Reanalyze';
                         }}
                     }}
                 </script>

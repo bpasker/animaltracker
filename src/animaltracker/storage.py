@@ -36,14 +36,19 @@ class StorageManager:
         filename = f"{int(event_ts)}_{species}.{ext}"
         return directory / filename
 
-    def build_thumbnail_path(self, clip_path: Path, species: str) -> Path:
+    def build_thumbnail_path(self, clip_path: Path, species: str, index: int = 0) -> Path:
         """Build path for a detection thumbnail associated with a clip.
         
-        Thumbnails are stored alongside clips with format: {clip_name}_thumb_{species}.jpg
+        Thumbnails are stored alongside clips with format: 
+        {clip_name}_thumb_{species}.jpg (for index 0)
+        {clip_name}_thumb_{species}_{index}.jpg (for index > 0)
         """
         # Create thumbnail filename based on clip name
         clip_stem = clip_path.stem  # e.g., "1766587074_animal+bird"
-        thumb_filename = f"{clip_stem}_thumb_{species}.jpg"
+        if index == 0:
+            thumb_filename = f"{clip_stem}_thumb_{species}.jpg"
+        else:
+            thumb_filename = f"{clip_stem}_thumb_{species}_{index}.jpg"
         return clip_path.parent / thumb_filename
 
     def save_detection_thumbnails(
@@ -55,56 +60,66 @@ class StorageManager:
         
         Args:
             clip_path: Path to the clip file
-            species_frames: Dict mapping species names to (frame, confidence, bbox) tuples
-                where bbox is [x1, y1, x2, y2] or None
+            species_frames: Dict mapping species names to a list of 
+                (frame, confidence, bbox) tuples, where bbox is [x1, y1, x2, y2] or None.
+                Multiple detections per species are supported.
                 
         Returns:
             List of saved thumbnail paths
         """
         saved_paths = []
         
-        for species, (frame, confidence, bbox) in species_frames.items():
-            if frame is None:
-                continue
-                
-            thumb_path = self.build_thumbnail_path(clip_path, species)
+        for species, detections in species_frames.items():
+            # Handle both old format (single tuple) and new format (list of tuples)
+            if not isinstance(detections, list):
+                detections = [detections]
             
-            try:
-                # Draw bounding box if available
-                if bbox:
-                    frame = frame.copy()
-                    x1, y1, x2, y2 = [int(coord) for coord in bbox]
-                    # Draw box with green color
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    # Add species label
-                    label = f"{species} ({confidence:.0%})"
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.6
-                    thickness = 2
-                    (text_width, text_height), baseline = cv2.getTextSize(
-                        label, font, font_scale, thickness
-                    )
-                    # Background rectangle for text
-                    cv2.rectangle(
-                        frame, 
-                        (x1, y1 - text_height - 10), 
-                        (x1 + text_width + 4, y1), 
-                        (0, 255, 0), 
-                        -1
-                    )
-                    cv2.putText(
-                        frame, label, (x1 + 2, y1 - 5), 
-                        font, font_scale, (0, 0, 0), thickness
-                    )
+            for idx, detection in enumerate(detections):
+                frame, confidence, bbox = detection
+                if frame is None:
+                    continue
+                    
+                thumb_path = self.build_thumbnail_path(clip_path, species, idx)
                 
-                # Save thumbnail (maintain reasonable quality)
-                encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                cv2.imwrite(str(thumb_path), frame, encode_params)
-                saved_paths.append(thumb_path)
-                LOGGER.info("Saved detection thumbnail: %s", thumb_path)
-                
-            except Exception as e:
-                LOGGER.error("Failed to save thumbnail for %s: %s", species, e)
+                try:
+                    # Draw bounding box if available
+                    if bbox:
+                        frame = frame.copy()
+                        x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                        # Draw box with green color
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        # Add species label with detection number if multiple
+                        if len(detections) > 1:
+                            label = f"{species} #{idx+1} ({confidence:.0%})"
+                        else:
+                            label = f"{species} ({confidence:.0%})"
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.6
+                        thickness = 2
+                        (text_width, text_height), baseline = cv2.getTextSize(
+                            label, font, font_scale, thickness
+                        )
+                        # Background rectangle for text
+                        cv2.rectangle(
+                            frame, 
+                            (x1, y1 - text_height - 10), 
+                            (x1 + text_width + 4, y1), 
+                            (0, 255, 0), 
+                            -1
+                        )
+                        cv2.putText(
+                            frame, label, (x1 + 2, y1 - 5), 
+                            font, font_scale, (0, 0, 0), thickness
+                        )
+                    
+                    # Save thumbnail (maintain reasonable quality)
+                    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                    cv2.imwrite(str(thumb_path), frame, encode_params)
+                    saved_paths.append(thumb_path)
+                    LOGGER.info("Saved detection thumbnail: %s", thumb_path)
+                    
+                except Exception as e:
+                    LOGGER.error("Failed to save thumbnail for %s #%d: %s", species, idx, e)
                 
         return saved_paths
 
@@ -122,9 +137,22 @@ class StorageManager:
         for thumb_file in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
             # Extract species from filename
             # Format: {timestamp}_{original_species}_thumb_{specific_species}.jpg
+            # or: {timestamp}_{original_species}_thumb_{specific_species}_{index}.jpg
             parts = thumb_file.stem.split("_thumb_")
             if len(parts) >= 2:
-                species = parts[-1].replace("_", " ").title()
+                species_part = parts[-1]
+                # Check if there's an index suffix (e.g., "cardinal_1" or "cardinal_2")
+                # Try to split off trailing number
+                import re
+                match = re.match(r'^(.+?)(?:_(\d+))?$', species_part)
+                if match:
+                    species_name = match.group(1)
+                    detection_num = match.group(2)
+                    species = species_name.replace("_", " ").title()
+                    if detection_num:
+                        species = f"{species} #{int(detection_num) + 1}"
+                else:
+                    species = species_part.replace("_", " ").title()
             else:
                 species = "Unknown"
             

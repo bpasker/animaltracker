@@ -49,7 +49,9 @@ class PostProcessResult:
     thumbnails_saved: List[Path]
     frames_analyzed: int
     total_frames: int
-    success: bool
+    raw_detections: int = 0  # Total detections before filtering
+    filtered_detections: int = 0  # Detections filtered out
+    success: bool = True
     error: Optional[str] = None
 
 
@@ -138,11 +140,16 @@ class ClipPostProcessor:
         
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            species_results = self._analyze_video(cap, total_frames)
+            species_results, raw_detection_count, filtered_count = self._analyze_video(cap, total_frames)
             frames_analyzed = (total_frames + self.sample_rate - 1) // self.sample_rate
             
         finally:
             cap.release()
+        
+        LOGGER.info(
+            "Analysis: %d raw detections, %d filtered out, %d valid species",
+            raw_detection_count, filtered_count, len(species_results)
+        )
         
         # Determine best species classification
         new_species, confidence = self._select_best_species(species_results)
@@ -161,8 +168,13 @@ class ClipPostProcessor:
         
         # Regenerate thumbnails with best detection frames
         thumbnails_saved = []
-        if regenerate_thumbnails and species_results:
-            thumbnails_saved = self._save_thumbnails(working_path, species_results)
+        if regenerate_thumbnails:
+            if species_results:
+                thumbnails_saved = self._save_thumbnails(working_path, species_results)
+            else:
+                # No valid detections - extract sample frames from video as fallback
+                LOGGER.info("No valid detections found, extracting sample frames as fallback")
+                thumbnails_saved = self._extract_sample_frames(working_path, num_samples=3)
         
         LOGGER.info(
             "Post-processing complete: %s -> %s (%.1f%% confidence, %d species found)",
@@ -179,6 +191,8 @@ class ClipPostProcessor:
             thumbnails_saved=thumbnails_saved,
             frames_analyzed=frames_analyzed,
             total_frames=total_frames,
+            raw_detections=raw_detection_count,
+            filtered_detections=filtered_count,
             success=True,
         )
     
@@ -186,13 +200,16 @@ class ClipPostProcessor:
         self, 
         cap: cv2.VideoCapture, 
         total_frames: int
-    ) -> Dict[str, SpeciesResult]:
+    ) -> Tuple[Dict[str, SpeciesResult], int, int]:
         """Analyze video frames and collect species detections.
         
-        Returns dict mapping species name to SpeciesResult.
+        Returns:
+            (species_results dict, raw_detection_count, filtered_count)
         """
         species_results: Dict[str, SpeciesResult] = {}
         frame_idx = 0
+        raw_detection_count = 0
+        filtered_count = 0
         
         while True:
             ret, frame = cap.read()
@@ -203,33 +220,50 @@ class ClipPostProcessor:
             if frame_idx % self.sample_rate == 0:
                 try:
                     detections = self.detector.infer(frame, self.confidence_threshold)
-                    self._process_detections(detections, frame, species_results)
+                    raw_detection_count += len(detections)
+                    valid, filtered = self._process_detections(detections, frame, species_results)
+                    filtered_count += filtered
                 except Exception as e:
                     LOGGER.warning("Detection failed on frame %d: %s", frame_idx, e)
             
             frame_idx += 1
         
-        return species_results
+        return species_results, raw_detection_count, filtered_count
     
     def _process_detections(
         self,
         detections: List[Detection],
         frame,
         species_results: Dict[str, SpeciesResult],
-    ) -> None:
-        """Process detections from a single frame and update results."""
+    ) -> Tuple[int, int]:
+        """Process detections from a single frame and update results.
+        
+        Returns:
+            (valid_count, filtered_count)
+        """
+        valid_count = 0
+        filtered_count = 0
+        
         for det in detections:
             species = det.species
             species_lower = species.lower()
             
             # Filter out invalid detections
             if species_lower in self.invalid_terms:
+                LOGGER.debug("Filtered out invalid term: %s", species)
+                filtered_count += 1
                 continue
             if 'no cv result' in species_lower:
+                LOGGER.debug("Filtered out 'no cv result': %s", species)
+                filtered_count += 1
                 continue
             # Skip UUID-like strings
             if len(species) > 30 and species.count('-') >= 3:
+                LOGGER.debug("Filtered out UUID-like: %s", species)
+                filtered_count += 1
                 continue
+            
+            valid_count += 1
             
             # Calculate specificity score
             specificity = self._calculate_specificity(species)
@@ -251,6 +285,8 @@ class ClipPostProcessor:
             # Track key frames for this species
             result = species_results[species]
             self._update_key_frames(result, frame, det.confidence, det.bbox)
+        
+        return valid_count, filtered_count
     
     def _update_key_frames(
         self,
@@ -442,6 +478,94 @@ class ClipPostProcessor:
                     LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e)
         
         LOGGER.info("Saved %d thumbnails for %s", len(saved), clip_path.name)
+        return saved
+    
+    def _extract_sample_frames(
+        self,
+        clip_path: Path,
+        num_samples: int = 3,
+    ) -> List[Path]:
+        """Extract sample frames from video when no detections are found.
+        
+        This provides fallback thumbnails so the user can see what's in the video.
+        Frames are taken at 25%, 50%, and 75% through the video.
+        """
+        saved = []
+        clip_stem = clip_path.stem
+        
+        # First, remove old thumbnails for this clip
+        for old_thumb in clip_path.parent.glob(f"{clip_stem}_thumb_*.jpg"):
+            try:
+                old_thumb.unlink()
+            except Exception as e:
+                LOGGER.warning("Failed to remove old thumbnail %s: %s", old_thumb, e)
+        
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            LOGGER.error("Could not open video for frame extraction: %s", clip_path)
+            return saved
+        
+        try:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                LOGGER.warning("Video has no frames: %s", clip_path)
+                return saved
+            
+            # Sample at 25%, 50%, 75% of video
+            sample_positions = [0.25, 0.5, 0.75]
+            
+            for idx, pos in enumerate(sample_positions[:num_samples]):
+                frame_num = int(total_frames * pos)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                
+                # Build thumbnail path
+                thumb_name = f"{clip_stem}_thumb_sample_{idx}.jpg"
+                thumb_path = clip_path.parent / thumb_name
+                
+                try:
+                    # Add a label indicating this is a sample frame (no detection)
+                    annotated = frame.copy()
+                    label = f"Frame {frame_num}/{total_frames} (no detection)"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.5
+                    thickness = 1
+                    
+                    # Put label at bottom of frame
+                    h, w = frame.shape[:2]
+                    (text_width, text_height), _ = cv2.getTextSize(
+                        label, font, font_scale, thickness
+                    )
+                    
+                    # Semi-transparent background
+                    cv2.rectangle(
+                        annotated,
+                        (0, h - text_height - 10),
+                        (text_width + 10, h),
+                        (0, 0, 0),
+                        -1
+                    )
+                    cv2.putText(
+                        annotated, label, (5, h - 5),
+                        font, font_scale, (255, 255, 255), thickness
+                    )
+                    
+                    # Save thumbnail
+                    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                    cv2.imwrite(str(thumb_path), annotated, encode_params)
+                    saved.append(thumb_path)
+                    LOGGER.info("Saved sample frame thumbnail: %s", thumb_path)
+                    
+                except Exception as e:
+                    LOGGER.error("Failed to save sample thumbnail %s: %s", thumb_path, e)
+        
+        finally:
+            cap.release()
+        
+        LOGGER.info("Extracted %d sample frames for %s", len(saved), clip_path.name)
         return saved
     
     def _annotate_frame(

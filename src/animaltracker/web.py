@@ -1118,6 +1118,8 @@ class WebServer:
                 'confidence': result.confidence,
                 'frames_analyzed': result.frames_analyzed,
                 'total_frames': result.total_frames,
+                'raw_detections': result.raw_detections,
+                'filtered_detections': result.filtered_detections,
                 'species_found': list(result.species_results.keys()),
                 'thumbnails_saved': len(result.thumbnails_saved),
                 'renamed': result.new_path is not None,
@@ -1462,10 +1464,11 @@ class WebServer:
                             
                             if (result.success) {{
                                 let msg = `Analysis complete!\\n\\n`;
-                                msg += `Species: ${{result.new_species}} (${{(result.confidence * 100).toFixed(1)}}% confidence)\\n`;
+                                msg += `Species: ${{result.new_species || 'Unknown'}} (${{(result.confidence * 100).toFixed(1)}}% confidence)\\n`;
                                 msg += `Frames analyzed: ${{result.frames_analyzed}}/${{result.total_frames}}\\n`;
-                                msg += `Species found: ${{result.species_found.join(', ') || 'None'}}\\n`;
-                                msg += `Thumbnails updated: ${{result.thumbnails_saved}}`;
+                                msg += `Raw detections: ${{result.raw_detections}} (filtered: ${{result.filtered_detections}})\\n`;
+                                msg += `Valid species found: ${{result.species_found.join(', ') || 'None'}}\\n`;
+                                msg += `Thumbnails saved: ${{result.thumbnails_saved}}`;
                                 
                                 if (result.renamed) {{
                                     msg += `\\n\\nFile was renamed. Redirecting...`;

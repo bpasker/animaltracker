@@ -109,6 +109,7 @@ class SpeciesNetDetector(BaseDetector):
         admin1_region: Optional[str] = None,
         latitude: Optional[float] = None,
         longitude: Optional[float] = None,
+        generic_confidence: float = 0.9,
         cache_dir: Optional[str] = None,
     ) -> None:
         """Initialize SpeciesNet detector.
@@ -119,6 +120,7 @@ class SpeciesNetDetector(BaseDetector):
             admin1_region: State/province code for US (e.g., "TX")
             latitude: Camera latitude for species range filtering (-90 to 90)
             longitude: Camera longitude for species range filtering (-180 to 180)
+            generic_confidence: Higher threshold for generic categories (animal, bird)
             cache_dir: Directory for model weights cache
         """
         try:
@@ -132,6 +134,7 @@ class SpeciesNetDetector(BaseDetector):
         self.admin1_region = admin1_region
         self.latitude = latitude
         self.longitude = longitude
+        self.generic_confidence = generic_confidence
         self.model_version = model_version
         
         # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
@@ -148,7 +151,7 @@ class SpeciesNetDetector(BaseDetector):
             location_info.append(f"coords=({latitude:.4f}, {longitude:.4f})")
         
         loc_str = ", ".join(location_info) if location_info else "no location priors"
-        LOGGER.info(f"SpeciesNet loaded ({loc_str})")
+        LOGGER.info(f"SpeciesNet loaded ({loc_str}, generic_conf={generic_confidence})")
     
     @property
     def backend_name(self) -> str:
@@ -197,6 +200,13 @@ class SpeciesNetDetector(BaseDetector):
             
         predictions_list = result.get("predictions", []) if isinstance(result, dict) else []
         
+        # Generic categories that require higher confidence
+        GENERIC_CATEGORIES = {
+            "animal", "bird", "mammalia", "mammal", "aves", 
+            "reptilia", "amphibia", "carnivora", "rodentia",
+            "passeriformes", "artiodactyla"
+        }
+        
         for pred in predictions_list:
             if not isinstance(pred, dict):
                 continue
@@ -210,11 +220,24 @@ class SpeciesNetDetector(BaseDetector):
             species = pred.get("prediction", "unknown")
             score = pred.get("prediction_score", 0.0)
             
-            # Skip low confidence, blanks, or non-animal categories
-            # SpeciesNet may return taxonomy paths like ";;;;;;blank" so check the last component
-            if score < conf_threshold:
-                continue
+            # Determine if this is a generic or specific classification
             species_clean = species.lower().strip(";").split(";")[-1].strip().replace(" ", "_")
+            
+            # Check if any part of the taxonomy is generic (not just the final label)
+            taxonomy_parts = [p.lower().strip() for p in species.split(";") if p.strip()]
+            is_generic = species_clean in GENERIC_CATEGORIES or (
+                len(taxonomy_parts) <= 3 and any(p in GENERIC_CATEGORIES for p in taxonomy_parts)
+            )
+            
+            # Apply tiered confidence threshold
+            required_conf = self.generic_confidence if is_generic else conf_threshold
+            if score < required_conf:
+                if is_generic:
+                    LOGGER.debug("Skipping generic '%s' (%.2f < %.2f generic threshold)", 
+                                species_clean, score, required_conf)
+                continue
+            
+            # Skip blanks or non-animal categories
             skip_terms = ("blank", "unknown", "empty", "vehicle", "", "no_cv_result", "no cv result")
             if species_clean in skip_terms or "no cv result" in species.lower():
                 continue
@@ -438,7 +461,8 @@ def create_detector(
         - country: ISO 3166-1 alpha-3 code (e.g., "USA")
         - admin1_region: State code for US (e.g., "TX")
         - latitude: Camera latitude for species range filtering
-        - longitude: Camera longitude for species range filtering  
+        - longitude: Camera longitude for species range filtering
+        - generic_confidence: Higher threshold for generic categories (default 0.9)
         - cache_dir: Model weights cache directory
     
     Returns:
@@ -460,6 +484,7 @@ def create_detector(
             admin1_region=kwargs.get("admin1_region"),
             latitude=kwargs.get("latitude"),
             longitude=kwargs.get("longitude"),
+            generic_confidence=kwargs.get("generic_confidence", 0.9),
             cache_dir=kwargs.get("cache_dir"),
         )
     

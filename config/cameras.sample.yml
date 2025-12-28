@@ -20,9 +20,12 @@ general:
     speciesnet_version: v4.0.2a  # v4.0.2a (crop) or v4.0.2b (full-image)
     # Location priors for better species accuracy (filters out impossible species)
     country: USA                  # ISO 3166-1 alpha-3 code (e.g., USA, CAN, GBR)
-    admin1_region: TX             # State/province code (US states supported)
-    latitude: 30.2672             # Camera latitude (optional, improves accuracy)
-    longitude: -97.7431           # Camera longitude (optional, improves accuracy)
+    admin1_region: MN             # State/province code (US states supported)
+    latitude: 45.0105             # Camera latitude (optional, for future use)
+    longitude: -93.4555           # Camera longitude (optional, for future use)
+    # Tiered confidence: generic categories (animal, bird) need higher confidence
+    # Specific species (cardinal, blue_jay) use camera's normal threshold
+    generic_confidence: 0.9       # Threshold for generic labels (0.0-1.0)
   exclusion_list:
     - squirrel
   notification:

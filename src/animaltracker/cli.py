@@ -106,6 +106,7 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
         admin1_region=detector_cfg.admin1_region,
         latitude=detector_cfg.latitude,
         longitude=detector_cfg.longitude,
+        generic_confidence=detector_cfg.generic_confidence,
     )
     LOGGER.info("Using %s detector for reprocessing", detector.backend_name)
     

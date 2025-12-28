@@ -596,6 +596,7 @@ class PipelineOrchestrator:
             admin1_region=detector_cfg.admin1_region,
             latitude=detector_cfg.latitude,
             longitude=detector_cfg.longitude,
+            generic_confidence=detector_cfg.generic_confidence,
         )
         LOGGER.info(f"Using {self.detector.backend_name} detector backend")
         

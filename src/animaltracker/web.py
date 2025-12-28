@@ -1671,6 +1671,67 @@ class WebServer:
                         color: #4CAF50;
                     }
                     
+                    /* Toggle switch */
+                    .toggle-switch {
+                        position: relative;
+                        display: inline-block;
+                        width: 50px;
+                        height: 28px;
+                    }
+                    .toggle-switch input {
+                        opacity: 0;
+                        width: 0;
+                        height: 0;
+                    }
+                    .toggle-slider {
+                        position: absolute;
+                        cursor: pointer;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        bottom: 0;
+                        background-color: #444;
+                        transition: 0.3s;
+                        border-radius: 28px;
+                    }
+                    .toggle-slider:before {
+                        position: absolute;
+                        content: "";
+                        height: 20px;
+                        width: 20px;
+                        left: 4px;
+                        bottom: 4px;
+                        background-color: white;
+                        transition: 0.3s;
+                        border-radius: 50%;
+                    }
+                    .toggle-switch input:checked + .toggle-slider {
+                        background-color: #4CAF50;
+                    }
+                    .toggle-switch input:checked + .toggle-slider:before {
+                        transform: translateX(22px);
+                    }
+                    
+                    /* Select dropdown */
+                    select {
+                        background: #1a1a1a;
+                        border: 1px solid #444;
+                        border-radius: 8px;
+                        padding: 12px;
+                        color: #fff;
+                        font-size: 1em;
+                        width: 100%;
+                        cursor: pointer;
+                    }
+                    select:focus {
+                        outline: none;
+                        border-color: #4CAF50;
+                    }
+                    select option {
+                        background: #1a1a1a;
+                        color: #fff;
+                    }
+                    
                     .save-bar {
                         position: fixed;
                         bottom: 0;
@@ -1913,18 +1974,25 @@ class WebServer:
                             const tabsContainer = document.getElementById('cameraTabs');
                             tabsContainer.innerHTML = '';
                             
+                            // Add Global tab first
+                            const globalBtn = document.createElement('button');
+                            globalBtn.className = 'camera-tab';
+                            globalBtn.textContent = '⚙️ Global';
+                            globalBtn.onclick = () => selectGlobal();
+                            tabsContainer.appendChild(globalBtn);
+                            
+                            // Add camera tabs
                             Object.keys(settings.cameras).forEach((camId, index) => {
                                 const cam = settings.cameras[camId];
                                 const btn = document.createElement('button');
-                                btn.className = 'camera-tab' + (index === 0 ? ' active' : '');
+                                btn.className = 'camera-tab';
                                 btn.textContent = cam.name;
                                 btn.onclick = () => selectCamera(camId);
                                 tabsContainer.appendChild(btn);
                             });
                             
-                            // Select first camera
-                            const firstCam = Object.keys(settings.cameras)[0];
-                            if (firstCam) selectCamera(firstCam);
+                            // Select Global tab by default
+                            selectGlobal();
                             
                         } catch (e) {
                             document.getElementById('settingsContent').innerHTML = 
@@ -1932,13 +2000,25 @@ class WebServer:
                         }
                     }
                     
+                    function selectGlobal() {
+                        currentCamera = null;
+                        
+                        // Update tab styling
+                        document.querySelectorAll('.camera-tab').forEach((tab, idx) => {
+                            tab.classList.toggle('active', idx === 0);
+                        });
+                        
+                        renderGlobalSettings();
+                    }
+                    
                     function selectCamera(camId) {
                         currentCamera = camId;
                         
-                        // Update tab styling
+                        // Update tab styling - find by camera name
+                        const camName = settings.cameras[camId].name;
                         document.querySelectorAll('.camera-tab').forEach(tab => {
                             tab.classList.remove('active');
-                            if (tab.textContent === settings.cameras[camId].name) {
+                            if (tab.textContent === camName) {
                                 tab.classList.add('active');
                             }
                         });
@@ -1946,13 +2026,148 @@ class WebServer:
                         renderSettings(camId);
                     }
                     
+                    function renderGlobalSettings() {
+                        const g = settings.global;
+                        const html = `
+                            <div class="settings-card">
+                                <h2>🎯 Detector Settings</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Backend</label>
+                                    <input type="text" value="${g.detector.backend}" disabled 
+                                           style="opacity: 0.6; cursor: not-allowed;">
+                                    <div class="setting-description">Detection backend (requires restart to change)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Generic Category Threshold</label>
+                                    <div class="slider-container">
+                                        <input type="range" min="0" max="100" step="5" 
+                                               value="${Math.round((g.detector.generic_confidence || 0.9) * 100)}"
+                                               oninput="updateGlobalSlider(this, 'detector', 'generic_confidence')">
+                                        <span class="slider-value" id="generic_confidence-value">${Math.round((g.detector.generic_confidence || 0.9) * 100)}%</span>
+                                    </div>
+                                    <div class="setting-description">Higher threshold for generic labels (animal, bird). Specific species use camera's threshold.</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Location</label>
+                                    <input type="text" value="${g.detector.country || ''} ${g.detector.admin1_region || ''}" disabled 
+                                           style="opacity: 0.6; cursor: not-allowed;">
+                                    <div class="setting-description">Geographic priors (edit cameras.yml to change)</div>
+                                </div>
+                            </div>
+                            
+                            <div class="settings-card">
+                                <h2>🎬 Clip Settings</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Pre-Event Buffer (seconds)</label>
+                                    <input type="number" min="1" max="60" step="1"
+                                           value="${g.clip.pre_seconds}"
+                                           onchange="updateGlobalValue('clip', 'pre_seconds', parseFloat(this.value))">
+                                    <div class="setting-description">Seconds of video to keep before detection trigger</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Post-Event Buffer (seconds)</label>
+                                    <input type="number" min="1" max="60" step="1"
+                                           value="${g.clip.post_seconds}"
+                                           onchange="updateGlobalValue('clip', 'post_seconds', parseFloat(this.value))">
+                                    <div class="setting-description">Seconds of video to record after detection ends</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Post-Analysis Enabled</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.post_analysis ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'post_analysis', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Re-analyze clips after recording for better species ID</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Post-Analysis Frames</label>
+                                    <input type="number" min="10" max="200" step="10"
+                                           value="${g.clip.post_analysis_frames}"
+                                           onchange="updateGlobalValue('clip', 'post_analysis_frames', parseInt(this.value))">
+                                    <div class="setting-description">Number of frames to analyze in post-processing</div>
+                                </div>
+                            </div>
+                            
+                            <div class="settings-card">
+                                <h2>💾 Storage & Retention</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Minimum Retention (days)</label>
+                                    <input type="number" min="1" max="365" step="1"
+                                           value="${g.retention.min_days}"
+                                           onchange="updateGlobalValue('retention', 'min_days', parseInt(this.value))">
+                                    <div class="setting-description">Keep clips for at least this many days</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Maximum Retention (days)</label>
+                                    <input type="number" min="1" max="365" step="1"
+                                           value="${g.retention.max_days}"
+                                           onchange="updateGlobalValue('retention', 'max_days', parseInt(this.value))">
+                                    <div class="setting-description">Delete clips older than this (unless space is needed sooner)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Max Disk Usage (%)</label>
+                                    <div class="slider-container">
+                                        <input type="range" min="50" max="95" step="5" 
+                                               value="${g.retention.max_utilization_pct}"
+                                               oninput="updateGlobalSliderDirect(this, 'retention', 'max_utilization_pct')">
+                                        <span class="slider-value" id="max_utilization_pct-value">${g.retention.max_utilization_pct}%</span>
+                                    </div>
+                                    <div class="setting-description">Start deleting old clips when disk usage exceeds this</div>
+                                </div>
+                            </div>
+                        `;
+                        document.getElementById('settingsContent').innerHTML = html;
+                    }
+                    
+                    function updateGlobalSlider(slider, section, field) {
+                        const value = parseInt(slider.value) / 100;
+                        document.getElementById(field + '-value').textContent = Math.round(value * 100) + '%';
+                        if (!settings.global[section]) settings.global[section] = {};
+                        settings.global[section][field] = value;
+                    }
+                    
+                    function updateGlobalSliderDirect(slider, section, field) {
+                        const value = parseInt(slider.value);
+                        document.getElementById(field + '-value').textContent = value + '%';
+                        if (!settings.global[section]) settings.global[section] = {};
+                        settings.global[section][field] = value;
+                    }
+                    
+                    function updateGlobalValue(section, field, value) {
+                        if (!settings.global[section]) settings.global[section] = {};
+                        settings.global[section][field] = value;
+                    }
+                    
                     function renderSettings(camId) {
                         const cam = settings.cameras[camId];
                         const recentDetections = cam.recent_detections || {};
+                        const rtsp = cam.rtsp || {};
+                        const notify = cam.notification || {};
                         
                         const html = `
                             <div class="settings-card">
-                                <h2>Detection Thresholds</h2>
+                                <h2>🔍 Detection Settings</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Detection Enabled</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${cam.detect_enabled !== false ? 'checked' : ''}
+                                               onchange="updateCameraValue('detect_enabled', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Enable/disable detection for this camera</div>
+                                </div>
                                 
                                 <div class="setting-row">
                                     <label class="setting-label">Confidence Threshold</label>
@@ -1986,7 +2201,88 @@ class WebServer:
                             </div>
                             
                             <div class="settings-card">
-                                <h2>Include Species</h2>
+                                <h2>📹 Stream Settings</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Frame Skip</label>
+                                    <input type="number" min="0" max="30" step="1"
+                                           value="${rtsp.frame_skip || 0}"
+                                           onchange="updateRtspValue('frame_skip', parseInt(this.value))">
+                                    <div class="setting-description">Skip N frames between detections (reduces CPU, 0=analyze every frame)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Hardware Acceleration</label>
+                                    <select onchange="updateRtspValue('hwaccel', this.value || null)">
+                                        <option value="" ${!rtsp.hwaccel ? 'selected' : ''}>None (CPU)</option>
+                                        <option value="nvdec" ${rtsp.hwaccel === 'nvdec' ? 'selected' : ''}>NVDEC (NVIDIA)</option>
+                                        <option value="cuda" ${rtsp.hwaccel === 'cuda' ? 'selected' : ''}>CUDA (NVIDIA)</option>
+                                        <option value="vaapi" ${rtsp.hwaccel === 'vaapi' ? 'selected' : ''}>VAAPI (Intel/AMD)</option>
+                                        <option value="videotoolbox" ${rtsp.hwaccel === 'videotoolbox' ? 'selected' : ''}>VideoToolbox (macOS)</option>
+                                    </select>
+                                    <div class="setting-description">Hardware decoder for stream (platform-specific)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Latency (ms)</label>
+                                    <input type="number" min="0" max="5000" step="100"
+                                           value="${rtsp.latency_ms || 200}"
+                                           onchange="updateRtspValue('latency_ms', parseInt(this.value))">
+                                    <div class="setting-description">Stream latency buffer in milliseconds</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Transport</label>
+                                    <select onchange="updateRtspValue('transport', this.value)">
+                                        <option value="tcp" ${(rtsp.transport || 'tcp') === 'tcp' ? 'selected' : ''}>TCP (reliable)</option>
+                                        <option value="udp" ${rtsp.transport === 'udp' ? 'selected' : ''}>UDP (lower latency)</option>
+                                    </select>
+                                    <div class="setting-description">RTSP transport protocol</div>
+                                </div>
+                            </div>
+                            
+                            <div class="settings-card">
+                                <h2>🔔 Notification Settings</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Priority</label>
+                                    <select onchange="updateNotifyValue('priority', parseInt(this.value))">
+                                        <option value="-2" ${notify.priority === -2 ? 'selected' : ''}>Lowest</option>
+                                        <option value="-1" ${notify.priority === -1 ? 'selected' : ''}>Low</option>
+                                        <option value="0" ${!notify.priority || notify.priority === 0 ? 'selected' : ''}>Normal</option>
+                                        <option value="1" ${notify.priority === 1 ? 'selected' : ''}>High</option>
+                                    </select>
+                                    <div class="setting-description">Pushover notification priority</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Sound</label>
+                                    <select onchange="updateNotifyValue('sound', this.value || null)">
+                                        <option value="" ${!notify.sound ? 'selected' : ''}>Default</option>
+                                        <option value="pushover" ${notify.sound === 'pushover' ? 'selected' : ''}>Pushover</option>
+                                        <option value="bike" ${notify.sound === 'bike' ? 'selected' : ''}>Bike</option>
+                                        <option value="bugle" ${notify.sound === 'bugle' ? 'selected' : ''}>Bugle</option>
+                                        <option value="cashregister" ${notify.sound === 'cashregister' ? 'selected' : ''}>Cash Register</option>
+                                        <option value="classical" ${notify.sound === 'classical' ? 'selected' : ''}>Classical</option>
+                                        <option value="cosmic" ${notify.sound === 'cosmic' ? 'selected' : ''}>Cosmic</option>
+                                        <option value="falling" ${notify.sound === 'falling' ? 'selected' : ''}>Falling</option>
+                                        <option value="gamelan" ${notify.sound === 'gamelan' ? 'selected' : ''}>Gamelan</option>
+                                        <option value="incoming" ${notify.sound === 'incoming' ? 'selected' : ''}>Incoming</option>
+                                        <option value="intermission" ${notify.sound === 'intermission' ? 'selected' : ''}>Intermission</option>
+                                        <option value="magic" ${notify.sound === 'magic' ? 'selected' : ''}>Magic</option>
+                                        <option value="mechanical" ${notify.sound === 'mechanical' ? 'selected' : ''}>Mechanical</option>
+                                        <option value="pianobar" ${notify.sound === 'pianobar' ? 'selected' : ''}>Piano Bar</option>
+                                        <option value="siren" ${notify.sound === 'siren' ? 'selected' : ''}>Siren</option>
+                                        <option value="spacealarm" ${notify.sound === 'spacealarm' ? 'selected' : ''}>Space Alarm</option>
+                                        <option value="tugboat" ${notify.sound === 'tugboat' ? 'selected' : ''}>Tugboat</option>
+                                        <option value="none" ${notify.sound === 'none' ? 'selected' : ''}>None (silent)</option>
+                                    </select>
+                                    <div class="setting-description">Notification sound</div>
+                                </div>
+                            </div>
+                            
+                            <div class="settings-card">
+                                <h2>✅ Include Species</h2>
                                 <div class="setting-description" style="margin-bottom: 12px;">
                                     Select species to detect. Leave all unchecked to detect everything.
                                 </div>
@@ -1995,7 +2291,7 @@ class WebServer:
                             </div>
                             
                             <div class="settings-card">
-                                <h2>Exclude Species</h2>
+                                <h2>🚫 Exclude Species</h2>
                                 <div class="setting-description" style="margin-bottom: 12px;">
                                     Select species to always ignore, even if detected.
                                 </div>
@@ -2004,6 +2300,24 @@ class WebServer:
                             </div>
                         `;
                         document.getElementById('settingsContent').innerHTML = html;
+                    }
+                    
+                    function updateCameraValue(field, value) {
+                        settings.cameras[currentCamera][field] = value;
+                    }
+                    
+                    function updateRtspValue(field, value) {
+                        if (!settings.cameras[currentCamera].rtsp) {
+                            settings.cameras[currentCamera].rtsp = {};
+                        }
+                        settings.cameras[currentCamera].rtsp[field] = value;
+                    }
+                    
+                    function updateNotifyValue(field, value) {
+                        if (!settings.cameras[currentCamera].notification) {
+                            settings.cameras[currentCamera].notification = {};
+                        }
+                        settings.cameras[currentCamera].notification[field] = value;
                     }
                     
                     function getSelectedCountText(selected, type) {
@@ -2174,7 +2488,11 @@ class WebServer:
                     
                     function resetSettings() {
                         settings = JSON.parse(JSON.stringify(originalSettings));
-                        if (currentCamera) renderSettings(currentCamera);
+                        if (currentCamera) {
+                            renderSettings(currentCamera);
+                        } else {
+                            renderGlobalSettings();
+                        }
                         showToast('Settings reset to last saved state', 'success');
                     }
                     
@@ -2201,22 +2519,68 @@ class WebServer:
         loop = asyncio.get_running_loop()
         recent_detections = await loop.run_in_executor(None, self._get_recent_detections)
         
+        # Get runtime config for global settings
+        runtime = self.runtime
+        
         cameras = {}
         for cam_id, worker in self.workers.items():
             cam = worker.camera
             cameras[cam_id] = {
                 'name': cam.name,
                 'id': cam.id,
+                'location': getattr(cam, 'location', ''),
+                'detect_enabled': getattr(cam, 'detect_enabled', True),
                 'thresholds': {
                     'confidence': cam.thresholds.confidence,
                     'min_frames': cam.thresholds.min_frames,
                     'min_duration': cam.thresholds.min_duration,
                 },
+                'rtsp': {
+                    'frame_skip': getattr(cam.rtsp, 'frame_skip', 0),
+                    'hwaccel': getattr(cam.rtsp, 'hwaccel', None),
+                    'transport': getattr(cam.rtsp, 'transport', 'tcp'),
+                    'latency_ms': getattr(cam.rtsp, 'latency_ms', 200),
+                },
                 'include_species': list(cam.include_species),
                 'exclude_species': list(cam.exclude_species),
+                'notification': {
+                    'priority': getattr(cam.notification, 'priority', 0),
+                    'sound': getattr(cam.notification, 'sound', 'pushover'),
+                },
                 'recent_detections': recent_detections.get(cam_id, {}),
             }
-        return web.json_response({'cameras': cameras})
+        
+        # Global settings
+        detector_cfg = runtime.general.detector
+        clip_cfg = runtime.general.clip
+        retention_cfg = runtime.general.retention
+        
+        global_settings = {
+            'detector': {
+                'backend': detector_cfg.backend,
+                'speciesnet_version': getattr(detector_cfg, 'speciesnet_version', 'v4.0.2a'),
+                'country': getattr(detector_cfg, 'country', None),
+                'admin1_region': getattr(detector_cfg, 'admin1_region', None),
+                'generic_confidence': getattr(detector_cfg, 'generic_confidence', 0.9),
+            },
+            'clip': {
+                'pre_seconds': clip_cfg.pre_seconds,
+                'post_seconds': clip_cfg.post_seconds,
+                'post_analysis': getattr(clip_cfg, 'post_analysis', True),
+                'post_analysis_frames': getattr(clip_cfg, 'post_analysis_frames', 60),
+            },
+            'retention': {
+                'min_days': retention_cfg.min_days,
+                'max_days': retention_cfg.max_days,
+                'max_utilization_pct': retention_cfg.max_utilization_pct,
+            },
+            'exclusion_list': list(runtime.general.exclusion_list),
+        }
+        
+        return web.json_response({
+            'cameras': cameras,
+            'global': global_settings,
+        })
 
     def _get_recent_detections(self):
         """Scan clips directory to get species detection counts per camera."""
@@ -2290,6 +2654,7 @@ class WebServer:
             return web.Response(status=400, text="Invalid JSON body")
 
         cameras_data = data.get('cameras', {})
+        global_data = data.get('global', {})
         
         # Update in-memory settings for each camera
         updated_cameras = []
@@ -2310,18 +2675,87 @@ class WebServer:
                 if 'min_duration' in thresholds:
                     cam.thresholds.min_duration = float(thresholds['min_duration'])
             
+            # Update RTSP settings
+            if 'rtsp' in cam_settings:
+                rtsp = cam_settings['rtsp']
+                if 'frame_skip' in rtsp:
+                    cam.rtsp.frame_skip = int(rtsp['frame_skip'])
+                if 'hwaccel' in rtsp:
+                    # hwaccel can be None, or a string like 'nvdec', 'cuda', etc.
+                    cam.rtsp.hwaccel = rtsp['hwaccel'] if rtsp['hwaccel'] else None
+                if 'latency_ms' in rtsp:
+                    cam.rtsp.latency_ms = int(rtsp['latency_ms'])
+                if 'transport' in rtsp:
+                    cam.rtsp.transport = rtsp['transport']
+            
             # Update species filters
             if 'include_species' in cam_settings:
                 cam.include_species = list(cam_settings['include_species'])
             if 'exclude_species' in cam_settings:
                 cam.exclude_species = list(cam_settings['exclude_species'])
             
+            # Update detection enabled
+            if 'detect_enabled' in cam_settings:
+                cam.detect_enabled = bool(cam_settings['detect_enabled'])
+            
+            # Update notification settings
+            if 'notification' in cam_settings:
+                notif = cam_settings['notification']
+                if 'priority' in notif:
+                    cam.notification.priority = int(notif['priority'])
+                if 'sound' in notif:
+                    cam.notification.sound = notif['sound']
+            
             updated_cameras.append(cam_id)
+        
+        # Update global settings
+        updated_global = False
+        if global_data:
+            runtime = self.runtime
+            
+            # Detector settings
+            if 'detector' in global_data:
+                det = global_data['detector']
+                if 'generic_confidence' in det:
+                    runtime.general.detector.generic_confidence = float(det['generic_confidence'])
+                    # Also update the actual detector instance if it supports it
+                    if hasattr(self.detector, 'generic_confidence'):
+                        self.detector.generic_confidence = float(det['generic_confidence'])
+                updated_global = True
+            
+            # Clip settings
+            if 'clip' in global_data:
+                clip = global_data['clip']
+                if 'pre_seconds' in clip:
+                    runtime.general.clip.pre_seconds = float(clip['pre_seconds'])
+                if 'post_seconds' in clip:
+                    runtime.general.clip.post_seconds = float(clip['post_seconds'])
+                if 'post_analysis' in clip:
+                    runtime.general.clip.post_analysis = bool(clip['post_analysis'])
+                if 'post_analysis_frames' in clip:
+                    runtime.general.clip.post_analysis_frames = int(clip['post_analysis_frames'])
+                updated_global = True
+            
+            # Retention settings
+            if 'retention' in global_data:
+                ret = global_data['retention']
+                if 'min_days' in ret:
+                    runtime.general.retention.min_days = int(ret['min_days'])
+                if 'max_days' in ret:
+                    runtime.general.retention.max_days = int(ret['max_days'])
+                if 'max_utilization_pct' in ret:
+                    runtime.general.retention.max_utilization_pct = int(ret['max_utilization_pct'])
+                updated_global = True
+            
+            # Global exclusion list
+            if 'exclusion_list' in global_data:
+                runtime.general.exclusion_list = list(global_data['exclusion_list'])
+                updated_global = True
         
         # Persist to config file if available
         if self.config_path and self.config_path.exists():
             try:
-                await self._save_config_to_file()
+                await self._save_config_to_file(global_data if updated_global else None)
                 LOGGER.info(f"Settings saved to {self.config_path}")
             except Exception as e:
                 LOGGER.error(f"Failed to save config file: {e}")
@@ -2329,22 +2763,66 @@ class WebServer:
         
         return web.json_response({
             'status': 'ok',
-            'updated_cameras': updated_cameras
+            'updated_cameras': updated_cameras,
+            'updated_global': updated_global,
         })
 
-    async def _save_config_to_file(self):
+    async def _save_config_to_file(self, global_data=None):
         """Save current settings back to the YAML config file."""
         if not self.config_path:
             return
         
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._save_config_sync)
+        await loop.run_in_executor(None, self._save_config_sync, global_data)
 
-    def _save_config_sync(self):
+    def _save_config_sync(self, global_data=None):
         """Synchronously save config to file."""
         # Read existing config to preserve non-editable settings
         with self.config_path.open('r', encoding='utf-8') as f:
             config = yaml.safe_load(f) or {}
+        
+        # Update global settings
+        if global_data:
+            if 'general' not in config:
+                config['general'] = {}
+            
+            # Detector settings
+            if 'detector' in global_data:
+                if 'detector' not in config['general']:
+                    config['general']['detector'] = {}
+                det = global_data['detector']
+                if 'generic_confidence' in det:
+                    config['general']['detector']['generic_confidence'] = det['generic_confidence']
+            
+            # Clip settings
+            if 'clip' in global_data:
+                if 'clip' not in config['general']:
+                    config['general']['clip'] = {}
+                clip = global_data['clip']
+                if 'pre_seconds' in clip:
+                    config['general']['clip']['pre_seconds'] = clip['pre_seconds']
+                if 'post_seconds' in clip:
+                    config['general']['clip']['post_seconds'] = clip['post_seconds']
+                if 'post_analysis' in clip:
+                    config['general']['clip']['post_analysis'] = clip['post_analysis']
+                if 'post_analysis_frames' in clip:
+                    config['general']['clip']['post_analysis_frames'] = clip['post_analysis_frames']
+            
+            # Retention settings
+            if 'retention' in global_data:
+                if 'retention' not in config['general']:
+                    config['general']['retention'] = {}
+                ret = global_data['retention']
+                if 'min_days' in ret:
+                    config['general']['retention']['min_days'] = ret['min_days']
+                if 'max_days' in ret:
+                    config['general']['retention']['max_days'] = ret['max_days']
+                if 'max_utilization_pct' in ret:
+                    config['general']['retention']['max_utilization_pct'] = ret['max_utilization_pct']
+            
+            # Exclusion list
+            if 'exclusion_list' in global_data:
+                config['general']['exclusion_list'] = global_data['exclusion_list']
         
         # Update camera settings
         for cam_id, worker in self.workers.items():
@@ -2359,9 +2837,34 @@ class WebServer:
                     cam_cfg['thresholds']['min_frames'] = cam.thresholds.min_frames
                     cam_cfg['thresholds']['min_duration'] = cam.thresholds.min_duration
                     
+                    # Update RTSP settings
+                    if 'rtsp' not in cam_cfg:
+                        cam_cfg['rtsp'] = {}
+                    cam_cfg['rtsp']['frame_skip'] = getattr(cam.rtsp, 'frame_skip', 0)
+                    hwaccel_val = getattr(cam.rtsp, 'hwaccel', None)
+                    if hwaccel_val:
+                        cam_cfg['rtsp']['hwaccel'] = hwaccel_val
+                    elif 'hwaccel' in cam_cfg['rtsp']:
+                        del cam_cfg['rtsp']['hwaccel']
+                    cam_cfg['rtsp']['latency_ms'] = getattr(cam.rtsp, 'latency_ms', 200)
+                    cam_cfg['rtsp']['transport'] = getattr(cam.rtsp, 'transport', 'tcp')
+                    
+                    # Update detection enabled
+                    cam_cfg['detect_enabled'] = getattr(cam, 'detect_enabled', True)
+                    
                     # Update species filters
                     cam_cfg['include_species'] = list(cam.include_species)
                     cam_cfg['exclude_species'] = list(cam.exclude_species)
+                    
+                    # Update notification
+                    if 'notification' not in cam_cfg:
+                        cam_cfg['notification'] = {}
+                    cam_cfg['notification']['priority'] = getattr(cam.notification, 'priority', 0)
+                    sound_val = getattr(cam.notification, 'sound', None)
+                    if sound_val:
+                        cam_cfg['notification']['sound'] = sound_val
+                    elif 'sound' in cam_cfg['notification']:
+                        del cam_cfg['notification']['sound']
                     break
         
         # Write back to file

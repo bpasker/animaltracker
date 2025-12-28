@@ -36,6 +36,10 @@ class DetectorSettings(BaseModel):
     # Geospatial priors for improved species accuracy
     latitude: Optional[float] = Field(default=None, ge=-90, le=90, description="Camera latitude for species range filtering")
     longitude: Optional[float] = Field(default=None, ge=-180, le=180, description="Camera longitude for species range filtering")
+    # Tiered confidence thresholds (SpeciesNet only)
+    # Generic categories (animal, bird, mammalia) require higher confidence
+    # Specific species (cardinal, blue_jay) use the camera's normal threshold
+    generic_confidence: Optional[float] = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
 
 
 class RetentionSettings(BaseModel):

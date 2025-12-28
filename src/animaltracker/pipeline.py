@@ -16,6 +16,7 @@ from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, BaseDetector, create_detector
+from .ebird import EBirdClient, create_ebird_client
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
@@ -154,12 +155,14 @@ class StreamWorker:
         detector: BaseDetector,
         notifier: PushoverNotifier,
         storage: StorageManager,
+        ebird_client: Optional[EBirdClient] = None,
     ) -> None:
         self.camera = camera
         self.runtime = runtime
         self.detector = detector
         self.notifier = notifier
         self.storage = storage
+        self.ebird_client = ebird_client
         # Ensure buffer is at least 30s for manual clips
         clip_seconds = max(30.0, runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds)
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
@@ -371,6 +374,12 @@ class StreamWorker:
         includes = set(s.lower() for s in self.camera.include_species)
         excludes = set(s.lower() for s in self.camera.exclude_species)
         global_excludes = set(s.lower() for s in self.runtime.general.exclusion_list)
+        
+        # Get eBird filter mode if enabled
+        ebird_mode = None
+        if self.ebird_client and self.ebird_client.enabled:
+            ebird_mode = self.runtime.general.ebird.filter_mode
+        
         filtered: List[Detection] = []
         for det in detections:
             label = det.species.lower()
@@ -378,8 +387,48 @@ class StreamWorker:
                 continue
             if label in excludes or label in global_excludes:
                 continue
+            
+            # Apply eBird filtering for bird species
+            if ebird_mode and self._is_bird_detection(det):
+                is_present = self.ebird_client.is_species_present(det.taxonomy or det.species)
+                
+                if ebird_mode == "filter" and not is_present:
+                    # Filter mode: skip species not recently seen in the region
+                    LOGGER.debug("eBird filter: %s not present in region, skipping", det.species)
+                    continue
+                elif ebird_mode == "flag" and not is_present:
+                    # Flag mode: mark but don't filter
+                    LOGGER.info("eBird flag: %s not recently reported in region", det.species)
+                # boost mode: could be used for sorting/prioritization later
+            
             filtered.append(det)
         return filtered
+    
+    def _is_bird_detection(self, det: Detection) -> bool:
+        """Check if a detection is a bird based on taxonomy or species name."""
+        taxonomy = det.taxonomy or det.species
+        taxonomy_lower = taxonomy.lower()
+        
+        # Check taxonomy for bird indicators
+        bird_indicators = ['aves', 'bird', ';aves;', 'animalia;chordata;aves']
+        for indicator in bird_indicators:
+            if indicator in taxonomy_lower:
+                return True
+        
+        # Check common bird species names
+        species_lower = det.species.lower()
+        common_bird_words = {
+            'cardinal', 'robin', 'sparrow', 'finch', 'hawk', 'eagle', 'owl',
+            'crow', 'raven', 'jay', 'woodpecker', 'hummingbird', 'duck', 'goose',
+            'heron', 'crane', 'pelican', 'gull', 'tern', 'warbler', 'thrush',
+            'wren', 'chickadee', 'nuthatch', 'titmouse', 'oriole', 'tanager',
+            'grosbeak', 'bunting', 'dove', 'pigeon', 'falcon', 'kestrel'
+        }
+        for word in common_bird_words:
+            if word in species_lower:
+                return True
+        
+        return False
 
     async def _maybe_close_event(self, ts: float) -> None:
         if self.event_state is None:
@@ -464,7 +513,7 @@ class StreamWorker:
         
         self.event_state = None
 
-    def _analyze_clip_frames(self, frames: List[tuple], num_samples: int = 5) -> tuple[str, float]:
+    def _analyze_clip_frames(self, frames: List[tuple], num_samples: int = None) -> tuple[str, float]:
         """Analyze frames from a clip to get the most specific species identification.
         
         Samples frames evenly throughout the clip, runs detection on each,
@@ -472,13 +521,20 @@ class StreamWorker:
         
         Args:
             frames: List of (timestamp, frame) tuples
-            num_samples: Number of frames to analyze (default 5)
+            num_samples: Number of frames to analyze (uses config default if None)
             
         Returns:
             (species_label, confidence) - best identification found
         """
         if not frames:
             return "", 0.0
+        
+        # Get post-analysis settings from config
+        clip_cfg = self.runtime.general.clip
+        if num_samples is None:
+            num_samples = getattr(clip_cfg, 'post_analysis_frames', 60)
+        conf_threshold = getattr(clip_cfg, 'post_analysis_confidence', 0.3)
+        generic_conf = getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5)
         
         # Sample frames evenly throughout the clip
         total_frames = len(frames)
@@ -493,11 +549,11 @@ class StreamWorker:
         for idx in sample_indices:
             _, frame = frames[idx]
             try:
-                # Use lower thresholds for post-analysis to catch more species
+                # Use configured thresholds for post-analysis
                 detections = self.detector.infer(
                     frame, 
-                    conf_threshold=0.3,
-                    generic_confidence=0.5  # Lower generic threshold for post-analysis
+                    conf_threshold=conf_threshold,
+                    generic_confidence=generic_conf,
                 )
                 all_detections.extend(detections)
             except Exception as e:
@@ -607,6 +663,18 @@ class PipelineOrchestrator:
         )
         LOGGER.info(f"Using {self.detector.backend_name} detector backend")
         
+        # Create eBird client if configured
+        ebird_cfg = runtime.general.ebird
+        self.ebird_client = create_ebird_client(
+            enabled=ebird_cfg.enabled,
+            api_key_env=ebird_cfg.api_key_env,
+            region=ebird_cfg.region,
+            days_back=ebird_cfg.days_back,
+            cache_hours=ebird_cfg.cache_hours,
+        )
+        if self.ebird_client and self.ebird_client.enabled:
+            LOGGER.info(f"eBird integration enabled: region={ebird_cfg.region}, mode={ebird_cfg.filter_mode}")
+        
         self.notifier = PushoverNotifier(
             runtime.general.notification.pushover_app_token_env,
             runtime.general.notification.pushover_user_key_env,
@@ -632,6 +700,7 @@ class PipelineOrchestrator:
                 detector=self.detector,
                 notifier=self.notifier,
                 storage=self.storage,
+                ebird_client=self.ebird_client,
             )
             for cam in self.cameras
         ]

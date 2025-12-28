@@ -1106,12 +1106,19 @@ class WebServer:
         # Run reprocessing in thread pool
         loop = asyncio.get_running_loop()
         
+        # Get post-processing settings from runtime config
+        clip_cfg = self.runtime.general.clip if self.runtime else None
+        conf_threshold = getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3
+        generic_conf = getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5
+        
         def do_reprocess():
             from .postprocess import ClipPostProcessor
             processor = ClipPostProcessor(
                 detector=detector,
                 storage_root=self.storage_root,
                 sample_rate=sample_rate,
+                confidence_threshold=conf_threshold,
+                generic_confidence=generic_conf,
             )
             return processor.process_clip(
                 full_path,
@@ -2084,6 +2091,28 @@ class WebServer:
                                            onchange="updateGlobalValue('clip', 'post_analysis_frames', parseInt(this.value))">
                                     <div class="setting-description">Number of frames to analyze in post-processing</div>
                                 </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Post-Analysis Species Confidence</label>
+                                    <div class="slider-container">
+                                        <input type="range" min="0" max="100" step="5" 
+                                               value="${Math.round((g.clip.post_analysis_confidence || 0.3) * 100)}"
+                                               oninput="updateGlobalSlider(this, 'clip', 'post_analysis_confidence')">
+                                        <span class="slider-value" id="post_analysis_confidence-value">${Math.round((g.clip.post_analysis_confidence || 0.3) * 100)}%</span>
+                                    </div>
+                                    <div class="setting-description">Species threshold for post-analysis (lower catches more)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Post-Analysis Generic Confidence</label>
+                                    <div class="slider-container">
+                                        <input type="range" min="0" max="100" step="5" 
+                                               value="${Math.round((g.clip.post_analysis_generic_confidence || 0.5) * 100)}"
+                                               oninput="updateGlobalSlider(this, 'clip', 'post_analysis_generic_confidence')">
+                                        <span class="slider-value" id="post_analysis_generic_confidence-value">${Math.round((g.clip.post_analysis_generic_confidence || 0.5) * 100)}%</span>
+                                    </div>
+                                    <div class="setting-description">Generic category threshold for post-analysis (animal, bird, etc.)</div>
+                                </div>
                             </div>
                             
                             <div class="settings-card">
@@ -2114,6 +2143,59 @@ class WebServer:
                                         <span class="slider-value" id="max_utilization_pct-value">${g.retention.max_utilization_pct}%</span>
                                     </div>
                                     <div class="setting-description">Start deleting old clips when disk usage exceeds this</div>
+                                </div>
+                            </div>
+                            
+                            <div class="settings-card">
+                                <h2>🐦 eBird Integration</h2>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Enable eBird Filtering</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.ebird?.enabled ? 'checked' : ''}
+                                               onchange="updateGlobalValue('ebird', 'enabled', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Filter/flag bird detections based on recent eBird sightings. Requires EBIRD_API_KEY env variable.</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">eBird Region</label>
+                                    <input type="text" value="${g.ebird?.region || 'US-MN'}"
+                                           placeholder="US-MN"
+                                           onchange="updateGlobalValue('ebird', 'region', this.value)"
+                                           style="width: 150px;">
+                                    <div class="setting-description">Region code (e.g., US-MN, US-CA, CA-ON). See <a href="https://ebird.org/region/world" target="_blank">eBird regions</a></div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Days Back</label>
+                                    <input type="number" min="1" max="30" step="1"
+                                           value="${g.ebird?.days_back || 14}"
+                                           onchange="updateGlobalValue('ebird', 'days_back', parseInt(this.value))">
+                                    <div class="setting-description">How many days of recent sightings to check (1-30)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Filter Mode</label>
+                                    <select onchange="updateGlobalValue('ebird', 'filter_mode', this.value)">
+                                        <option value="flag" ${(g.ebird?.filter_mode || 'flag') === 'flag' ? 'selected' : ''}>Flag Only</option>
+                                        <option value="filter" ${(g.ebird?.filter_mode) === 'filter' ? 'selected' : ''}>Filter Out</option>
+                                        <option value="boost" ${(g.ebird?.filter_mode) === 'boost' ? 'selected' : ''}>Boost Priority</option>
+                                    </select>
+                                    <div class="setting-description">Flag: log unusual species. Filter: reject species not seen recently. Boost: prioritize common species.</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Cache Hours</label>
+                                    <input type="number" min="1" max="168" step="1"
+                                           value="${g.ebird?.cache_hours || 24}"
+                                           onchange="updateGlobalValue('ebird', 'cache_hours', parseInt(this.value))">
+                                    <div class="setting-description">How long to cache eBird data before refreshing (hours)</div>
+                                </div>
+                                
+                                <div class="setting-description" style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
+                                    <small>Species data provided by <a href="https://ebird.org" target="_blank">eBird.org</a>. Free API key at <a href="https://ebird.org/api/keygen" target="_blank">ebird.org/api/keygen</a></small>
                                 </div>
                             </div>
                         `;
@@ -2559,6 +2641,7 @@ class WebServer:
         detector_cfg = runtime.general.detector
         clip_cfg = runtime.general.clip
         retention_cfg = runtime.general.retention
+        ebird_cfg = runtime.general.ebird
         
         global_settings = {
             'detector': {
@@ -2573,11 +2656,20 @@ class WebServer:
                 'post_seconds': clip_cfg.post_seconds,
                 'post_analysis': getattr(clip_cfg, 'post_analysis', True),
                 'post_analysis_frames': getattr(clip_cfg, 'post_analysis_frames', 60),
+                'post_analysis_confidence': getattr(clip_cfg, 'post_analysis_confidence', 0.3),
+                'post_analysis_generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
             },
             'retention': {
                 'min_days': retention_cfg.min_days,
                 'max_days': retention_cfg.max_days,
                 'max_utilization_pct': retention_cfg.max_utilization_pct,
+            },
+            'ebird': {
+                'enabled': getattr(ebird_cfg, 'enabled', False),
+                'region': getattr(ebird_cfg, 'region', 'US-MN'),
+                'days_back': getattr(ebird_cfg, 'days_back', 14),
+                'filter_mode': getattr(ebird_cfg, 'filter_mode', 'flag'),
+                'cache_hours': getattr(ebird_cfg, 'cache_hours', 24),
             },
             'exclusion_list': list(runtime.general.exclusion_list),
         }
@@ -2741,6 +2833,10 @@ class WebServer:
                     runtime.general.clip.post_analysis = bool(clip['post_analysis'])
                 if 'post_analysis_frames' in clip:
                     runtime.general.clip.post_analysis_frames = int(clip['post_analysis_frames'])
+                if 'post_analysis_confidence' in clip:
+                    runtime.general.clip.post_analysis_confidence = float(clip['post_analysis_confidence'])
+                if 'post_analysis_generic_confidence' in clip:
+                    runtime.general.clip.post_analysis_generic_confidence = float(clip['post_analysis_generic_confidence'])
                 updated_global = True
             
             # Retention settings
@@ -2752,6 +2848,21 @@ class WebServer:
                     runtime.general.retention.max_days = int(ret['max_days'])
                 if 'max_utilization_pct' in ret:
                     runtime.general.retention.max_utilization_pct = int(ret['max_utilization_pct'])
+                updated_global = True
+            
+            # eBird settings
+            if 'ebird' in global_data:
+                ebird = global_data['ebird']
+                if 'enabled' in ebird:
+                    runtime.general.ebird.enabled = bool(ebird['enabled'])
+                if 'region' in ebird:
+                    runtime.general.ebird.region = str(ebird['region'])
+                if 'days_back' in ebird:
+                    runtime.general.ebird.days_back = int(ebird['days_back'])
+                if 'filter_mode' in ebird:
+                    runtime.general.ebird.filter_mode = str(ebird['filter_mode'])
+                if 'cache_hours' in ebird:
+                    runtime.general.ebird.cache_hours = int(ebird['cache_hours'])
                 updated_global = True
             
             # Global exclusion list
@@ -2814,6 +2925,10 @@ class WebServer:
                     config['general']['clip']['post_analysis'] = clip['post_analysis']
                 if 'post_analysis_frames' in clip:
                     config['general']['clip']['post_analysis_frames'] = clip['post_analysis_frames']
+                if 'post_analysis_confidence' in clip:
+                    config['general']['clip']['post_analysis_confidence'] = clip['post_analysis_confidence']
+                if 'post_analysis_generic_confidence' in clip:
+                    config['general']['clip']['post_analysis_generic_confidence'] = clip['post_analysis_generic_confidence']
             
             # Retention settings
             if 'retention' in global_data:
@@ -2826,6 +2941,22 @@ class WebServer:
                     config['general']['retention']['max_days'] = ret['max_days']
                 if 'max_utilization_pct' in ret:
                     config['general']['retention']['max_utilization_pct'] = ret['max_utilization_pct']
+            
+            # eBird settings
+            if 'ebird' in global_data:
+                if 'ebird' not in config['general']:
+                    config['general']['ebird'] = {}
+                ebird = global_data['ebird']
+                if 'enabled' in ebird:
+                    config['general']['ebird']['enabled'] = ebird['enabled']
+                if 'region' in ebird:
+                    config['general']['ebird']['region'] = ebird['region']
+                if 'days_back' in ebird:
+                    config['general']['ebird']['days_back'] = ebird['days_back']
+                if 'filter_mode' in ebird:
+                    config['general']['ebird']['filter_mode'] = ebird['filter_mode']
+                if 'cache_hours' in ebird:
+                    config['general']['ebird']['cache_hours'] = ebird['cache_hours']
             
             # Exclusion list
             if 'exclusion_list' in global_data:

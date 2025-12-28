@@ -21,7 +21,9 @@ class ClipSettings(BaseModel):
     codec: str = "h264"
     # Post-clip analysis settings
     post_analysis: bool = Field(default=True, description="Run species re-analysis on saved clips for better identification")
-    post_analysis_frames: int = Field(default=60, ge=1, le=120, description="Number of frames to analyze from each clip")
+    post_analysis_frames: int = Field(default=60, ge=1, le=200, description="Number of frames to analyze from each clip")
+    post_analysis_confidence: float = Field(default=0.3, ge=0, le=1, description="Confidence threshold for post-analysis (lower catches more)")
+    post_analysis_generic_confidence: float = Field(default=0.5, ge=0, le=1, description="Generic category threshold for post-analysis")
 
 
 class DetectorSettings(BaseModel):
@@ -40,6 +42,16 @@ class DetectorSettings(BaseModel):
     # Generic categories (animal, bird, mammalia) require higher confidence
     # Specific species (cardinal, blue_jay) use the camera's normal threshold
     generic_confidence: Optional[float] = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
+
+
+class EBirdSettings(BaseModel):
+    """Configuration for eBird seasonal species filtering."""
+    enabled: bool = Field(default=False, description="Enable eBird seasonal filtering for birds")
+    api_key_env: str = Field(default="EBIRD_API_KEY", description="Environment variable containing eBird API key")
+    region: str = Field(default="US-MN", description="eBird region code (e.g., US-MN, US, CA-ON)")
+    days_back: int = Field(default=14, ge=1, le=30, description="Days of recent observations to consider")
+    filter_mode: str = Field(default="flag", pattern="^(flag|filter|boost)$", description="flag=mark unlikely, filter=remove unlikely, boost=increase confidence for present species")
+    cache_hours: int = Field(default=24, ge=1, le=168, description="Hours to cache eBird data")
 
 
 class RetentionSettings(BaseModel):
@@ -113,6 +125,7 @@ class GeneralSettings(BaseModel):
     metrics_port: int = 9500
     clip: ClipSettings = ClipSettings()
     detector: DetectorSettings = DetectorSettings()
+    ebird: EBirdSettings = EBirdSettings()
     exclusion_list: List[str] = Field(default_factory=list)
     notification: NotificationSettings
     retention: RetentionSettings = RetentionSettings()

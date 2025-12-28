@@ -64,6 +64,7 @@ class ClipPostProcessor:
         storage_root: Path,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        generic_confidence: float = 0.5,
     ):
         """Initialize the post-processor.
         
@@ -71,12 +72,14 @@ class ClipPostProcessor:
             detector: Detection backend to use for analysis
             storage_root: Root directory for clip storage
             sample_rate: Analyze every Nth frame (lower = more thorough but slower)
-            confidence_threshold: Minimum confidence for detections
+            confidence_threshold: Minimum confidence for specific species detections
+            generic_confidence: Minimum confidence for generic categories (animal, bird)
         """
         self.detector = detector
         self.storage_root = storage_root
         self.sample_rate = sample_rate
         self.confidence_threshold = confidence_threshold
+        self.generic_confidence = generic_confidence
         
         # Terms to filter out
         self.invalid_terms = {
@@ -219,7 +222,11 @@ class ClipPostProcessor:
             # Only process every Nth frame
             if frame_idx % self.sample_rate == 0:
                 try:
-                    detections = self.detector.infer(frame, self.confidence_threshold)
+                    detections = self.detector.infer(
+                        frame, 
+                        conf_threshold=self.confidence_threshold,
+                        generic_confidence=self.generic_confidence
+                    )
                     raw_detection_count += len(detections)
                     valid, filtered = self._process_detections(detections, frame, species_results)
                     filtered_count += filtered

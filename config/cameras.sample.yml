@@ -26,6 +26,14 @@ general:
     # Tiered confidence: generic categories (animal, bird) need higher confidence
     # Specific species (cardinal, blue_jay) use camera's normal threshold
     generic_confidence: 0.9       # Threshold for generic labels (0.0-1.0)
+  # eBird integration for seasonal bird filtering (optional)
+  ebird:
+    enabled: false                # Set to true and add API key to secrets.env
+    region: US-MN                 # eBird region code (e.g., US-MN, US-CA, CA-ON)
+    days_back: 14                 # Days of recent sightings to check (1-30)
+    filter_mode: flag             # flag: log unusual, filter: reject unseen, boost: prioritize common
+    cache_hours: 24               # How long to cache eBird data
+    api_key_env: EBIRD_API_KEY    # Environment variable for API key
   exclusion_list:
     - squirrel
   notification:

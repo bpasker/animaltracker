@@ -79,6 +79,7 @@ class WebServer:
         # Monitor page and API
         self.app.router.add_get('/monitor', self.handle_monitor_page)
         self.app.router.add_get('/api/monitor', self.handle_get_monitor_data)
+        self.app.router.add_get('/api/logs', self.handle_get_logs)
         # Settings page and API
         self.app.router.add_get('/settings', self.handle_settings_page)
         self.app.router.add_get('/api/settings', self.handle_get_settings)
@@ -1898,6 +1899,152 @@ class WebServer:
             'gpu': gpu,
             'detector': detector_info,
             'recent_clips': recent_clips,
+        })
+
+    async def handle_get_logs(self, request):
+        """Get recent logs from journalctl or log files."""
+        import subprocess
+        
+        # Get query params
+        camera_id = request.query.get('camera', None)
+        minutes = int(request.query.get('minutes', 30))
+        level = request.query.get('level', 'all')  # all, error, warning
+        
+        logs = []
+        source = 'none'
+        
+        # Try journalctl first (for systemd systems)
+        try:
+            # Build service name pattern
+            if camera_id:
+                service = f"detector@{camera_id}"
+            else:
+                service = "detector@*"
+            
+            # Build journalctl command
+            cmd = [
+                'journalctl',
+                '-u', service,
+                '--since', f'{minutes} minutes ago',
+                '--no-pager',
+                '-o', 'json',
+                '-n', '200',  # Limit entries
+            ]
+            
+            # Add priority filter
+            if level == 'error':
+                cmd.extend(['-p', 'err'])
+            elif level == 'warning':
+                cmd.extend(['-p', 'warning'])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                source = 'journalctl'
+                import json
+                for line in result.stdout.strip().split('\n'):
+                    if line:
+                        try:
+                            entry = json.loads(line)
+                            # Parse journalctl JSON format
+                            timestamp = entry.get('__REALTIME_TIMESTAMP', '')
+                            if timestamp:
+                                # Convert microseconds to datetime
+                                ts = int(timestamp) / 1_000_000
+                                time_str = datetime.fromtimestamp(ts, tz=CENTRAL_TZ).strftime('%H:%M:%S')
+                            else:
+                                time_str = '--:--:--'
+                            
+                            message = entry.get('MESSAGE', '')
+                            priority = int(entry.get('PRIORITY', 6))
+                            unit = entry.get('_SYSTEMD_UNIT', '')
+                            
+                            # Map priority to level
+                            if priority <= 3:
+                                log_level = 'error'
+                            elif priority <= 4:
+                                log_level = 'warning'
+                            else:
+                                log_level = 'info'
+                            
+                            # Extract camera from unit name
+                            cam = ''
+                            if 'detector@' in unit:
+                                cam = unit.replace('detector@', '').replace('.service', '')
+                            
+                            logs.append({
+                                'time': time_str,
+                                'level': log_level,
+                                'camera': cam,
+                                'message': message,
+                            })
+                        except json.JSONDecodeError:
+                            continue
+        except FileNotFoundError:
+            pass  # journalctl not available
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception as e:
+            LOGGER.debug("journalctl failed: %s", e)
+        
+        # Fallback: try reading from log files
+        if not logs and self.logs_root.exists():
+            source = 'logfile'
+            cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
+            
+            # Look for log files
+            log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
+            for pattern in log_patterns:
+                for log_file in self.logs_root.glob(pattern):
+                    try:
+                        with open(log_file, 'r') as f:
+                            # Read last 500 lines
+                            lines = f.readlines()[-500:]
+                            for line in lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                
+                                # Parse common log formats
+                                log_level = 'info'
+                                if 'ERROR' in line or 'error' in line.lower():
+                                    log_level = 'error'
+                                elif 'WARNING' in line or 'warning' in line.lower():
+                                    log_level = 'warning'
+                                
+                                # Filter by level
+                                if level == 'error' and log_level != 'error':
+                                    continue
+                                if level == 'warning' and log_level not in ('error', 'warning'):
+                                    continue
+                                
+                                # Try to extract timestamp
+                                time_str = '--:--:--'
+                                import re
+                                time_match = re.search(r'(\d{2}:\d{2}:\d{2})', line)
+                                if time_match:
+                                    time_str = time_match.group(1)
+                                
+                                logs.append({
+                                    'time': time_str,
+                                    'level': log_level,
+                                    'camera': '',
+                                    'message': line[:500],  # Truncate long lines
+                                })
+                    except Exception:
+                        continue
+        
+        # Sort by time descending and limit
+        logs = logs[-200:]  # Keep last 200
+        logs.reverse()  # Most recent first
+        
+        return web.json_response({
+            'source': source,
+            'camera': camera_id,
+            'minutes': minutes,
+            'level': level,
+            'count': len(logs),
+            'logs': logs,
         })
 
     async def handle_monitor_page(self, request):

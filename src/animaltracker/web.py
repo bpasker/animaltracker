@@ -1814,6 +1814,53 @@ class WebServer:
                 'disk_total_gb': 0,
             }
         
+        # GPU stats (NVIDIA)
+        gpu = {
+            'available': False,
+            'name': None,
+            'utilization': 0,
+            'memory_percent': 0,
+            'memory_used_mb': 0,
+            'memory_total_mb': 0,
+            'temperature': 0,
+            'power_draw': 0,
+            'power_limit': 0,
+        }
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            
+            gpu['available'] = True
+            gpu['name'] = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(gpu['name'], bytes):
+                gpu['name'] = gpu['name'].decode('utf-8')
+            
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            gpu['utilization'] = util.gpu
+            
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            gpu['memory_used_mb'] = round(mem_info.used / (1024**2))
+            gpu['memory_total_mb'] = round(mem_info.total / (1024**2))
+            gpu['memory_percent'] = round((mem_info.used / mem_info.total) * 100, 1)
+            
+            try:
+                gpu['temperature'] = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            except:
+                pass
+            
+            try:
+                gpu['power_draw'] = round(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000, 1)  # mW to W
+                gpu['power_limit'] = round(pynvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000, 1)
+            except:
+                pass
+            
+            pynvml.nvmlShutdown()
+        except ImportError:
+            pass  # pynvml not installed
+        except Exception as e:
+            LOGGER.debug("GPU monitoring unavailable: %s", e)
+        
         # Detector info
         detector_info = {
             'backend': 'unknown',
@@ -1848,6 +1895,7 @@ class WebServer:
             'timestamp': datetime.now(tz=CENTRAL_TZ).isoformat(),
             'cameras': cameras,
             'system': system,
+            'gpu': gpu,
             'detector': detector_info,
             'recent_clips': recent_clips,
         })
@@ -2040,6 +2088,26 @@ class WebServer:
                         border-radius: 6px;
                     }
                     
+                    /* GPU section */
+                    .gpu-header {
+                        font-size: 0.9em;
+                        color: #76B900;
+                        font-weight: 600;
+                        margin-bottom: 12px;
+                    }
+                    .gpu-details {
+                        display: flex;
+                        gap: 16px;
+                        margin-top: 12px;
+                        font-size: 0.85em;
+                        color: #888;
+                    }
+                    .gpu-details span {
+                        background: #1a1a1a;
+                        padding: 4px 10px;
+                        border-radius: 4px;
+                    }
+                    
                     /* Auto-refresh indicator */
                     .refresh-indicator {
                         position: fixed;
@@ -2103,6 +2171,29 @@ class WebServer:
                     </div>
                 </div>
                 
+                <div class="section" id="gpuSection" style="display: none;">
+                    <h2>🎮 GPU</h2>
+                    <div class="gpu-header" id="gpuName">--</div>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-value" id="gpuUtil">--%</div>
+                            <div class="stat-label">GPU Usage</div>
+                            <div class="stat-bar"><div class="stat-bar-fill" id="gpuUtilBar" style="width: 0%"></div></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="gpuMem">--%</div>
+                            <div class="stat-label">VRAM</div>
+                            <div class="stat-bar"><div class="stat-bar-fill" id="gpuMemBar" style="width: 0%"></div></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="gpuTemp">--°C</div>
+                            <div class="stat-label">Temperature</div>
+                            <div class="stat-bar"><div class="stat-bar-fill" id="gpuTempBar" style="width: 0%"></div></div>
+                        </div>
+                    </div>
+                    <div class="gpu-details" id="gpuDetails"></div>
+                </div>
+                
                 <div class="section">
                     <h2>🔍 Detector</h2>
                     <div class="detector-info" id="detectorInfo">
@@ -2154,6 +2245,36 @@ class WebServer:
                         document.getElementById('diskValue').textContent = sys.disk_percent.toFixed(0) + '%';
                         document.getElementById('diskBar').style.width = sys.disk_percent + '%';
                         document.getElementById('diskBar').className = 'stat-bar-fill ' + getBarClass(sys.disk_percent);
+                        
+                        // GPU stats
+                        const gpu = data.gpu;
+                        if (gpu && gpu.available) {
+                            document.getElementById('gpuSection').style.display = 'block';
+                            document.getElementById('gpuName').textContent = '🟢 ' + gpu.name;
+                            
+                            document.getElementById('gpuUtil').textContent = gpu.utilization + '%';
+                            document.getElementById('gpuUtilBar').style.width = gpu.utilization + '%';
+                            document.getElementById('gpuUtilBar').className = 'stat-bar-fill ' + getBarClass(gpu.utilization);
+                            
+                            document.getElementById('gpuMem').textContent = gpu.memory_percent.toFixed(0) + '%';
+                            document.getElementById('gpuMemBar').style.width = gpu.memory_percent + '%';
+                            document.getElementById('gpuMemBar').className = 'stat-bar-fill ' + getBarClass(gpu.memory_percent);
+                            
+                            // Temperature (warning at 70C, danger at 85C)
+                            const tempClass = gpu.temperature > 85 ? 'danger' : (gpu.temperature > 70 ? 'warning' : '');
+                            document.getElementById('gpuTemp').textContent = gpu.temperature + '°C';
+                            document.getElementById('gpuTempBar').style.width = Math.min(gpu.temperature, 100) + '%';
+                            document.getElementById('gpuTempBar').className = 'stat-bar-fill ' + tempClass;
+                            
+                            // Details row
+                            let details = `<span>VRAM: ${gpu.memory_used_mb}/${gpu.memory_total_mb} MB</span>`;
+                            if (gpu.power_draw > 0) {
+                                details += `<span>Power: ${gpu.power_draw}W / ${gpu.power_limit}W</span>`;
+                            }
+                            document.getElementById('gpuDetails').innerHTML = details;
+                        } else {
+                            document.getElementById('gpuSection').style.display = 'none';
+                        }
                         
                         // Detector info
                         const det = data.detector;

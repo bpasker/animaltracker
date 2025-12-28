@@ -1110,6 +1110,7 @@ class WebServer:
         clip_cfg = self.runtime.general.clip if self.runtime else None
         conf_threshold = getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3
         generic_conf = getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5
+        tracking_enabled = getattr(clip_cfg, 'tracking_enabled', True) if clip_cfg else True
         
         def do_reprocess():
             from .postprocess import ClipPostProcessor
@@ -1119,6 +1120,7 @@ class WebServer:
                 sample_rate=sample_rate,
                 confidence_threshold=conf_threshold,
                 generic_confidence=generic_conf,
+                tracking_enabled=tracking_enabled,
             )
             return processor.process_clip(
                 full_path,

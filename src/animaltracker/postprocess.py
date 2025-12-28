@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
 from .detector import BaseDetector, Detection, create_detector
+from .tracker import ObjectTracker, create_tracker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class ClipPostProcessor:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
         generic_confidence: float = 0.5,
+        tracking_enabled: bool = True,
     ):
         """Initialize the post-processor.
         
@@ -74,10 +76,12 @@ class ClipPostProcessor:
             sample_rate: Analyze every Nth frame (lower = more thorough but slower)
             confidence_threshold: Minimum confidence for specific species detections
             generic_confidence: Minimum confidence for generic categories (animal, bird)
+            tracking_enabled: Use object tracking to consolidate species across frames
         """
         self.detector = detector
         self.storage_root = storage_root
         self.sample_rate = sample_rate
+        self.tracking_enabled = tracking_enabled
         self.confidence_threshold = confidence_threshold
         self.generic_confidence = generic_confidence
         
@@ -206,21 +210,40 @@ class ClipPostProcessor:
     ) -> Tuple[Dict[str, SpeciesResult], int, int]:
         """Analyze video frames and collect species detections.
         
+        Uses object tracking (if enabled) to consolidate classifications for 
+        the same animal across frames, producing one species per tracked object.
+        
         Returns:
             (species_results dict, raw_detection_count, filtered_count)
         """
+        # Get video FPS and calculate smart sample rate (~1 frame per second)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
+        # Sample roughly 1 frame per second, with min/max bounds
+        smart_sample_rate = max(1, min(int(fps), 30))  # Cap at 30fps videos
+        actual_sample_rate = self.sample_rate if self.sample_rate > 1 else smart_sample_rate
+        effective_fps = fps / actual_sample_rate
+        
+        LOGGER.info("Video fps=%.1f, sample_rate=%d (effective %.1f fps)", 
+                   fps, actual_sample_rate, effective_fps)
+        
+        # Create tracker if enabled
+        tracker = create_tracker(enabled=self.tracking_enabled, frame_rate=effective_fps)
+        if tracker:
+            LOGGER.info("Object tracking enabled for post-processing")
+        
         species_results: Dict[str, SpeciesResult] = {}
         frame_idx = 0
         raw_detection_count = 0
         filtered_count = 0
+        all_frames_data: List[Tuple[int, any, List[Detection]]] = []  # For tracking
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             
-            # Only process every Nth frame
-            if frame_idx % self.sample_rate == 0:
+            # Only process every Nth frame (using smart sample rate)
+            if frame_idx % actual_sample_rate == 0:
                 try:
                     detections = self.detector.infer(
                         frame, 
@@ -228,6 +251,13 @@ class ClipPostProcessor:
                         generic_confidence=self.generic_confidence
                     )
                     raw_detection_count += len(detections)
+                    
+                    if tracker and detections:
+                        # Update tracker with detections
+                        tracker.update(detections, frame)
+                        all_frames_data.append((frame_idx, frame.copy(), detections))
+                    
+                    # Still process detections for non-tracked fallback
                     valid, filtered = self._process_detections(detections, frame, species_results)
                     filtered_count += filtered
                 except Exception as e:
@@ -235,7 +265,78 @@ class ClipPostProcessor:
             
             frame_idx += 1
         
+        # If tracking was used and we have tracked objects, build results from tracks
+        if tracker and tracker.active_track_count > 0:
+            tracked_results = self._build_tracked_species_results(tracker, all_frames_data)
+            if tracked_results:
+                LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
+                           raw_detection_count, len(tracked_results))
+                return tracked_results, raw_detection_count, filtered_count
+        
+        # Fallback to non-tracked results
         return species_results, raw_detection_count, filtered_count
+    
+    def _build_tracked_species_results(
+        self,
+        tracker: ObjectTracker,
+        frames_data: List[Tuple[int, any, List[Detection]]],
+    ) -> Dict[str, SpeciesResult]:
+        """Build species results from tracked objects.
+        
+        Each tracked object votes for its best species based on all classifications
+        it received across frames. This consolidates Dog/Mammal/Cat into one species.
+        """
+        species_results: Dict[str, SpeciesResult] = {}
+        
+        # Get unique species from all tracked objects (one per track)
+        tracked_species = tracker.get_unique_species()
+        
+        for species, confidence in tracked_species:
+            # Filter invalid species
+            species_lower = species.lower()
+            if species_lower in self.invalid_terms:
+                continue
+            if 'no cv result' in species_lower:
+                continue
+            if len(species) > 30 and species.count('-') >= 3:
+                continue
+            
+            specificity = self._calculate_specificity(species)
+            
+            if species not in species_results:
+                species_results[species] = SpeciesResult(
+                    species=species,
+                    confidence=confidence,
+                    count=1,
+                    specificity=specificity,
+                    taxonomy=None,
+                    key_frames=[],
+                )
+            else:
+                # Multiple tracks with same species - aggregate
+                species_results[species].count += 1
+                species_results[species].confidence = max(
+                    species_results[species].confidence, confidence
+                )
+        
+        # Get key frames for each tracked species
+        for track_id, track_info in tracker.tracks.items():
+            best_species_data = track_info.get_best_species()
+            if not best_species_data or not best_species_data[0]:
+                continue
+            
+            best_species = best_species_data[0]  # (species, confidence, taxonomy)
+            if best_species not in species_results:
+                continue
+            
+            result = species_results[best_species]
+            # Get the best frame for this track
+            best_frame_data = track_info.get_best_frame()
+            if best_frame_data:
+                frame, conf, bbox = best_frame_data
+                self._update_key_frames(result, frame, conf, bbox)
+        
+        return species_results
     
     def _process_detections(
         self,

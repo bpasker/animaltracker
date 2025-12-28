@@ -129,6 +129,16 @@ class TrackInfo:
             candidates[best_species]['taxonomy']
         )
     
+    def get_best_frame(self) -> Optional[Tuple[np.ndarray, float, List[float]]]:
+        """Get the best frame for this track (highest confidence detection).
+        
+        Returns:
+            (frame, confidence, bbox) tuple or None if no frame stored
+        """
+        if self.best_frame is None:
+            return None
+        return (self.best_frame, self.best_confidence, self.best_bbox)
+    
     def _calculate_specificity(self, species: str) -> int:
         """Calculate how specific a species name is."""
         generic_terms = {'animal', 'bird', 'mammal', 'aves'}

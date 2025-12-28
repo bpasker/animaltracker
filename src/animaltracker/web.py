@@ -1499,6 +1499,27 @@ class WebServer:
                         overflow-y: auto;
                     }}
                     .log-events h4 {{ margin: 0 0 8px 0; color: #2196F3; }}
+                    .log-events-header {{
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        margin-bottom: 8px;
+                    }}
+                    .log-events-header h4 {{ margin: 0; }}
+                    .copy-logs-btn {{
+                        background: #2196F3;
+                        color: white;
+                        border: none;
+                        padding: 6px 12px;
+                        border-radius: 4px;
+                        cursor: pointer;
+                        font-size: 0.85em;
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                    }}
+                    .copy-logs-btn:hover {{ background: #1976D2; }}
+                    .copy-logs-btn.copied {{ background: #4CAF50; }}
                     .log-event {{
                         padding: 8px;
                         margin: 4px 0;
@@ -1722,8 +1743,14 @@ class WebServer:
                         
                         // Log entries
                         if (data.log_entries && data.log_entries.length > 0) {{
+                            // Store log entries globally for copy function
+                            window.currentLogEntries = data.log_entries;
+                            
                             html += '<div class="log-events">';
+                            html += '<div class="log-events-header">';
                             html += '<h4>📝 Processing Events (' + data.log_entries.length + ')</h4>';
+                            html += '<button class="copy-logs-btn" onclick="copyLogs()">📋 Copy Logs</button>';
+                            html += '</div>';
                             
                             for (const entry of data.log_entries) {{
                                 const eventClass = entry.event || 'detection';
@@ -1745,6 +1772,41 @@ class WebServer:
                         }}
                         
                         logData.innerHTML = html;
+                    }}
+                    
+                    function copyLogs() {{
+                        if (!window.currentLogEntries || window.currentLogEntries.length === 0) {{
+                            return;
+                        }}
+                        
+                        // Format logs as text
+                        let logText = '';
+                        for (const entry of window.currentLogEntries) {{
+                            let line = 'Frame ' + entry.frame_idx;
+                            if (entry.track_id !== null && entry.track_id !== undefined) {{
+                                line += ' [Track ' + entry.track_id + ']';
+                            }}
+                            line += ' ' + entry.species + ' (' + (entry.confidence * 100).toFixed(1) + '%)';
+                            if (entry.reason) {{
+                                line += '\n' + entry.reason;
+                            }}
+                            logText += line + '\n';
+                        }}
+                        
+                        // Copy to clipboard
+                        navigator.clipboard.writeText(logText).then(() => {{
+                            const btn = document.querySelector('.copy-logs-btn');
+                            const originalText = btn.innerHTML;
+                            btn.innerHTML = '✓ Copied!';
+                            btn.classList.add('copied');
+                            setTimeout(() => {{
+                                btn.innerHTML = originalText;
+                                btn.classList.remove('copied');
+                            }}, 2000);
+                        }}).catch(err => {{
+                            console.error('Failed to copy logs:', err);
+                            alert('Failed to copy logs to clipboard');
+                        }});
                     }}
                 </script>
             </body>

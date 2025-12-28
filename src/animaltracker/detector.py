@@ -160,6 +160,10 @@ class SpeciesNetDetector(BaseDetector):
         Note: SpeciesNet is optimized for batch processing of images.
         For real-time streaming, consider batching frames or using 
         detector-only mode for speed.
+        
+        Note: latitude/longitude are stored but not currently passed to predict()
+        as the Python API only supports country/admin1_region for geofencing.
+        The lat/long would be used for batch JSON input format.
         """
         import tempfile
         import cv2
@@ -170,19 +174,13 @@ class SpeciesNetDetector(BaseDetector):
             cv2.imwrite(tmp_path, frame)
         
         try:
-            # Build prediction request with location priors if available
-            predict_kwargs = {
-                "filepaths": [tmp_path],
-                "country": self.country,
-                "admin1_region": self.admin1_region,
-            }
-            
-            # Add lat/long for more precise geofencing
-            if self.latitude is not None and self.longitude is not None:
-                predict_kwargs["latitude"] = self.latitude
-                predict_kwargs["longitude"] = self.longitude
-            
-            result = self._model.predict(**predict_kwargs)
+            # Build prediction request with location priors
+            # Note: Python API only supports country/admin1_region, not lat/long directly
+            result = self._model.predict(
+                filepaths=[tmp_path],
+                country=self.country,
+                admin1_region=self.admin1_region,
+            )
         finally:
             # Clean up temp file
             import os

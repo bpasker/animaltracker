@@ -1788,9 +1788,9 @@ class WebServer:
                             }}
                             line += ' ' + entry.species + ' (' + (entry.confidence * 100).toFixed(1) + '%)';
                             if (entry.reason) {{
-                                line += '\n' + entry.reason;
+                                line += '\\n' + entry.reason;
                             }}
-                            logText += line + '\n';
+                            logText += line + '\\n';
                         }}
                         
                         // Copy to clipboard

@@ -32,7 +32,10 @@ class DetectorSettings(BaseModel):
     # SpeciesNet settings
     speciesnet_version: str = "v4.0.2a"  # v4.0.2a (crop) or v4.0.2b (full-image)
     country: Optional[str] = None  # ISO 3166-1 alpha-3 (e.g., "USA")
-    admin1_region: Optional[str] = None  # State code for US (e.g., "CA")
+    admin1_region: Optional[str] = None  # State code for US (e.g., "TX")
+    # Geospatial priors for improved species accuracy
+    latitude: Optional[float] = Field(default=None, ge=-90, le=90, description="Camera latitude for species range filtering")
+    longitude: Optional[float] = Field(default=None, ge=-180, le=180, description="Camera longitude for species range filtering")
 
 
 class RetentionSettings(BaseModel):

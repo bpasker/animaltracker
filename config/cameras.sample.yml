@@ -18,8 +18,11 @@ general:
     model_path: yolov8n.pt
     # SpeciesNet settings (used when backend: speciesnet)
     speciesnet_version: v4.0.2a  # v4.0.2a (crop) or v4.0.2b (full-image)
-    country: USA                  # ISO 3166-1 alpha-3 code for geofencing
-    admin1_region: CA             # State code (US only)
+    # Location priors for better species accuracy (filters out impossible species)
+    country: USA                  # ISO 3166-1 alpha-3 code (e.g., USA, CAN, GBR)
+    admin1_region: TX             # State/province code (US states supported)
+    latitude: 30.2672             # Camera latitude (optional, improves accuracy)
+    longitude: -97.7431           # Camera longitude (optional, improves accuracy)
   exclusion_list:
     - squirrel
   notification:

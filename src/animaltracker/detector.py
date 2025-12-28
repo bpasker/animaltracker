@@ -107,6 +107,8 @@ class SpeciesNetDetector(BaseDetector):
         model_version: str = "v4.0.2a",
         country: Optional[str] = None,
         admin1_region: Optional[str] = None,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
         cache_dir: Optional[str] = None,
     ) -> None:
         """Initialize SpeciesNet detector.
@@ -114,7 +116,9 @@ class SpeciesNetDetector(BaseDetector):
         Args:
             model_version: Model version (v4.0.2a = crop, v4.0.2b = full-image)
             country: ISO 3166-1 alpha-3 country code for geofencing (e.g., "USA")
-            admin1_region: State/province code for US (e.g., "CA")
+            admin1_region: State/province code for US (e.g., "TX")
+            latitude: Camera latitude for species range filtering (-90 to 90)
+            longitude: Camera longitude for species range filtering (-180 to 180)
             cache_dir: Directory for model weights cache
         """
         try:
@@ -126,13 +130,25 @@ class SpeciesNetDetector(BaseDetector):
         
         self.country = country
         self.admin1_region = admin1_region
+        self.latitude = latitude
+        self.longitude = longitude
         self.model_version = model_version
         
         # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
         LOGGER.info(f"Loading SpeciesNet {model_version}...")
         model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
         self._model = SpeciesNet(model_name)
-        LOGGER.info(f"SpeciesNet loaded (country={country}, region={admin1_region})")
+        
+        location_info = []
+        if country:
+            location_info.append(f"country={country}")
+        if admin1_region:
+            location_info.append(f"region={admin1_region}")
+        if latitude is not None and longitude is not None:
+            location_info.append(f"coords=({latitude:.4f}, {longitude:.4f})")
+        
+        loc_str = ", ".join(location_info) if location_info else "no location priors"
+        LOGGER.info(f"SpeciesNet loaded ({loc_str})")
     
     @property
     def backend_name(self) -> str:
@@ -154,12 +170,19 @@ class SpeciesNetDetector(BaseDetector):
             cv2.imwrite(tmp_path, frame)
         
         try:
-            # Build prediction request - returns dict with "predictions" key
-            result = self._model.predict(
-                filepaths=[tmp_path],
-                country=self.country,
-                admin1_region=self.admin1_region,
-            )
+            # Build prediction request with location priors if available
+            predict_kwargs = {
+                "filepaths": [tmp_path],
+                "country": self.country,
+                "admin1_region": self.admin1_region,
+            }
+            
+            # Add lat/long for more precise geofencing
+            if self.latitude is not None and self.longitude is not None:
+                predict_kwargs["latitude"] = self.latitude
+                predict_kwargs["longitude"] = self.longitude
+            
+            result = self._model.predict(**predict_kwargs)
         finally:
             # Clean up temp file
             import os
@@ -415,7 +438,9 @@ def create_detector(
     SpeciesNet kwargs:
         - model_version: "v4.0.2a" (crop) or "v4.0.2b" (full-image)
         - country: ISO 3166-1 alpha-3 code (e.g., "USA")
-        - admin1_region: State code for US (e.g., "CA")
+        - admin1_region: State code for US (e.g., "TX")
+        - latitude: Camera latitude for species range filtering
+        - longitude: Camera longitude for species range filtering  
         - cache_dir: Model weights cache directory
     
     Returns:
@@ -435,6 +460,8 @@ def create_detector(
             model_version=kwargs.get("model_version", "v4.0.2a"),
             country=kwargs.get("country"),
             admin1_region=kwargs.get("admin1_region"),
+            latitude=kwargs.get("latitude"),
+            longitude=kwargs.get("longitude"),
             cache_dir=kwargs.get("cache_dir"),
         )
     

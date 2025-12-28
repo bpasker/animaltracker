@@ -594,6 +594,8 @@ class PipelineOrchestrator:
             model_version=detector_cfg.speciesnet_version,
             country=detector_cfg.country,
             admin1_region=detector_cfg.admin1_region,
+            latitude=detector_cfg.latitude,
+            longitude=detector_cfg.longitude,
         )
         LOGGER.info(f"Using {self.detector.backend_name} detector backend")
         

@@ -104,6 +104,8 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
         model_version=detector_cfg.speciesnet_version,
         country=detector_cfg.country,
         admin1_region=detector_cfg.admin1_region,
+        latitude=detector_cfg.latitude,
+        longitude=detector_cfg.longitude,
     )
     LOGGER.info("Using %s detector for reprocessing", detector.backend_name)
     

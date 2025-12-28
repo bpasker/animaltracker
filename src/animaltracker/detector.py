@@ -207,7 +207,13 @@ class SpeciesNetDetector(BaseDetector):
     def backend_name(self) -> str:
         return "speciesnet"
 
-    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5, generic_confidence: float = None) -> List[Detection]:
+    def infer(
+        self, 
+        frame: np.ndarray, 
+        conf_threshold: float = 0.5, 
+        generic_confidence: float = None,
+        return_filtered: bool = False,
+    ) -> List[Detection]:
         """Run SpeciesNet inference on a frame.
         
         Args:
@@ -215,6 +221,8 @@ class SpeciesNetDetector(BaseDetector):
             conf_threshold: Minimum confidence for specific species detections
             generic_confidence: Higher threshold for generic categories (animal, bird).
                                If None, uses the detector's default generic_confidence.
+            return_filtered: If True, also returns filtered detections with reason.
+                            Returns (detections, filtered_list) tuple instead.
         
         Note: SpeciesNet is optimized for batch processing of images.
         For real-time streaming, consider batching frames or using 
@@ -224,6 +232,9 @@ class SpeciesNetDetector(BaseDetector):
         as the Python API only supports country/admin1_region for geofencing.
         The lat/long would be used for batch JSON input format.
         """
+        # Track filtered detections if requested
+        filtered_detections: List[Tuple[Detection, str]] = []  # (detection, reason)
+        
         # Use instance default if not specified
         if generic_confidence is None:
             generic_confidence = self.generic_confidence
@@ -326,16 +337,28 @@ class SpeciesNetDetector(BaseDetector):
             skip_display = ("blank", "unknown", "empty", "no cv result", "no_cv_result")
             display_lower = display_species.lower()
             if display_lower in skip_display or "no cv result" in display_lower:
+                if return_filtered:
+                    filtered_detections.append((Detection(
+                        species=display_species, confidence=score, bbox=bbox, taxonomy=species
+                    ), "blank/unknown"))
                 continue
             # Also skip if it looks like a UUID (wasn't properly cleaned)
             if len(display_species) > 30 and "-" in display_species and display_species.count("-") >= 3:
                 LOGGER.debug("Skipping UUID-like species: %s", display_species[:50])
+                if return_filtered:
+                    filtered_detections.append((Detection(
+                        species=display_species, confidence=score, bbox=bbox, taxonomy=species
+                    ), "UUID-like identifier"))
                 continue
             
             # Geographic filter: reject species impossible for configured region
             if self._is_exotic_species(display_species, species):
                 LOGGER.debug("Filtering exotic species '%s' (impossible in %s)", 
                             display_species, self.country)
+                if return_filtered:
+                    filtered_detections.append((Detection(
+                        species=display_species, confidence=score, bbox=bbox, taxonomy=species
+                    ), f"exotic species (impossible in {self.country})"))
                 continue
             
             detections.append(Detection(
@@ -345,6 +368,8 @@ class SpeciesNetDetector(BaseDetector):
                 taxonomy=species,  # Keep full taxonomy
             ))
         
+        if return_filtered:
+            return detections, filtered_detections
         return detections
     
     def _is_exotic_species(self, display_name: str, taxonomy: str) -> bool:

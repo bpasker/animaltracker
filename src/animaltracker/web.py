@@ -75,6 +75,7 @@ class WebServer:
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
         self.app.router.add_post('/recordings/reprocess', self.handle_reprocess)
+        self.app.router.add_get('/recordings/log/{path:.*}', self.handle_get_processing_log)
         # Settings page and API
         self.app.router.add_get('/settings', self.handle_settings_page)
         self.app.router.add_get('/api/settings', self.handle_get_settings)
@@ -1156,6 +1157,43 @@ class WebServer:
                 'error': result.error,
             }, status=500)
 
+    async def handle_get_processing_log(self, request):
+        """Get processing log JSON for a recording."""
+        rel_path = request.match_info['path']
+        
+        # Security check
+        if '..' in rel_path:
+            return web.Response(status=403, text="Invalid path")
+        
+        # Construct the log file path (replace .mp4 with .log.json)
+        clip_path = self.storage_root / 'clips' / rel_path
+        if not clip_path.exists():
+            return web.Response(status=404, text="Clip not found")
+        
+        log_path = clip_path.with_suffix('.log.json')
+        
+        if not log_path.exists():
+            return web.json_response({
+                'exists': False,
+                'message': 'No processing log available. Reanalyze the recording to generate one.'
+            })
+        
+        try:
+            import json
+            with open(log_path, 'r') as f:
+                log_data = json.load(f)
+            
+            return web.json_response({
+                'exists': True,
+                'data': log_data
+            })
+        except Exception as e:
+            LOGGER.warning("Failed to read processing log: %s", e)
+            return web.json_response({
+                'exists': False,
+                'message': f'Error reading log: {str(e)}'
+            }, status=500)
+
     async def handle_recording_detail(self, request):
         """Render a detailed recording page with key detection photos."""
         rel_path = request.match_info['path']
@@ -1172,6 +1210,18 @@ class WebServer:
         
         # Build thumbnail gallery HTML
         thumbnails_html = ""
+        processing_log_html = """
+                    <div class="processing-log">
+                        <button class="log-toggle" onclick="toggleLog()">
+                            <span class="arrow">▶</span>
+                            <span>📋 Processing Details</span>
+                        </button>
+                        <div class="log-content" id="logContent">
+                            <div id="logData" class="log-no-data">Loading...</div>
+                        </div>
+                    </div>
+        """
+        
         if clip_info['thumbnails']:
             thumbnails_html = """
                 <div class="detection-section">
@@ -1188,6 +1238,7 @@ class WebServer:
                 """
             thumbnails_html += """
                     </div>
+            """ + processing_log_html + """
                 </div>
             """
         else:
@@ -1195,6 +1246,7 @@ class WebServer:
                 <div class="detection-section">
                     <h2>🔍 Detection Key Frames</h2>
                     <p class="no-thumbnails">No detection thumbnails available for this recording.</p>
+            """ + processing_log_html + """
                 </div>
             """
         
@@ -1379,6 +1431,75 @@ class WebServer:
                         cursor: pointer;
                     }}
                     
+                    /* Processing log styles */
+                    .processing-log {{
+                        margin-top: 16px;
+                    }}
+                    .log-toggle {{
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        cursor: pointer;
+                        color: #888;
+                        font-size: 0.9em;
+                        padding: 8px 12px;
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        border: none;
+                        width: 100%;
+                        text-align: left;
+                    }}
+                    .log-toggle:hover {{ background: #222; color: #aaa; }}
+                    .log-toggle .arrow {{ transition: transform 0.2s; }}
+                    .log-toggle.expanded .arrow {{ transform: rotate(90deg); }}
+                    .log-content {{
+                        display: none;
+                        margin-top: 12px;
+                        font-size: 0.85em;
+                    }}
+                    .log-content.visible {{ display: block; }}
+                    .log-summary {{
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        margin-bottom: 12px;
+                    }}
+                    .log-summary h4 {{ margin: 0 0 8px 0; color: #4CAF50; }}
+                    .log-summary-row {{
+                        display: flex;
+                        justify-content: space-between;
+                        padding: 4px 0;
+                        border-bottom: 1px solid #333;
+                    }}
+                    .log-summary-row:last-child {{ border-bottom: none; }}
+                    .log-events {{
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        max-height: 400px;
+                        overflow-y: auto;
+                    }}
+                    .log-events h4 {{ margin: 0 0 8px 0; color: #2196F3; }}
+                    .log-event {{
+                        padding: 8px;
+                        margin: 4px 0;
+                        border-radius: 4px;
+                        font-family: 'SF Mono', Monaco, 'Consolas', monospace;
+                        font-size: 0.9em;
+                    }}
+                    .log-event.detection {{ background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; }}
+                    .log-event.accepted {{ background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; }}
+                    .log-event.filtered {{ background: rgba(255, 152, 0, 0.1); border-left: 3px solid #FF9800; }}
+                    .log-event.detector_filtered {{ background: rgba(244, 67, 54, 0.15); border-left: 3px solid #F44336; }}
+                    .log-event.tracked {{ background: rgba(33, 150, 243, 0.1); border-left: 3px solid #2196F3; }}
+                    .log-event.track_consolidated {{ background: rgba(156, 39, 176, 0.1); border-left: 3px solid #9C27B0; }}
+                    .log-event.selected {{ background: rgba(156, 39, 176, 0.1); border-left: 3px solid #9C27B0; }}
+                    .log-event .frame {{ color: #888; font-size: 0.85em; }}
+                    .log-event .species {{ color: #fff; font-weight: 600; }}
+                    .log-event .confidence {{ color: #4CAF50; }}
+                    .log-event .reason {{ color: #aaa; font-style: italic; font-size: 0.9em; }}
+                    .log-no-data {{ color: #666; font-style: italic; text-align: center; padding: 20px; }}
+                    
                     @media (min-width: 768px) {{
                         body {{ padding: 24px; max-width: 900px; margin: 0 auto; }}
                         .thumbnail-gallery {{ grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }}
@@ -1516,6 +1637,94 @@ class WebServer:
                             btn.disabled = false;
                             textEl.textContent = 'Reanalyze';
                         }}
+                    }}
+                    
+                    // Processing log functions
+                    let logLoaded = false;
+                    
+                    function toggleLog() {{
+                        const toggle = document.querySelector('.log-toggle');
+                        const content = document.getElementById('logContent');
+                        
+                        toggle.classList.toggle('expanded');
+                        content.classList.toggle('visible');
+                        
+                        if (!logLoaded && content.classList.contains('visible')) {{
+                            loadProcessingLog();
+                        }}
+                    }}
+                    
+                    async function loadProcessingLog() {{
+                        const logData = document.getElementById('logData');
+                        
+                        try {{
+                            const response = await fetch('/recordings/log/{clip_info['path']}');
+                            const result = await response.json();
+                            
+                            if (result.exists) {{
+                                renderProcessingLog(result.data);
+                            }} else {{
+                                logData.innerHTML = '<div class="log-no-data">' + result.message + '</div>';
+                            }}
+                            logLoaded = true;
+                        }} catch (e) {{
+                            logData.innerHTML = '<div class="log-no-data">Error loading log: ' + e + '</div>';
+                        }}
+                    }}
+                    
+                    function renderProcessingLog(data) {{
+                        const logData = document.getElementById('logData');
+                        let html = '';
+                        
+                        // Tracking summary if available
+                        if (data.tracking_summary) {{
+                            const summary = data.tracking_summary;
+                            html += '<div class="log-summary">';
+                            html += '<h4>🎯 Tracking Summary</h4>';
+                            if (summary.total_tracks !== undefined) {{
+                                html += '<div class="log-summary-row"><span>Total Tracks</span><span>' + summary.total_tracks + '</span></div>';
+                            }}
+                            if (summary.species_by_track) {{
+                                for (const [trackId, species] of Object.entries(summary.species_by_track)) {{
+                                    html += '<div class="log-summary-row"><span>Track ' + trackId + '</span><span>' + species + '</span></div>';
+                                }}
+                            }}
+                            if (summary.track_details) {{
+                                for (const [trackId, details] of Object.entries(summary.track_details)) {{
+                                    html += '<div class="log-summary-row">';
+                                    html += '<span>Track ' + trackId + '</span>';
+                                    html += '<span>' + details.best_species + ' (' + (details.confidence * 100).toFixed(1) + '%) - ' + details.frame_count + ' frames</span>';
+                                    html += '</div>';
+                                }}
+                            }}
+                            html += '</div>';
+                        }}
+                        
+                        // Log entries
+                        if (data.log_entries && data.log_entries.length > 0) {{
+                            html += '<div class="log-events">';
+                            html += '<h4>📝 Processing Events (' + data.log_entries.length + ')</h4>';
+                            
+                            for (const entry of data.log_entries) {{
+                                const eventClass = entry.event || 'detection';
+                                html += '<div class="log-event ' + eventClass + '">';
+                                html += '<span class="frame">Frame ' + entry.frame_idx + '</span> ';
+                                if (entry.track_id !== null && entry.track_id !== undefined) {{
+                                    html += '<span class="track">[Track ' + entry.track_id + ']</span> ';
+                                }}
+                                html += '<span class="species">' + entry.species + '</span> ';
+                                html += '<span class="confidence">(' + (entry.confidence * 100).toFixed(1) + '%)</span>';
+                                if (entry.reason) {{
+                                    html += '<br><span class="reason">' + entry.reason + '</span>';
+                                }}
+                                html += '</div>';
+                            }}
+                            html += '</div>';
+                        }} else {{
+                            html += '<div class="log-no-data">No processing events recorded.</div>';
+                        }}
+                        
+                        logData.innerHTML = html;
                     }}
                 </script>
             </body>

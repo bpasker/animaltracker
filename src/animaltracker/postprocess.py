@@ -38,6 +38,18 @@ class SpeciesResult:
     key_frames: List[Tuple] = field(default_factory=list)
 
 
+@dataclass
+class ProcessingLogEntry:
+    """A single log entry from processing."""
+    frame_idx: int
+    event: str  # "detection", "filtered", "tracked", "selected", etc.
+    species: str
+    confidence: float
+    reason: Optional[str] = None  # Why filtered, selected, etc.
+    track_id: Optional[int] = None
+    bbox: Optional[List[float]] = None
+
+
 @dataclass 
 class PostProcessResult:
     """Result of post-processing a video clip."""
@@ -52,6 +64,8 @@ class PostProcessResult:
     total_frames: int
     raw_detections: int = 0  # Total detections before filtering
     filtered_detections: int = 0  # Detections filtered out
+    processing_log: List[ProcessingLogEntry] = field(default_factory=list)
+    tracking_summary: Optional[Dict] = None  # Track consolidation info
     success: bool = True
     error: Optional[str] = None
 
@@ -145,9 +159,13 @@ class ClipPostProcessor:
                 error=f"Could not open video: {clip_path}"
             )
         
+        processing_log: List[ProcessingLogEntry] = []
+        tracking_summary: Optional[Dict] = None
+        
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            species_results, raw_detection_count, filtered_count = self._analyze_video(cap, total_frames)
+            species_results, raw_detection_count, filtered_count, processing_log, tracking_summary = \
+                self._analyze_video(cap, total_frames)
             frames_analyzed = (total_frames + self.sample_rate - 1) // self.sample_rate
             
         finally:
@@ -183,6 +201,9 @@ class ClipPostProcessor:
                 LOGGER.info("No valid detections found, extracting sample frames as fallback")
                 thumbnails_saved = self._extract_sample_frames(working_path, num_samples=3)
         
+        # Save processing log as JSON alongside the clip
+        self._save_processing_log(working_path, processing_log, tracking_summary)
+        
         LOGGER.info(
             "Post-processing complete: %s -> %s (%.1f%% confidence, %d species found)",
             original_species, new_species, confidence * 100, len(species_results)
@@ -200,21 +221,50 @@ class ClipPostProcessor:
             total_frames=total_frames,
             raw_detections=raw_detection_count,
             filtered_detections=filtered_count,
+            processing_log=processing_log,
+            tracking_summary=tracking_summary,
             success=True,
         )
     
+    def _save_processing_log(
+        self,
+        clip_path: Path,
+        processing_log: List[ProcessingLogEntry],
+        tracking_summary: Optional[Dict],
+    ) -> None:
+        """Save processing log as JSON file alongside clip."""
+        import json
+        from dataclasses import asdict
+        
+        log_path = clip_path.with_suffix('.log.json')
+        
+        try:
+            log_data = {
+                "clip": str(clip_path.name),
+                "timestamp": str(Path(clip_path.stem).name.split('_')[0]) if '_' in clip_path.stem else "",
+                "tracking_summary": tracking_summary,
+                "log_entries": [asdict(entry) for entry in processing_log],
+            }
+            
+            with open(log_path, 'w') as f:
+                json.dump(log_data, f, indent=2, default=str)
+            
+            LOGGER.info("Saved processing log: %s", log_path)
+        except Exception as e:
+            LOGGER.warning("Failed to save processing log: %s", e)
+
     def _analyze_video(
         self, 
         cap: cv2.VideoCapture, 
         total_frames: int
-    ) -> Tuple[Dict[str, SpeciesResult], int, int]:
+    ) -> Tuple[Dict[str, SpeciesResult], int, int, List[ProcessingLogEntry], Optional[Dict]]:
         """Analyze video frames and collect species detections.
         
         Uses object tracking (if enabled) to consolidate classifications for 
         the same animal across frames, producing one species per tracked object.
         
         Returns:
-            (species_results dict, raw_detection_count, filtered_count)
+            (species_results dict, raw_detection_count, filtered_count, processing_log, tracking_summary)
         """
         # Get video FPS and calculate smart sample rate (~1 frame per second)
         fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
@@ -236,6 +286,7 @@ class ClipPostProcessor:
         raw_detection_count = 0
         filtered_count = 0
         all_frames_data: List[Tuple[int, any, List[Detection]]] = []  # For tracking
+        processing_log: List[ProcessingLogEntry] = []
         
         while True:
             ret, frame = cap.read()
@@ -245,36 +296,87 @@ class ClipPostProcessor:
             # Only process every Nth frame (using smart sample rate)
             if frame_idx % actual_sample_rate == 0:
                 try:
-                    detections = self.detector.infer(
+                    # Request filtered detections to log them
+                    infer_result = self.detector.infer(
                         frame, 
                         conf_threshold=self.confidence_threshold,
-                        generic_confidence=self.generic_confidence
+                        generic_confidence=self.generic_confidence,
+                        return_filtered=True,
                     )
-                    raw_detection_count += len(detections)
+                    
+                    # Handle both return formats (with/without filtered)
+                    if isinstance(infer_result, tuple):
+                        detections, detector_filtered = infer_result
+                    else:
+                        detections = infer_result
+                        detector_filtered = []
+                    
+                    raw_detection_count += len(detections) + len(detector_filtered)
+                    
+                    # Log detector-level filtering (exotic species, etc.)
+                    for det, reason in detector_filtered:
+                        processing_log.append(ProcessingLogEntry(
+                            frame_idx=frame_idx,
+                            event="detector_filtered",
+                            species=det.species,
+                            confidence=det.confidence,
+                            reason=reason,
+                            bbox=det.bbox,
+                        ))
+                        filtered_count += 1
                     
                     if tracker and detections:
                         # Update tracker with detections
-                        tracker.update(detections, frame)
+                        tracked = tracker.update(detections, frame)
                         all_frames_data.append((frame_idx, frame.copy(), detections))
+                        
+                        # Log tracking assignments
+                        for track_id, det in tracked.items():
+                            processing_log.append(ProcessingLogEntry(
+                                frame_idx=frame_idx,
+                                event="tracked",
+                                species=det.species,
+                                confidence=det.confidence,
+                                track_id=track_id,
+                                reason=f"Assigned to track {track_id}",
+                            ))
                     
                     # Still process detections for non-tracked fallback
-                    valid, filtered = self._process_detections(detections, frame, species_results)
+                    valid, filtered, filter_log = self._process_detections_with_log(
+                        detections, frame, species_results, frame_idx
+                    )
                     filtered_count += filtered
+                    processing_log.extend(filter_log)
+                    
                 except Exception as e:
                     LOGGER.warning("Detection failed on frame %d: %s", frame_idx, e)
+                    processing_log.append(ProcessingLogEntry(
+                        frame_idx=frame_idx,
+                        event="error",
+                        species="",
+                        confidence=0.0,
+                        reason=str(e),
+                    ))
             
             frame_idx += 1
         
+        # Build tracking summary
+        tracking_summary = None
+        
         # If tracking was used and we have tracked objects, build results from tracks
         if tracker and tracker.active_track_count > 0:
-            tracked_results = self._build_tracked_species_results(tracker, all_frames_data)
+            tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(
+                tracker, all_frames_data
+            )
+            processing_log.extend(track_log)
+            
             if tracked_results:
                 LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
                            raw_detection_count, len(tracked_results))
-                return tracked_results, raw_detection_count, filtered_count
+                return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary
         
         # Fallback to non-tracked results
-        return species_results, raw_detection_count, filtered_count
+        return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary
     
     def _build_tracked_species_results(
         self,
@@ -338,6 +440,185 @@ class ClipPostProcessor:
         
         return species_results
     
+    def _build_tracked_species_results_with_log(
+        self,
+        tracker: ObjectTracker,
+        frames_data: List[Tuple[int, any, List[Detection]]],
+    ) -> Tuple[Dict[str, SpeciesResult], List[ProcessingLogEntry], Dict]:
+        """Build species results from tracked objects with detailed logging."""
+        species_results: Dict[str, SpeciesResult] = {}
+        log_entries: List[ProcessingLogEntry] = []
+        
+        # Build tracking summary
+        tracking_summary = {
+            "total_tracks": len(tracker.tracks),
+            "tracks": [],
+        }
+        
+        # Get unique species from all tracked objects (one per track)
+        tracked_species = tracker.get_unique_species()
+        
+        for species, confidence in tracked_species:
+            # Filter invalid species
+            species_lower = species.lower()
+            if species_lower in self.invalid_terms:
+                log_entries.append(ProcessingLogEntry(
+                    frame_idx=-1, event="track_filtered", species=species,
+                    confidence=confidence, reason="Invalid term"
+                ))
+                continue
+            if 'no cv result' in species_lower:
+                log_entries.append(ProcessingLogEntry(
+                    frame_idx=-1, event="track_filtered", species=species,
+                    confidence=confidence, reason="No CV result"
+                ))
+                continue
+            if len(species) > 30 and species.count('-') >= 3:
+                log_entries.append(ProcessingLogEntry(
+                    frame_idx=-1, event="track_filtered", species=species,
+                    confidence=confidence, reason="UUID-like identifier"
+                ))
+                continue
+            
+            specificity = self._calculate_specificity(species)
+            
+            if species not in species_results:
+                species_results[species] = SpeciesResult(
+                    species=species,
+                    confidence=confidence,
+                    count=1,
+                    specificity=specificity,
+                    taxonomy=None,
+                    key_frames=[],
+                )
+            else:
+                species_results[species].count += 1
+                species_results[species].confidence = max(
+                    species_results[species].confidence, confidence
+                )
+        
+        # Get key frames and build track details
+        for track_id, track_info in tracker.tracks.items():
+            best_species_data = track_info.get_best_species()
+            if not best_species_data or not best_species_data[0]:
+                continue
+            
+            best_species, best_conf, taxonomy = best_species_data
+            
+            # Collect all classifications for this track
+            all_classifications = {}
+            for c in track_info.classifications:
+                if c.species not in all_classifications:
+                    all_classifications[c.species] = {"count": 0, "max_conf": 0}
+                all_classifications[c.species]["count"] += 1
+                all_classifications[c.species]["max_conf"] = max(
+                    all_classifications[c.species]["max_conf"], c.confidence
+                )
+            
+            track_detail = {
+                "track_id": track_id,
+                "best_species": best_species,
+                "best_confidence": round(best_conf, 3),
+                "frames_seen": track_info.last_seen_frame - track_info.first_seen_frame + 1,
+                "classification_count": len(track_info.classifications),
+                "all_classifications": all_classifications,
+            }
+            tracking_summary["tracks"].append(track_detail)
+            
+            log_entries.append(ProcessingLogEntry(
+                frame_idx=-1,
+                event="track_consolidated",
+                species=best_species,
+                confidence=best_conf,
+                track_id=track_id,
+                reason=f"Selected from {len(all_classifications)} candidates: {list(all_classifications.keys())}"
+            ))
+            
+            if best_species in species_results:
+                result = species_results[best_species]
+                best_frame_data = track_info.get_best_frame()
+                if best_frame_data:
+                    frame, conf, bbox = best_frame_data
+                    self._update_key_frames(result, frame, conf, bbox)
+        
+        return species_results, log_entries, tracking_summary
+    
+    def _process_detections_with_log(
+        self,
+        detections: List[Detection],
+        frame,
+        species_results: Dict[str, SpeciesResult],
+        frame_idx: int,
+    ) -> Tuple[int, int, List[ProcessingLogEntry]]:
+        """Process detections from a single frame with logging.
+        
+        Returns:
+            (valid_count, filtered_count, log_entries)
+        """
+        valid_count = 0
+        filtered_count = 0
+        log_entries: List[ProcessingLogEntry] = []
+        
+        for det in detections:
+            species = det.species
+            species_lower = species.lower()
+            
+            # Filter out invalid detections
+            if species_lower in self.invalid_terms:
+                log_entries.append(ProcessingLogEntry(
+                    frame_idx=frame_idx, event="filtered", species=species,
+                    confidence=det.confidence, reason="Invalid term",
+                    bbox=det.bbox
+                ))
+                filtered_count += 1
+                continue
+            if 'no cv result' in species_lower:
+                log_entries.append(ProcessingLogEntry(
+                    frame_idx=frame_idx, event="filtered", species=species,
+                    confidence=det.confidence, reason="No CV result",
+                    bbox=det.bbox
+                ))
+                filtered_count += 1
+                continue
+            # Skip UUID-like strings
+            if len(species) > 30 and species.count('-') >= 3:
+                log_entries.append(ProcessingLogEntry(
+                    frame_idx=frame_idx, event="filtered", species=species,
+                    confidence=det.confidence, reason="UUID-like identifier",
+                    bbox=det.bbox
+                ))
+                filtered_count += 1
+                continue
+            
+            valid_count += 1
+            log_entries.append(ProcessingLogEntry(
+                frame_idx=frame_idx, event="accepted", species=species,
+                confidence=det.confidence, bbox=det.bbox
+            ))
+            
+            # Calculate specificity score
+            specificity = self._calculate_specificity(species)
+            
+            if species not in species_results:
+                species_results[species] = SpeciesResult(
+                    species=species,
+                    confidence=det.confidence,
+                    count=1,
+                    specificity=specificity,
+                    taxonomy=det.taxonomy,
+                    key_frames=[],
+                )
+            else:
+                result = species_results[species]
+                result.count += 1
+                result.confidence = max(result.confidence, det.confidence)
+            
+            # Track key frames for this species
+            result = species_results[species]
+            self._update_key_frames(result, frame, det.confidence, det.bbox)
+        
+        return valid_count, filtered_count, log_entries
+
     def _process_detections(
         self,
         detections: List[Detection],

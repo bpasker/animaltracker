@@ -73,7 +73,8 @@ class TrackInfo:
     def get_best_species(self) -> Tuple[str, float, Optional[str]]:
         """Determine the best species based on accumulated classifications.
         
-        Uses voting weighted by confidence and frequency.
+        Uses a hierarchy: specific species > bird/mammal > animal.
+        More specific classifications are preferred even at lower confidence.
         
         Returns:
             (species, confidence, taxonomy) tuple
@@ -101,32 +102,34 @@ class TrackInfo:
                 c.confidence
             )
         
-        # Filter out generic terms if we have specific ones
-        generic_terms = {'animal', 'bird', 'mammal', 'aves'}
-        specific_species = [s for s in species_data if s.lower() not in generic_terms]
+        # Log candidates for debugging
+        candidates_str = [f"{s}({d['max_confidence']:.1%})" for s, d in species_data.items()]
+        LOGGER.debug("Track %d candidates: %s", self.track_id, candidates_str)
         
-        if specific_species:
-            candidates = {s: species_data[s] for s in specific_species}
-        else:
-            candidates = species_data
+        # Find most specific candidates (highest specificity score)
+        max_specificity = max(d['specificity'] for d in species_data.values())
+        best_candidates = {
+            s: d for s, d in species_data.items() 
+            if d['specificity'] == max_specificity
+        }
         
-        if not candidates:
-            return "", 0.0, None
-        
-        # Score: specificity first, then count, then max confidence
+        # Among equally-specific candidates, pick by count then confidence
         best_species = max(
-            candidates.keys(),
+            best_candidates.keys(),
             key=lambda s: (
-                candidates[s]['specificity'],
-                candidates[s]['count'],
-                candidates[s]['max_confidence']
+                best_candidates[s]['count'],
+                best_candidates[s]['max_confidence']
             )
         )
         
+        LOGGER.debug("Track %d selected '%s' (specificity=%d) from %d candidates: %s",
+                    self.track_id, best_species, max_specificity, len(species_data), 
+                    list(species_data.keys()))
+        
         return (
             best_species, 
-            candidates[best_species]['max_confidence'],
-            candidates[best_species]['taxonomy']
+            best_candidates[best_species]['max_confidence'],
+            best_candidates[best_species]['taxonomy']
         )
     
     def get_best_frame(self) -> Optional[Tuple[np.ndarray, float, List[float]]]:
@@ -140,16 +143,47 @@ class TrackInfo:
         return (self.best_frame, self.best_confidence, self.best_bbox)
     
     def _calculate_specificity(self, species: str) -> int:
-        """Calculate how specific a species name is."""
-        generic_terms = {'animal', 'bird', 'mammal', 'aves'}
-        words = species.lower().replace('-', '_').split('_')
-        specificity = len([w for w in words if w and w not in generic_terms])
+        """Calculate how specific a species name is.
         
-        # Bonus for binomial names (genus_species)
-        if '_' in species and len(species.split('_')) >= 2:
-            specificity += 2
+        Hierarchy (higher = more specific):
+        - 0: "animal" (most generic)
+        - 1: "bird", "mammal", "reptile" (class-level)
+        - 2: "hawk", "owl", "songbird" (order/family level)
+        - 3+: "red-tailed_hawk", "barred_owl" (species level)
         
-        return specificity
+        This ensures "bird" always beats "animal", and specific species
+        always beat generic class labels.
+        """
+        species_lower = species.lower().replace('-', '_').strip()
+        
+        # Most generic - just "animal"
+        if species_lower in {'animal', 'unknown'}:
+            return 0
+        
+        # Class level - we know what type of animal
+        class_level = {'bird', 'mammal', 'aves', 'mammalia', 'reptile', 'reptilia', 
+                       'amphibian', 'amphibia', 'fish'}
+        if species_lower in class_level:
+            return 1
+        
+        # Order/family level - more specific groupings
+        order_level = {'hawk', 'owl', 'eagle', 'falcon', 'duck', 'goose', 'songbird',
+                       'sparrow', 'finch', 'warbler', 'woodpecker', 'heron', 'gull',
+                       'crow', 'jay', 'dove', 'pigeon', 'hummingbird',
+                       'deer', 'bear', 'cat', 'dog', 'fox', 'coyote', 'wolf',
+                       'rabbit', 'squirrel', 'mouse', 'rat', 'raccoon', 'skunk',
+                       'rodent', 'carnivore', 'ungulate'}
+        if species_lower in order_level:
+            return 2
+        
+        # Species level - has underscore suggesting binomial or compound name
+        words = species_lower.split('_')
+        if len(words) >= 2:
+            # Binomial names (genus_species) or compound common names
+            return 3 + len(words)  # More parts = more specific
+        
+        # Single word that's not in our known categories - likely a common name
+        return 2
 
 
 class ObjectTracker:

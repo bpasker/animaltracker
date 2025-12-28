@@ -699,17 +699,45 @@ class ClipPostProcessor:
     def _calculate_specificity(self, species: str) -> int:
         """Calculate specificity score for a species name.
         
-        Higher scores indicate more specific identifications.
+        Hierarchy (higher = more specific):
+        - 0: "animal" (most generic)
+        - 1: "bird", "mammal" (class-level)
+        - 2: "hawk", "sparrow", "deer" (family/order level)
+        - 3+: "red-tailed_hawk", "white-tailed_deer" (species level)
+        
+        This ensures "bird" beats "animal", and specific species beat generic labels.
         """
-        words = species.lower().replace('-', '_').split('_')
-        # Count meaningful words (not generic terms)
-        specificity = len([w for w in words if w and w not in self.generic_terms])
+        species_lower = species.lower().replace('-', '_').strip()
         
-        # Bonus for binomial names (genus_species format)
-        if '_' in species and len(species.split('_')) >= 2:
-            specificity += 2
+        # Most generic - just "animal"
+        if species_lower in {'animal', 'unknown'}:
+            return 0
         
-        return specificity
+        # Class level - we know what type of animal
+        class_level = {'bird', 'mammal', 'aves', 'mammalia', 'reptile', 'reptilia', 
+                       'amphibian', 'amphibia', 'fish'}
+        if species_lower in class_level:
+            return 1
+        
+        # Order/family level - more specific groupings
+        order_level = {'hawk', 'owl', 'eagle', 'falcon', 'duck', 'goose', 'songbird',
+                       'sparrow', 'finch', 'warbler', 'woodpecker', 'heron', 'gull',
+                       'crow', 'jay', 'dove', 'pigeon', 'hummingbird', 'cardinal',
+                       'chickadee', 'nuthatch', 'titmouse', 'wren', 'robin', 'bluebird',
+                       'deer', 'bear', 'cat', 'dog', 'fox', 'coyote', 'wolf',
+                       'rabbit', 'squirrel', 'mouse', 'rat', 'raccoon', 'skunk',
+                       'rodent', 'carnivore', 'ungulate'}
+        if species_lower in order_level:
+            return 2
+        
+        # Species level - has underscore suggesting binomial or compound name
+        words = species_lower.split('_')
+        if len(words) >= 2:
+            # Binomial names (genus_species) or compound common names
+            return 3 + len(words)  # More parts = more specific
+        
+        # Single word that's not in our known categories - likely a common name
+        return 2
     
     def _select_best_species(
         self, 
@@ -718,7 +746,7 @@ class ClipPostProcessor:
         """Select the best species classification from results.
         
         Prioritizes:
-        1. Specificity (more specific names are better)
+        1. Specificity (more specific names are better - bird > animal)
         2. Detection count (more detections = more reliable)
         3. Confidence (higher confidence = more certain)
         
@@ -727,24 +755,29 @@ class ClipPostProcessor:
         if not species_results:
             return "", 0.0
         
-        # Filter out generic categories if we have specific ones
-        specific_species = {
+        # Find the maximum specificity among all candidates
+        max_specificity = max(r.specificity for r in species_results.values())
+        
+        # Only consider candidates at the highest specificity level
+        best_candidates = {
             name: result for name, result in species_results.items()
-            if name.lower() not in self.generic_terms
+            if result.specificity == max_specificity
         }
         
-        candidates = specific_species if specific_species else species_results
-        
-        if not candidates:
+        if not best_candidates:
             return "", 0.0
         
-        # Score and rank candidates
-        def score_species(name: str) -> Tuple[int, int, float]:
-            result = candidates[name]
-            return (result.specificity, result.count, result.confidence)
+        # Among equally-specific candidates, score by count then confidence
+        def score_species(name: str) -> Tuple[int, float]:
+            result = best_candidates[name]
+            return (result.count, result.confidence)
         
-        best_species = max(candidates.keys(), key=score_species)
-        best_result = candidates[best_species]
+        best_species = max(best_candidates.keys(), key=score_species)
+        best_result = best_candidates[best_species]
+        
+        LOGGER.debug("Selected '%s' (specificity=%d, count=%d, conf=%.2f) from %d candidates",
+                    best_species, best_result.specificity, best_result.count, 
+                    best_result.confidence, len(species_results))
         
         return best_species, best_result.confidence
     

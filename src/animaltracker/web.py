@@ -1793,8 +1793,8 @@ class WebServer:
                             logText += line + '\\n';
                         }}
                         
-                        // Copy to clipboard
-                        navigator.clipboard.writeText(logText).then(() => {{
+                        // Copy to clipboard with fallback for non-HTTPS contexts
+                        function showCopiedFeedback() {{
                             const btn = document.querySelector('.copy-logs-btn');
                             const originalText = btn.innerHTML;
                             btn.innerHTML = '✓ Copied!';
@@ -1803,10 +1803,36 @@ class WebServer:
                                 btn.innerHTML = originalText;
                                 btn.classList.remove('copied');
                             }}, 2000);
-                        }}).catch(err => {{
-                            console.error('Failed to copy logs:', err);
-                            alert('Failed to copy logs to clipboard');
-                        }});
+                        }}
+                        
+                        if (navigator.clipboard && navigator.clipboard.writeText) {{
+                            navigator.clipboard.writeText(logText).then(() => {{
+                                showCopiedFeedback();
+                            }}).catch(err => {{
+                                console.error('Failed to copy logs:', err);
+                                fallbackCopy(logText);
+                            }});
+                        }} else {{
+                            fallbackCopy(logText);
+                        }}
+                        
+                        function fallbackCopy(text) {{
+                            // Fallback for non-secure contexts (HTTP)
+                            const textarea = document.createElement('textarea');
+                            textarea.value = text;
+                            textarea.style.position = 'fixed';
+                            textarea.style.left = '-9999px';
+                            document.body.appendChild(textarea);
+                            textarea.select();
+                            try {{
+                                document.execCommand('copy');
+                                showCopiedFeedback();
+                            }} catch (err) {{
+                                console.error('Fallback copy failed:', err);
+                                alert('Failed to copy logs to clipboard');
+                            }}
+                            document.body.removeChild(textarea);
+                        }}
                     }}
                 </script>
             </body>

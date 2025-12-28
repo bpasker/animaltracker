@@ -1231,7 +1231,7 @@ class WebServer:
         thumbnails_html = ""
         processing_log_html = """
                     <div class="processing-log">
-                        <button class="log-toggle" onclick="toggleLog()">
+                        <button class="log-toggle" id="logToggleBtn">
                             <span class="arrow">▶</span>
                             <span>📋 Processing Details</span>
                         </button>
@@ -1808,6 +1808,9 @@ class WebServer:
                             alert('Failed to copy logs to clipboard');
                         }});
                     }}
+                    
+                    // Attach event listener after DOM is ready
+                    document.getElementById('logToggleBtn').addEventListener('click', toggleLog);
                 </script>
             </body>
         </html>

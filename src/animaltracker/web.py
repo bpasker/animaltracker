@@ -2085,14 +2085,6 @@ class WebServer:
                                 </div>
                                 
                                 <div class="setting-row">
-                                    <label class="setting-label">Post-Analysis Frames</label>
-                                    <input type="number" min="10" max="200" step="10"
-                                           value="${g.clip.post_analysis_frames}"
-                                           onchange="updateGlobalValue('clip', 'post_analysis_frames', parseInt(this.value))">
-                                    <div class="setting-description">Number of frames to analyze in post-processing</div>
-                                </div>
-                                
-                                <div class="setting-row">
                                     <label class="setting-label">Post-Analysis Species Confidence</label>
                                     <div class="slider-container">
                                         <input type="range" min="0" max="100" step="5" 
@@ -2112,6 +2104,16 @@ class WebServer:
                                         <span class="slider-value" id="post_analysis_generic_confidence-value">${Math.round((g.clip.post_analysis_generic_confidence || 0.5) * 100)}%</span>
                                     </div>
                                     <div class="setting-description">Generic category threshold for post-analysis (animal, bird, etc.)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Object Tracking</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.tracking_enabled ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'tracking_enabled', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Track same animal across frames for consistent species ID (uses ByteTrack)</div>
                                 </div>
                             </div>
                             
@@ -2655,9 +2657,9 @@ class WebServer:
                 'pre_seconds': clip_cfg.pre_seconds,
                 'post_seconds': clip_cfg.post_seconds,
                 'post_analysis': getattr(clip_cfg, 'post_analysis', True),
-                'post_analysis_frames': getattr(clip_cfg, 'post_analysis_frames', 60),
                 'post_analysis_confidence': getattr(clip_cfg, 'post_analysis_confidence', 0.3),
                 'post_analysis_generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
+                'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True),
             },
             'retention': {
                 'min_days': retention_cfg.min_days,
@@ -2828,8 +2830,6 @@ class WebServer:
                     runtime.general.clip.post_seconds = float(clip['post_seconds'])
                 if 'post_analysis' in clip:
                     runtime.general.clip.post_analysis = bool(clip['post_analysis'])
-                if 'post_analysis_frames' in clip:
-                    runtime.general.clip.post_analysis_frames = int(clip['post_analysis_frames'])
                 if 'post_analysis_confidence' in clip:
                     runtime.general.clip.post_analysis_confidence = float(clip['post_analysis_confidence'])
                 if 'post_analysis_generic_confidence' in clip:
@@ -2920,8 +2920,6 @@ class WebServer:
                     config['general']['clip']['post_seconds'] = clip['post_seconds']
                 if 'post_analysis' in clip:
                     config['general']['clip']['post_analysis'] = clip['post_analysis']
-                if 'post_analysis_frames' in clip:
-                    config['general']['clip']['post_analysis_frames'] = clip['post_analysis_frames']
                 if 'post_analysis_confidence' in clip:
                     config['general']['clip']['post_analysis_confidence'] = clip['post_analysis_confidence']
                 if 'post_analysis_generic_confidence' in clip:

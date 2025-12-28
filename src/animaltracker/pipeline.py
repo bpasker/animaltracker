@@ -598,10 +598,19 @@ class StreamWorker:
         
         # Get post-analysis settings from config
         clip_cfg = self.runtime.general.clip
-        if num_samples is None:
-            num_samples = getattr(clip_cfg, 'post_analysis_frames', 60)
         conf_threshold = getattr(clip_cfg, 'post_analysis_confidence', 0.3)
         generic_conf = getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5)
+        
+        # Auto-calculate frames to analyze: ~1 frame per second of clip
+        # Estimate clip duration from frame count (assume ~15 fps from buffer)
+        if num_samples is None:
+            total_frames = len(frames)
+            estimated_fps = 15  # Default buffer fps
+            clip_duration_secs = total_frames / estimated_fps
+            # 1 frame per second, min 5, max 60
+            num_samples = max(5, min(60, int(clip_duration_secs)))
+            LOGGER.debug("Auto-calculated post-analysis: %d frames for ~%.1fs clip", 
+                        num_samples, clip_duration_secs)
         
         # Get eBird filter mode if enabled
         ebird_mode = None

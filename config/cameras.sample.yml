@@ -9,7 +9,7 @@ general:
     codec: h264
     # Post-clip analysis: re-analyze frames after recording for better species ID
     post_analysis: true          # Enable post-clip species refinement
-    post_analysis_frames: 5      # Number of frames to analyze (1-20)
+    # Frames to analyze are auto-calculated: ~1 per second of clip (min 5, max 60)
     # Object tracking: track same animal across frames for consistent identification
     tracking_enabled: true       # Uses ByteTrack to assign persistent IDs
   # Detector backend configuration

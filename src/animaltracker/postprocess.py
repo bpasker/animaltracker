@@ -161,10 +161,11 @@ class ClipPostProcessor:
         
         processing_log: List[ProcessingLogEntry] = []
         tracking_summary: Optional[Dict] = None
+        video_metadata: Dict = {}
         
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            species_results, raw_detection_count, filtered_count, processing_log, tracking_summary = \
+            species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata = \
                 self._analyze_video(cap, total_frames)
             frames_analyzed = (total_frames + self.sample_rate - 1) // self.sample_rate
             
@@ -202,7 +203,7 @@ class ClipPostProcessor:
                 thumbnails_saved = self._extract_sample_frames(working_path, num_samples=3)
         
         # Save processing log as JSON alongside the clip
-        self._save_processing_log(working_path, processing_log, tracking_summary)
+        self._save_processing_log(working_path, processing_log, tracking_summary, video_metadata)
         
         LOGGER.info(
             "Post-processing complete: %s -> %s (%.1f%% confidence, %d species found)",
@@ -231,6 +232,7 @@ class ClipPostProcessor:
         clip_path: Path,
         processing_log: List[ProcessingLogEntry],
         tracking_summary: Optional[Dict],
+        video_metadata: Optional[Dict] = None,
     ) -> None:
         """Save processing log as JSON file alongside clip."""
         import json
@@ -242,6 +244,14 @@ class ClipPostProcessor:
             log_data = {
                 "clip": str(clip_path.name),
                 "timestamp": str(Path(clip_path.stem).name.split('_')[0]) if '_' in clip_path.stem else "",
+                "settings": {
+                    "sample_rate": self.sample_rate,
+                    "confidence_threshold": self.confidence_threshold,
+                    "generic_confidence": self.generic_confidence,
+                    "tracking_enabled": self.tracking_enabled,
+                    "detector_type": type(self.detector).__name__,
+                },
+                "video": video_metadata or {},
                 "tracking_summary": tracking_summary,
                 "log_entries": [asdict(entry) for entry in processing_log],
             }
@@ -257,14 +267,14 @@ class ClipPostProcessor:
         self, 
         cap: cv2.VideoCapture, 
         total_frames: int
-    ) -> Tuple[Dict[str, SpeciesResult], int, int, List[ProcessingLogEntry], Optional[Dict]]:
+    ) -> Tuple[Dict[str, SpeciesResult], int, int, List[ProcessingLogEntry], Optional[Dict], Dict]:
         """Analyze video frames and collect species detections.
         
         Uses object tracking (if enabled) to consolidate classifications for 
         the same animal across frames, producing one species per tracked object.
         
         Returns:
-            (species_results dict, raw_detection_count, filtered_count, processing_log, tracking_summary)
+            (species_results dict, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata)
         """
         # Get video FPS and calculate sample rate
         fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
@@ -281,6 +291,16 @@ class ClipPostProcessor:
             actual_sample_rate = self.sample_rate if self.sample_rate > 1 else smart_sample_rate
         
         effective_fps = fps / actual_sample_rate
+        
+        # Build video metadata for logging
+        video_metadata = {
+            "fps": fps,
+            "total_frames": total_frames,
+            "actual_sample_rate": actual_sample_rate,
+            "effective_fps": effective_fps,
+            "duration_seconds": total_frames / fps if fps > 0 else 0,
+            "frames_to_analyze": (total_frames + actual_sample_rate - 1) // actual_sample_rate,
+        }
         
         LOGGER.info("Video fps=%.1f, sample_rate=%d (effective %.1f fps, tracking=%s)", 
                    fps, actual_sample_rate, effective_fps, self.tracking_enabled)
@@ -395,10 +415,10 @@ class ClipPostProcessor:
             if tracked_results:
                 LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
                            raw_detection_count, len(tracked_results))
-                return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary
+                return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata
         
         # Fallback to non-tracked results
-        return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary
+        return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata
     
     def _build_tracked_species_results(
         self,

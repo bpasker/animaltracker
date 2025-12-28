@@ -76,6 +76,9 @@ class WebServer:
         self.app.router.add_post('/recordings/bulk_delete', self.handle_bulk_delete)
         self.app.router.add_post('/recordings/reprocess', self.handle_reprocess)
         self.app.router.add_get('/recordings/log/{path:.*}', self.handle_get_processing_log)
+        # Monitor page and API
+        self.app.router.add_get('/monitor', self.handle_monitor_page)
+        self.app.router.add_get('/api/monitor', self.handle_get_monitor_data)
         # Settings page and API
         self.app.router.add_get('/settings', self.handle_settings_page)
         self.app.router.add_get('/api/settings', self.handle_get_settings)
@@ -299,6 +302,7 @@ class WebServer:
                 <div class="nav">
                     <a href="/" class="active">Live View</a>
                     <a href="/recordings">Recordings</a>
+                    <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
                 <h1>Live View</h1>
@@ -791,6 +795,7 @@ class WebServer:
                 <div class="nav">
                     <a href="/">Live View</a>
                     <a href="/recordings" class="active">Recordings</a>
+                    <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
                 <h1>Recordings</h1>
@@ -1510,6 +1515,7 @@ class WebServer:
                 <div class="nav">
                     <a href="/">Live View</a>
                     <a href="/recordings" class="active">Recordings</a>
+                    <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
                 
@@ -1758,6 +1764,486 @@ class WebServer:
             'size_mb': stat.st_size / (1024 * 1024),
             'thumbnails': thumbnails
         }
+
+    async def handle_get_monitor_data(self, request):
+        """Get real-time pipeline monitoring data as JSON."""
+        import psutil
+        
+        cameras = []
+        for camera_id, worker in self.workers.items():
+            # Get camera status
+            camera_data = {
+                'id': camera_id,
+                'name': worker.camera.name,
+                'location': worker.camera.location,
+                'status': 'connected' if worker.latest_frame is not None else 'disconnected',
+                'buffer_frames': len(worker.clip_buffer._buffer) if hasattr(worker.clip_buffer, '_buffer') else 0,
+                'buffer_seconds': worker.clip_buffer.duration if hasattr(worker.clip_buffer, 'duration') else 0,
+                'event_active': worker.event_state is not None,
+                'event_species': list(worker.event_state.species) if worker.event_state else [],
+                'event_duration': round(worker.event_state.duration, 1) if worker.event_state else 0,
+                'event_confidence': round(worker.event_state.max_confidence, 3) if worker.event_state else 0,
+                'tracking_enabled': worker.tracking_enabled,
+                'tracks_active': len(worker.event_state.tracker.tracks) if worker.event_state and worker.event_state.tracker else 0,
+            }
+            cameras.append(camera_data)
+        
+        # System stats
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage(str(self.storage_root))
+            
+            system = {
+                'cpu_percent': cpu_percent,
+                'memory_percent': memory.percent,
+                'memory_used_gb': round(memory.used / (1024**3), 1),
+                'memory_total_gb': round(memory.total / (1024**3), 1),
+                'disk_percent': disk.percent,
+                'disk_used_gb': round(disk.used / (1024**3), 1),
+                'disk_total_gb': round(disk.total / (1024**3), 1),
+            }
+        except Exception:
+            system = {
+                'cpu_percent': 0,
+                'memory_percent': 0,
+                'memory_used_gb': 0,
+                'memory_total_gb': 0,
+                'disk_percent': 0,
+                'disk_used_gb': 0,
+                'disk_total_gb': 0,
+            }
+        
+        # Detector info
+        detector_info = {
+            'backend': 'unknown',
+            'country': None,
+        }
+        if self.workers:
+            worker = next(iter(self.workers.values()))
+            detector_info['backend'] = worker.detector.backend_name
+            if hasattr(worker.detector, 'country'):
+                detector_info['country'] = worker.detector.country
+        
+        # Recent clips (last 5)
+        recent_clips = []
+        clips_dir = self.storage_root / 'clips'
+        if clips_dir.exists():
+            all_clips = []
+            for camera_dir in clips_dir.iterdir():
+                if camera_dir.is_dir():
+                    for clip in camera_dir.glob('*.mp4'):
+                        all_clips.append((clip, clip.stat().st_mtime))
+            all_clips.sort(key=lambda x: x[1], reverse=True)
+            for clip, mtime in all_clips[:5]:
+                species = self._parse_species_from_filename(clip.name)
+                recent_clips.append({
+                    'path': str(clip.relative_to(clips_dir)),
+                    'species': species,
+                    'time': datetime.fromtimestamp(mtime, tz=CENTRAL_TZ).strftime('%H:%M:%S'),
+                    'camera': clip.parent.name,
+                })
+        
+        return web.json_response({
+            'timestamp': datetime.now(tz=CENTRAL_TZ).isoformat(),
+            'cameras': cameras,
+            'system': system,
+            'detector': detector_info,
+            'recent_clips': recent_clips,
+        })
+
+    async def handle_monitor_page(self, request):
+        """Render the pipeline monitor page HTML."""
+        html = """
+        <html>
+            <head>
+                <title>Monitor - Animal Tracker</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="apple-mobile-web-app-capable" content="yes">
+                <meta name="mobile-web-app-capable" content="yes">
+                <style>
+                    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+                    body { 
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                        background: #1a1a1a; 
+                        color: #eee; 
+                        margin: 0; 
+                        padding: 16px;
+                        padding-bottom: 100px;
+                    }
+                    .nav { 
+                        display: flex;
+                        gap: 12px;
+                        margin-bottom: 20px; 
+                        padding-bottom: 16px; 
+                        border-bottom: 1px solid #333;
+                    }
+                    .nav a { 
+                        color: #fff;
+                        background: #333;
+                        text-decoration: none; 
+                        font-size: 0.95em;
+                        font-weight: 500;
+                        padding: 10px 16px;
+                        border-radius: 8px;
+                        transition: background 0.2s;
+                    }
+                    .nav a:hover { background: #444; }
+                    .nav a.active { background: #4CAF50; }
+                    
+                    h1 { margin: 0 0 20px 0; font-size: 1.5em; }
+                    
+                    .section {
+                        background: #2a2a2a;
+                        border-radius: 12px;
+                        padding: 16px;
+                        margin-bottom: 16px;
+                    }
+                    .section h2 {
+                        margin: 0 0 12px 0;
+                        font-size: 1.1em;
+                        color: #4CAF50;
+                    }
+                    
+                    /* System stats */
+                    .stats-grid {
+                        display: grid;
+                        grid-template-columns: repeat(3, 1fr);
+                        gap: 12px;
+                    }
+                    .stat-card {
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        text-align: center;
+                    }
+                    .stat-value {
+                        font-size: 1.5em;
+                        font-weight: bold;
+                        color: #fff;
+                    }
+                    .stat-label {
+                        font-size: 0.8em;
+                        color: #888;
+                        margin-top: 4px;
+                    }
+                    .stat-bar {
+                        height: 4px;
+                        background: #333;
+                        border-radius: 2px;
+                        margin-top: 8px;
+                        overflow: hidden;
+                    }
+                    .stat-bar-fill {
+                        height: 100%;
+                        background: #4CAF50;
+                        transition: width 0.3s;
+                    }
+                    .stat-bar-fill.warning { background: #FF9800; }
+                    .stat-bar-fill.danger { background: #F44336; }
+                    
+                    /* Camera cards */
+                    .camera-grid {
+                        display: grid;
+                        gap: 12px;
+                    }
+                    .camera-card {
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                    }
+                    .camera-header {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    }
+                    .camera-name {
+                        font-weight: 600;
+                        font-size: 1em;
+                    }
+                    .camera-location {
+                        color: #888;
+                        font-size: 0.85em;
+                    }
+                    .status-badge {
+                        padding: 4px 10px;
+                        border-radius: 12px;
+                        font-size: 0.75em;
+                        font-weight: 600;
+                        text-transform: uppercase;
+                    }
+                    .status-connected { background: rgba(76, 175, 80, 0.2); color: #4CAF50; }
+                    .status-disconnected { background: rgba(244, 67, 54, 0.2); color: #F44336; }
+                    .status-detecting { background: rgba(255, 152, 0, 0.2); color: #FF9800; animation: pulse 1s infinite; }
+                    @keyframes pulse {
+                        0%, 100% { opacity: 1; }
+                        50% { opacity: 0.6; }
+                    }
+                    
+                    .camera-stats {
+                        display: flex;
+                        gap: 16px;
+                        font-size: 0.85em;
+                        color: #aaa;
+                    }
+                    .camera-stats span {
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                    }
+                    
+                    .event-info {
+                        background: rgba(255, 152, 0, 0.1);
+                        border: 1px solid rgba(255, 152, 0, 0.3);
+                        border-radius: 6px;
+                        padding: 8px;
+                        font-size: 0.85em;
+                    }
+                    .event-species {
+                        color: #FF9800;
+                        font-weight: 600;
+                    }
+                    
+                    /* Recent clips */
+                    .clip-list {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                    }
+                    .clip-item {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        padding: 8px 12px;
+                        background: #1a1a1a;
+                        border-radius: 6px;
+                        text-decoration: none;
+                        color: inherit;
+                        transition: background 0.2s;
+                    }
+                    .clip-item:hover { background: #222; }
+                    .clip-species { color: #4CAF50; font-weight: 500; }
+                    .clip-meta { color: #888; font-size: 0.85em; }
+                    
+                    /* Detector info */
+                    .detector-info {
+                        display: flex;
+                        gap: 16px;
+                        font-size: 0.9em;
+                    }
+                    .detector-badge {
+                        background: #333;
+                        padding: 4px 12px;
+                        border-radius: 6px;
+                    }
+                    
+                    /* Auto-refresh indicator */
+                    .refresh-indicator {
+                        position: fixed;
+                        bottom: 16px;
+                        right: 16px;
+                        background: #333;
+                        padding: 8px 12px;
+                        border-radius: 8px;
+                        font-size: 0.8em;
+                        color: #888;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                    }
+                    .refresh-dot {
+                        width: 8px;
+                        height: 8px;
+                        background: #4CAF50;
+                        border-radius: 50%;
+                        animation: blink 2s infinite;
+                    }
+                    @keyframes blink {
+                        0%, 100% { opacity: 1; }
+                        50% { opacity: 0.3; }
+                    }
+                    
+                    @media (min-width: 768px) {
+                        body { padding: 24px; max-width: 1000px; margin: 0 auto; }
+                        .camera-grid { grid-template-columns: repeat(2, 1fr); }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="nav">
+                    <a href="/">Live View</a>
+                    <a href="/recordings">Recordings</a>
+                    <a href="/monitor" class="active">Monitor</a>
+                    <a href="/settings">Settings</a>
+                </div>
+                
+                <h1>🖥️ Pipeline Monitor</h1>
+                
+                <div class="section">
+                    <h2>📊 System Resources</h2>
+                    <div class="stats-grid" id="systemStats">
+                        <div class="stat-card">
+                            <div class="stat-value" id="cpuValue">--%</div>
+                            <div class="stat-label">CPU Usage</div>
+                            <div class="stat-bar"><div class="stat-bar-fill" id="cpuBar" style="width: 0%"></div></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="memValue">--%</div>
+                            <div class="stat-label">Memory</div>
+                            <div class="stat-bar"><div class="stat-bar-fill" id="memBar" style="width: 0%"></div></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value" id="diskValue">--%</div>
+                            <div class="stat-label">Disk</div>
+                            <div class="stat-bar"><div class="stat-bar-fill" id="diskBar" style="width: 0%"></div></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>🔍 Detector</h2>
+                    <div class="detector-info" id="detectorInfo">
+                        <span class="detector-badge">Backend: <strong>--</strong></span>
+                        <span class="detector-badge">Location: <strong>--</strong></span>
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>📷 Camera Pipelines</h2>
+                    <div class="camera-grid" id="cameraGrid">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>🎬 Recent Clips</h2>
+                    <div class="clip-list" id="recentClips">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+                
+                <div class="refresh-indicator">
+                    <div class="refresh-dot"></div>
+                    <span>Auto-refresh: <span id="countdown">2</span>s</span>
+                </div>
+                
+                <script>
+                    let refreshInterval = 2000;
+                    let countdown = 2;
+                    
+                    function getBarClass(value) {
+                        if (value > 90) return 'danger';
+                        if (value > 70) return 'warning';
+                        return '';
+                    }
+                    
+                    function updateUI(data) {
+                        // System stats
+                        const sys = data.system;
+                        document.getElementById('cpuValue').textContent = sys.cpu_percent.toFixed(0) + '%';
+                        document.getElementById('cpuBar').style.width = sys.cpu_percent + '%';
+                        document.getElementById('cpuBar').className = 'stat-bar-fill ' + getBarClass(sys.cpu_percent);
+                        
+                        document.getElementById('memValue').textContent = sys.memory_percent.toFixed(0) + '%';
+                        document.getElementById('memBar').style.width = sys.memory_percent + '%';
+                        document.getElementById('memBar').className = 'stat-bar-fill ' + getBarClass(sys.memory_percent);
+                        
+                        document.getElementById('diskValue').textContent = sys.disk_percent.toFixed(0) + '%';
+                        document.getElementById('diskBar').style.width = sys.disk_percent + '%';
+                        document.getElementById('diskBar').className = 'stat-bar-fill ' + getBarClass(sys.disk_percent);
+                        
+                        // Detector info
+                        const det = data.detector;
+                        document.getElementById('detectorInfo').innerHTML = `
+                            <span class="detector-badge">Backend: <strong>${det.backend}</strong></span>
+                            <span class="detector-badge">Location: <strong>${det.country || 'Not set'}</strong></span>
+                        `;
+                        
+                        // Camera grid
+                        const cameraGrid = document.getElementById('cameraGrid');
+                        cameraGrid.innerHTML = data.cameras.map(cam => {
+                            let statusClass = 'status-' + cam.status;
+                            let statusText = cam.status;
+                            if (cam.event_active) {
+                                statusClass = 'status-detecting';
+                                statusText = 'detecting';
+                            }
+                            
+                            let eventHtml = '';
+                            if (cam.event_active) {
+                                eventHtml = `
+                                    <div class="event-info">
+                                        🎯 <span class="event-species">${cam.event_species.join(', ')}</span>
+                                        (${(cam.event_confidence * 100).toFixed(0)}%) • 
+                                        ${cam.event_duration}s • 
+                                        ${cam.tracks_active} track${cam.tracks_active !== 1 ? 's' : ''}
+                                    </div>
+                                `;
+                            }
+                            
+                            return `
+                                <div class="camera-card">
+                                    <div class="camera-header">
+                                        <div>
+                                            <div class="camera-name">${cam.name}</div>
+                                            <div class="camera-location">${cam.location || cam.id}</div>
+                                        </div>
+                                        <span class="status-badge ${statusClass}">${statusText}</span>
+                                    </div>
+                                    <div class="camera-stats">
+                                        <span>📦 ${cam.buffer_frames} frames</span>
+                                        <span>⏱️ ${cam.buffer_seconds.toFixed(1)}s buffer</span>
+                                        <span>${cam.tracking_enabled ? '🎯 Tracking' : '📍 No tracking'}</span>
+                                    </div>
+                                    ${eventHtml}
+                                </div>
+                            `;
+                        }).join('');
+                        
+                        // Recent clips
+                        const clipList = document.getElementById('recentClips');
+                        if (data.recent_clips.length > 0) {
+                            clipList.innerHTML = data.recent_clips.map(clip => `
+                                <a class="clip-item" href="/recording/${clip.path}">
+                                    <span class="clip-species">${clip.species}</span>
+                                    <span class="clip-meta">${clip.camera} • ${clip.time}</span>
+                                </a>
+                            `).join('');
+                        } else {
+                            clipList.innerHTML = '<div style="color: #666; text-align: center; padding: 20px;">No recent clips</div>';
+                        }
+                    }
+                    
+                    async function fetchData() {
+                        try {
+                            const response = await fetch('/api/monitor');
+                            const data = await response.json();
+                            updateUI(data);
+                        } catch (e) {
+                            console.error('Failed to fetch monitor data:', e);
+                        }
+                    }
+                    
+                    // Initial fetch
+                    fetchData();
+                    
+                    // Auto-refresh every 2 seconds
+                    setInterval(fetchData, refreshInterval);
+                    
+                    // Countdown display
+                    setInterval(() => {
+                        countdown--;
+                        if (countdown <= 0) countdown = 2;
+                        document.getElementById('countdown').textContent = countdown;
+                    }, 1000);
+                </script>
+            </body>
+        </html>
+        """
+        return web.Response(text=html, content_type='text/html')
 
     async def handle_settings_page(self, request):
         """Render the settings page HTML."""
@@ -2133,6 +2619,7 @@ class WebServer:
                 <div class="nav">
                     <a href="/">Live View</a>
                     <a href="/recordings">Recordings</a>
+                    <a href="/monitor">Monitor</a>
                     <a href="/settings" class="active">Settings</a>
                 </div>
                 <h1>Settings</h1>

@@ -2255,6 +2255,62 @@ class WebServer:
                         border-radius: 4px;
                     }
                     
+                    /* Log viewer */
+                    .log-controls {
+                        display: flex;
+                        gap: 8px;
+                        margin-bottom: 12px;
+                        flex-wrap: wrap;
+                    }
+                    .log-controls select {
+                        background: #1a1a1a;
+                        color: #fff;
+                        border: 1px solid #444;
+                        padding: 6px 10px;
+                        border-radius: 6px;
+                        font-size: 0.85em;
+                    }
+                    .refresh-logs-btn {
+                        background: #333;
+                        color: #fff;
+                        border: none;
+                        padding: 6px 12px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 0.85em;
+                    }
+                    .refresh-logs-btn:hover { background: #444; }
+                    .log-info {
+                        font-size: 0.8em;
+                        color: #888;
+                        margin-bottom: 8px;
+                    }
+                    .log-container {
+                        background: #111;
+                        border-radius: 8px;
+                        padding: 12px;
+                        max-height: 400px;
+                        overflow-y: auto;
+                        font-family: 'SF Mono', Monaco, 'Consolas', monospace;
+                        font-size: 0.8em;
+                    }
+                    .log-entry {
+                        padding: 4px 0;
+                        border-bottom: 1px solid #222;
+                        display: flex;
+                        gap: 8px;
+                        flex-wrap: wrap;
+                    }
+                    .log-entry:last-child { border-bottom: none; }
+                    .log-time { color: #666; min-width: 70px; }
+                    .log-camera { color: #2196F3; min-width: 60px; }
+                    .log-level { min-width: 50px; font-weight: 600; }
+                    .log-level.error { color: #F44336; }
+                    .log-level.warning { color: #FF9800; }
+                    .log-level.info { color: #4CAF50; }
+                    .log-message { color: #ccc; flex: 1; word-break: break-word; }
+                    .log-empty { color: #666; text-align: center; padding: 20px; }
+                    
                     /* Auto-refresh indicator */
                     .refresh-indicator {
                         position: fixed;
@@ -2359,6 +2415,31 @@ class WebServer:
                 <div class="section">
                     <h2>🎬 Recent Clips</h2>
                     <div class="clip-list" id="recentClips">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+                
+                <div class="section">
+                    <h2>📜 System Logs</h2>
+                    <div class="log-controls">
+                        <select id="logCamera" onchange="loadLogs()">
+                            <option value="">All Cameras</option>
+                        </select>
+                        <select id="logLevel" onchange="loadLogs()">
+                            <option value="all">All Levels</option>
+                            <option value="warning">Warnings & Errors</option>
+                            <option value="error">Errors Only</option>
+                        </select>
+                        <select id="logMinutes" onchange="loadLogs()">
+                            <option value="15">Last 15 min</option>
+                            <option value="30" selected>Last 30 min</option>
+                            <option value="60">Last 1 hour</option>
+                            <option value="120">Last 2 hours</option>
+                        </select>
+                        <button class="refresh-logs-btn" onclick="loadLogs()">↻ Refresh</button>
+                    </div>
+                    <div class="log-info" id="logInfo">Loading...</div>
+                    <div class="log-container" id="logContainer">
                         <!-- Populated by JS -->
                     </div>
                 </div>
@@ -2483,6 +2564,9 @@ class WebServer:
                         } else {
                             clipList.innerHTML = '<div style="color: #666; text-align: center; padding: 20px;">No recent clips</div>';
                         }
+                        
+                        // Update camera dropdown for logs
+                        updateCameraDropdown(data.cameras);
                     }
                     
                     async function fetchData() {
@@ -2507,6 +2591,82 @@ class WebServer:
                         if (countdown <= 0) countdown = 2;
                         document.getElementById('countdown').textContent = countdown;
                     }, 1000);
+                    
+                    // Log viewer functions
+                    let logsLoaded = false;
+                    
+                    async function loadLogs() {
+                        const camera = document.getElementById('logCamera').value;
+                        const level = document.getElementById('logLevel').value;
+                        const minutes = document.getElementById('logMinutes').value;
+                        
+                        const logContainer = document.getElementById('logContainer');
+                        const logInfo = document.getElementById('logInfo');
+                        
+                        logInfo.textContent = 'Loading...';
+                        
+                        try {
+                            const params = new URLSearchParams({
+                                minutes: minutes,
+                                level: level,
+                            });
+                            if (camera) params.set('camera', camera);
+                            
+                            const response = await fetch('/api/logs?' + params);
+                            const data = await response.json();
+                            
+                            // Update info
+                            let sourceText = data.source === 'journalctl' ? 'systemd journal' : 
+                                            (data.source === 'logfile' ? 'log files' : 'no source');
+                            logInfo.textContent = `${data.count} entries from ${sourceText}`;
+                            
+                            // Render logs
+                            if (data.logs.length === 0) {
+                                logContainer.innerHTML = '<div class="log-empty">No log entries found</div>';
+                            } else {
+                                logContainer.innerHTML = data.logs.map(log => `
+                                    <div class="log-entry">
+                                        <span class="log-time">${log.time}</span>
+                                        ${log.camera ? `<span class="log-camera">${log.camera}</span>` : ''}
+                                        <span class="log-level ${log.level}">${log.level.toUpperCase()}</span>
+                                        <span class="log-message">${escapeHtml(log.message)}</span>
+                                    </div>
+                                `).join('');
+                            }
+                            
+                            logsLoaded = true;
+                        } catch (e) {
+                            logInfo.textContent = 'Error loading logs';
+                            logContainer.innerHTML = '<div class="log-empty">Failed to load logs: ' + e + '</div>';
+                        }
+                    }
+                    
+                    function escapeHtml(text) {
+                        const div = document.createElement('div');
+                        div.textContent = text;
+                        return div.innerHTML;
+                    }
+                    
+                    // Populate camera dropdown from monitor data
+                    function updateCameraDropdown(cameras) {
+                        const select = document.getElementById('logCamera');
+                        const currentValue = select.value;
+                        
+                        // Keep "All Cameras" option
+                        let html = '<option value="">All Cameras</option>';
+                        cameras.forEach(cam => {
+                            html += `<option value="${cam.id}" ${cam.id === currentValue ? 'selected' : ''}>${cam.name} (${cam.id})</option>`;
+                        });
+                        select.innerHTML = html;
+                    }
+                    
+                    // Load logs on page load
+                    setTimeout(loadLogs, 500);
+                    
+                    // Auto-refresh logs every 30 seconds
+                    setInterval(() => {
+                        if (logsLoaded) loadLogs();
+                    }, 30000);
                 </script>
             </body>
         </html>

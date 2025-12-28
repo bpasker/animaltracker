@@ -638,6 +638,7 @@ class PipelineOrchestrator:
             logs_root=Path(self.runtime.general.logs_root),
             port=8080,
             config_path=self.config_path,
+            runtime=self.runtime,
         )
         
         await asyncio.gather(

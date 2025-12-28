@@ -58,12 +58,13 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 class WebServer:
-    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None):
+    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None, runtime = None):
         self.workers = workers
         self.storage_root = storage_root
         self.logs_root = logs_root
         self.port = port
         self.config_path = config_path
+        self.runtime = runtime
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
@@ -2521,6 +2522,8 @@ class WebServer:
         
         # Get runtime config for global settings
         runtime = self.runtime
+        if runtime is None:
+            return web.json_response({'error': 'Runtime not initialized'}, status=500)
         
         cameras = {}
         for cam_id, worker in self.workers.items():

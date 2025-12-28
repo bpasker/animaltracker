@@ -266,15 +266,24 @@ class ClipPostProcessor:
         Returns:
             (species_results dict, raw_detection_count, filtered_count, processing_log, tracking_summary)
         """
-        # Get video FPS and calculate smart sample rate (~1 frame per second)
+        # Get video FPS and calculate sample rate
         fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
-        # Sample roughly 1 frame per second, with min/max bounds
-        smart_sample_rate = max(1, min(int(fps), 30))  # Cap at 30fps videos
-        actual_sample_rate = self.sample_rate if self.sample_rate > 1 else smart_sample_rate
+        
+        # When tracking is enabled, sample more frequently for better track continuity
+        # Without tracking, we can sample less frequently since we just need species votes
+        if self.tracking_enabled:
+            # For tracking: analyze every 3rd frame (~5-10 fps effective)
+            # This gives ByteTrack enough visual overlap to track moving animals
+            actual_sample_rate = 3
+        else:
+            # For non-tracking: ~1 frame per second is fine
+            smart_sample_rate = max(1, min(int(fps), 30))
+            actual_sample_rate = self.sample_rate if self.sample_rate > 1 else smart_sample_rate
+        
         effective_fps = fps / actual_sample_rate
         
-        LOGGER.info("Video fps=%.1f, sample_rate=%d (effective %.1f fps)", 
-                   fps, actual_sample_rate, effective_fps)
+        LOGGER.info("Video fps=%.1f, sample_rate=%d (effective %.1f fps, tracking=%s)", 
+                   fps, actual_sample_rate, effective_fps, self.tracking_enabled)
         
         # Create tracker if enabled
         tracker = create_tracker(enabled=self.tracking_enabled, frame_rate=effective_fps)
@@ -365,6 +374,19 @@ class ClipPostProcessor:
         
         # If tracking was used and we have tracked objects, build results from tracks
         if tracker and tracker.active_track_count > 0:
+            # Merge fragmented tracks that are likely the same animal
+            # This handles cases where ByteTrack loses a track due to movement
+            # but later detections are clearly the same species
+            merged_count = tracker.merge_similar_tracks(max_frame_gap=120)
+            if merged_count > 0:
+                processing_log.append(ProcessingLogEntry(
+                    frame_idx=-1,
+                    event="tracks_merged",
+                    species="",
+                    confidence=0.0,
+                    reason=f"Merged {merged_count} fragmented tracks with same species",
+                ))
+            
             tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(
                 tracker, all_frames_data
             )

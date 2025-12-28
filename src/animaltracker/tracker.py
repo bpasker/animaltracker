@@ -192,8 +192,8 @@ class ObjectTracker:
     def __init__(
         self,
         track_activation_threshold: float = 0.25,
-        lost_track_buffer: int = 90,
-        minimum_matching_threshold: float = 0.5,
+        lost_track_buffer: int = 120,
+        minimum_matching_threshold: float = 0.3,
         frame_rate: int = 15,
     ):
         """Initialize the object tracker.
@@ -202,10 +202,10 @@ class ObjectTracker:
             track_activation_threshold: Min confidence to start a track
             lost_track_buffer: Frames to keep lost tracks alive. Higher values
                               help maintain identity through detection gaps.
-                              Default 90 handles ~6s gaps at 15fps.
+                              Default 120 handles ~8s gaps at 15fps.
             minimum_matching_threshold: IoU threshold for matching detections to 
                               existing tracks. Lower = more forgiving of movement.
-                              Default 0.5 balances identity vs movement tolerance.
+                              Default 0.3 is very permissive for fast-moving animals.
             frame_rate: Expected frame rate (for buffer calculations)
         """
         if not SUPERVISION_AVAILABLE:
@@ -359,6 +359,105 @@ class ObjectTracker:
         self.tracks.clear()
         self.frame_count = 0
     
+    def merge_similar_tracks(self, max_frame_gap: int = 60) -> int:
+        """Merge tracks that likely represent the same animal.
+        
+        Tracks are merged if they:
+        1. Have the same best species classification
+        2. Don't have overlapping frame ranges (not two animals at once)
+        3. Are temporally close (within max_frame_gap of each other)
+        
+        Args:
+            max_frame_gap: Maximum gap between track end and next track start
+                          to consider them the same animal.
+        
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+        
+        # Group tracks by their best species
+        species_tracks: Dict[str, List[int]] = {}
+        for track_id, track_info in self.tracks.items():
+            species, _, _ = track_info.get_best_species()
+            if species:
+                if species not in species_tracks:
+                    species_tracks[species] = []
+                species_tracks[species].append(track_id)
+        
+        merged_count = 0
+        tracks_to_remove = set()
+        
+        for species, track_ids in species_tracks.items():
+            if len(track_ids) <= 1:
+                continue
+            
+            # Sort tracks by first_seen_frame
+            track_ids_sorted = sorted(
+                track_ids, 
+                key=lambda tid: self.tracks[tid].first_seen_frame
+            )
+            
+            # Check for non-overlapping tracks that can be merged
+            primary_track_id = track_ids_sorted[0]
+            primary = self.tracks[primary_track_id]
+            
+            for other_id in track_ids_sorted[1:]:
+                if other_id in tracks_to_remove:
+                    continue
+                    
+                other = self.tracks[other_id]
+                
+                # Check if tracks overlap in time (both visible at same frame)
+                overlaps = (
+                    primary.first_seen_frame <= other.last_seen_frame and
+                    other.first_seen_frame <= primary.last_seen_frame
+                )
+                
+                if overlaps:
+                    # These might be two different animals - don't merge
+                    # Update primary to be the one with more detections
+                    if len(other.classifications) > len(primary.classifications):
+                        primary_track_id = other_id
+                        primary = other
+                    continue
+                
+                # Check if gap is small enough
+                gap = other.first_seen_frame - primary.last_seen_frame
+                if gap <= max_frame_gap:
+                    # Merge other into primary
+                    LOGGER.info("Merging Track %d into Track %d (same %s, gap=%d frames)",
+                               other_id, primary_track_id, species, gap)
+                    
+                    # Copy all classifications
+                    primary.classifications.extend(other.classifications)
+                    
+                    # Update frame range
+                    primary.last_seen_frame = max(primary.last_seen_frame, other.last_seen_frame)
+                    
+                    # Update best frame if other's is better
+                    if other.best_confidence > primary.best_confidence:
+                        primary.best_confidence = other.best_confidence
+                        primary.best_bbox = other.best_bbox
+                        primary.best_frame = other.best_frame
+                    
+                    tracks_to_remove.add(other_id)
+                    merged_count += 1
+                else:
+                    # Gap too large, other becomes the new primary for subsequent tracks
+                    primary_track_id = other_id
+                    primary = other
+        
+        # Remove merged tracks
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+        
+        if merged_count > 0:
+            LOGGER.info("Merged %d tracks, %d tracks remaining", merged_count, len(self.tracks))
+        
+        return merged_count
+    
     @property
     def active_track_count(self) -> int:
         """Number of tracks being tracked."""
@@ -368,7 +467,7 @@ class ObjectTracker:
 def create_tracker(
     enabled: bool = True,
     frame_rate: int = 15,
-    lost_track_buffer: int = 90,
+    lost_track_buffer: int = 120,
 ) -> Optional[ObjectTracker]:
     """Create an object tracker if available and enabled.
     
@@ -377,7 +476,7 @@ def create_tracker(
         frame_rate: Expected frame rate
         lost_track_buffer: How many frames to keep a "lost" track alive.
                           Should be high enough to handle gaps in detections.
-                          Default 90 = ~6 seconds at 15fps, or ~3 seconds at 30fps.
+                          Default 120 = ~8 seconds at 15fps.
         
     Returns:
         ObjectTracker instance or None if not available/disabled

@@ -617,16 +617,26 @@ class StreamWorker:
         if self.ebird_client and self.ebird_client.enabled:
             ebird_mode = self.runtime.general.ebird.filter_mode
         
-        # Sample frames evenly throughout the clip
+        # Sample frames for analysis
+        # When tracking is enabled, we need more frequent samples to maintain track continuity
         total_frames = len(frames)
-        if total_frames <= num_samples:
+        
+        if self.tracking_enabled:
+            # For tracking, sample every 3rd frame to maintain visual continuity
+            # This gives ByteTrack enough overlap to track moving objects
+            tracking_sample_rate = 3  # Analyze every 3rd frame (~5fps at 15fps source)
+            sample_indices = list(range(0, total_frames, tracking_sample_rate))
+            LOGGER.debug("Tracking mode: analyzing %d frames (every %dth frame)", 
+                        len(sample_indices), tracking_sample_rate)
+        elif total_frames <= num_samples:
             sample_indices = list(range(total_frames))
         else:
             step = total_frames / num_samples
             sample_indices = [int(i * step) for i in range(num_samples)]
         
         # Create a tracker for post-analysis to track objects across sampled frames
-        analysis_tracker = create_tracker(enabled=self.tracking_enabled, frame_rate=15)
+        effective_fps = 15 / (3 if self.tracking_enabled else max(1, total_frames / len(sample_indices)))
+        analysis_tracker = create_tracker(enabled=self.tracking_enabled, frame_rate=int(effective_fps))
         
         # Collect all detections across sampled frames, using tracker if available
         all_detections = []
@@ -651,6 +661,11 @@ class StreamWorker:
         
         # If tracking was used, get the best species from tracked objects
         if analysis_tracker and analysis_tracker.active_track_count > 0:
+            # Merge fragmented tracks that are likely the same animal
+            merged = analysis_tracker.merge_similar_tracks(max_frame_gap=30)
+            if merged > 0:
+                LOGGER.debug("Merged %d fragmented tracks", merged)
+            
             tracked_species = analysis_tracker.get_unique_species()
             if tracked_species:
                 # Apply eBird filtering to tracked results

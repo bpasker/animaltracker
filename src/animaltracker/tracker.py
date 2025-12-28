@@ -192,16 +192,20 @@ class ObjectTracker:
     def __init__(
         self,
         track_activation_threshold: float = 0.25,
-        lost_track_buffer: int = 30,
-        minimum_matching_threshold: float = 0.8,
+        lost_track_buffer: int = 90,
+        minimum_matching_threshold: float = 0.5,
         frame_rate: int = 15,
     ):
         """Initialize the object tracker.
         
         Args:
             track_activation_threshold: Min confidence to start a track
-            lost_track_buffer: Frames to keep lost tracks
-            minimum_matching_threshold: IoU threshold for matching
+            lost_track_buffer: Frames to keep lost tracks alive. Higher values
+                              help maintain identity through detection gaps.
+                              Default 90 handles ~6s gaps at 15fps.
+            minimum_matching_threshold: IoU threshold for matching detections to 
+                              existing tracks. Lower = more forgiving of movement.
+                              Default 0.5 balances identity vs movement tolerance.
             frame_rate: Expected frame rate (for buffer calculations)
         """
         if not SUPERVISION_AVAILABLE:
@@ -364,12 +368,16 @@ class ObjectTracker:
 def create_tracker(
     enabled: bool = True,
     frame_rate: int = 15,
+    lost_track_buffer: int = 90,
 ) -> Optional[ObjectTracker]:
     """Create an object tracker if available and enabled.
     
     Args:
         enabled: Whether tracking is enabled
         frame_rate: Expected frame rate
+        lost_track_buffer: How many frames to keep a "lost" track alive.
+                          Should be high enough to handle gaps in detections.
+                          Default 90 = ~6 seconds at 15fps, or ~3 seconds at 30fps.
         
     Returns:
         ObjectTracker instance or None if not available/disabled
@@ -383,8 +391,8 @@ def create_tracker(
         return None
     
     try:
-        tracker = ObjectTracker(frame_rate=frame_rate)
-        LOGGER.info("Object tracking enabled (ByteTrack)")
+        tracker = ObjectTracker(frame_rate=frame_rate, lost_track_buffer=lost_track_buffer)
+        LOGGER.info("Object tracking enabled (ByteTrack, lost_buffer=%d)", lost_track_buffer)
         return tracker
     except Exception as e:
         LOGGER.error("Failed to create tracker: %s", e)

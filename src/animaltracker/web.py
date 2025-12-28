@@ -2817,9 +2817,6 @@ class WebServer:
                 det = global_data['detector']
                 if 'generic_confidence' in det:
                     runtime.general.detector.generic_confidence = float(det['generic_confidence'])
-                    # Also update the actual detector instance if it supports it
-                    if hasattr(self.detector, 'generic_confidence'):
-                        self.detector.generic_confidence = float(det['generic_confidence'])
                 updated_global = True
             
             # Clip settings

@@ -2170,6 +2170,7 @@ class WebServer:
                     video_fps = log_data['video']['fps']
                 
                 # Build track info keyed by species
+                # Combine multiple tracks of the same species into one time range
                 tracking_summary = log_data.get('tracking_summary', {})
                 if tracking_summary and tracking_summary.get('tracks'):
                     for track in tracking_summary['tracks']:
@@ -2182,13 +2183,25 @@ class WebServer:
                             end_sec = last_frame / video_fps
                             
                             common_name = get_common_name(species_name)
-                            track_info[common_name] = {
-                                'track_id': track.get('track_id'),
-                                'start_time': start_sec,
-                                'end_time': end_sec,
-                                'duration': end_sec - start_sec,
-                                'confidence': track.get('best_confidence', 0),
-                            }
+                            
+                            if common_name in track_info:
+                                # Merge with existing: expand time range
+                                existing = track_info[common_name]
+                                existing['start_time'] = min(existing['start_time'], start_sec)
+                                existing['end_time'] = max(existing['end_time'], end_sec)
+                                existing['duration'] = existing['end_time'] - existing['start_time']
+                                # Keep highest confidence
+                                if track.get('best_confidence', 0) > existing['confidence']:
+                                    existing['confidence'] = track.get('best_confidence', 0)
+                                    existing['track_id'] = track.get('track_id')
+                            else:
+                                track_info[common_name] = {
+                                    'track_id': track.get('track_id'),
+                                    'start_time': start_sec,
+                                    'end_time': end_sec,
+                                    'duration': end_sec - start_sec,
+                                    'confidence': track.get('best_confidence', 0),
+                                }
             except Exception as e:
                 LOGGER.warning("Failed to load processing log: %s", e)
         

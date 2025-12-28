@@ -501,7 +501,8 @@ class ObjectTracker:
                     # Copy all classifications
                     primary.classifications.extend(other.classifications)
                     
-                    # Update frame range
+                    # Update frame range (must update BOTH first and last)
+                    primary.first_seen_frame = min(primary.first_seen_frame, other.first_seen_frame)
                     primary.last_seen_frame = max(primary.last_seen_frame, other.last_seen_frame)
                     
                     # Update best frame if other's is better
@@ -878,6 +879,10 @@ class ObjectTracker:
                     
                     # Merge later into earlier
                     earlier_info.classifications.extend(later_info.classifications)
+                    
+                    # Update frame range (must update BOTH first and last)
+                    earlier_info.first_seen_frame = min(earlier_info.first_seen_frame,
+                                                        later_info.first_seen_frame)
                     earlier_info.last_seen_frame = max(earlier_info.last_seen_frame, 
                                                        later_info.last_seen_frame)
                     

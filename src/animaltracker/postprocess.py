@@ -49,9 +49,13 @@ class ProcessingSettings:
     # Merge settings - for consolidating fragmented tracks
     merge_enabled: bool = True
     same_species_merge_gap: int = 120  # Max frame gap for same-species merge
+    spatial_merge_enabled: bool = True  # Merge tracks in similar locations (best!)
+    spatial_merge_iou: float = 0.3  # Min IoU overlap to consider same object
+    spatial_merge_gap: int = 30  # Max frame gap for spatial matching
     hierarchical_merge_enabled: bool = True  # Merge generic→specific (animal→canidae)
     hierarchical_merge_gap: int = 120  # Max frame gap for hierarchical merge
     min_specific_detections: int = 2  # Min detections for specific track to absorb generic
+    single_animal_mode: bool = False  # Aggressive merge: assume only 1 animal in video
     
     # Output settings
     max_thumbnails: int = MAX_KEY_FRAMES_PER_SPECIES
@@ -67,9 +71,13 @@ class ProcessingSettings:
             "lost_track_buffer": self.lost_track_buffer,
             "merge_enabled": self.merge_enabled,
             "same_species_merge_gap": self.same_species_merge_gap,
+            "spatial_merge_enabled": self.spatial_merge_enabled,
+            "spatial_merge_iou": self.spatial_merge_iou,
+            "spatial_merge_gap": self.spatial_merge_gap,
             "hierarchical_merge_enabled": self.hierarchical_merge_enabled,
             "hierarchical_merge_gap": self.hierarchical_merge_gap,
             "min_specific_detections": self.min_specific_detections,
+            "single_animal_mode": self.single_animal_mode,
             "max_thumbnails": self.max_thumbnails,
             "save_processing_log": self.save_processing_log,
         }
@@ -85,9 +93,13 @@ class ProcessingSettings:
             lost_track_buffer=data.get("lost_track_buffer", 120),
             merge_enabled=data.get("merge_enabled", True),
             same_species_merge_gap=data.get("same_species_merge_gap", 120),
+            spatial_merge_enabled=data.get("spatial_merge_enabled", True),
+            spatial_merge_iou=data.get("spatial_merge_iou", 0.3),
+            spatial_merge_gap=data.get("spatial_merge_gap", 30),
             hierarchical_merge_enabled=data.get("hierarchical_merge_enabled", True),
             hierarchical_merge_gap=data.get("hierarchical_merge_gap", 120),
             min_specific_detections=data.get("min_specific_detections", 2),
+            single_animal_mode=data.get("single_animal_mode", False),
             max_thumbnails=data.get("max_thumbnails", MAX_KEY_FRAMES_PER_SPECIES),
             save_processing_log=data.get("save_processing_log", True),
         )
@@ -497,7 +509,24 @@ class ClipPostProcessor:
         
         # If tracking was used and we have tracked objects, build results from tracks
         if tracker and tracker.active_track_count > 0:
-            # First pass: Merge fragmented tracks with the SAME species
+            # FIRST pass: Spatial merge - most reliable!
+            # If an object appears in the same location across frames, it's the same object
+            # regardless of species classification changes
+            if self.settings.spatial_merge_enabled:
+                spatial_merged = tracker.merge_spatially_adjacent_tracks(
+                    iou_threshold=self.settings.spatial_merge_iou,
+                    max_frame_gap=self.settings.spatial_merge_gap
+                )
+                if spatial_merged > 0:
+                    processing_log.append(ProcessingLogEntry(
+                        frame_idx=-1,
+                        event="spatial_merge",
+                        species="",
+                        confidence=0.0,
+                        reason=f"Merged {spatial_merged} tracks based on spatial continuity (IoU≥{self.settings.spatial_merge_iou}, gap≤{self.settings.spatial_merge_gap})",
+                    ))
+            
+            # Second pass: Merge fragmented tracks with the SAME species
             # This handles cases where ByteTrack loses a track due to movement
             # but later detections are clearly the same species
             if self.settings.merge_enabled:
@@ -513,7 +542,7 @@ class ClipPostProcessor:
                         reason=f"Merged {merged_count} fragmented tracks with same species (gap≤{self.settings.same_species_merge_gap})",
                     ))
             
-                # Second pass: Merge GENERIC tracks into more SPECIFIC tracks
+                # Third pass: Merge GENERIC tracks into more SPECIFIC tracks
                 # E.g., "animal" track absorbed into "canidae" track if temporally adjacent
                 # This only merges hierarchically compatible species (animal->mammal->canidae)
                 if self.settings.hierarchical_merge_enabled:
@@ -528,6 +557,19 @@ class ClipPostProcessor:
                             species="",
                             confidence=0.0,
                             reason=f"Absorbed {hierarchical_merged} generic tracks into specific species tracks (gap≤{self.settings.hierarchical_merge_gap})",
+                        ))
+                
+                # Third pass: Single animal mode - aggressively merge ALL non-overlapping tracks
+                # Use this when you're sure there's only one animal in the video
+                if self.settings.single_animal_mode:
+                    non_overlap_merged = tracker.merge_non_overlapping_tracks()
+                    if non_overlap_merged > 0:
+                        processing_log.append(ProcessingLogEntry(
+                            frame_idx=-1,
+                            event="single_animal_merge",
+                            species="",
+                            confidence=0.0,
+                            reason=f"Single-animal mode: merged {non_overlap_merged} non-overlapping tracks into 1",
                         ))
             
             tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(

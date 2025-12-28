@@ -657,6 +657,253 @@ class ObjectTracker:
         
         return merged_count
     
+    def merge_non_overlapping_tracks(self) -> int:
+        """Aggressively merge all non-overlapping tracks into the most confident one.
+        
+        This is for single-animal videos where we're confident there's only one subject.
+        All tracks that don't overlap in time get merged into whichever track has
+        the most specific species identification with highest confidence.
+        
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+        
+        # Find all tracks and score them
+        track_scores = []
+        for track_id, track_info in self.tracks.items():
+            species, confidence, _ = track_info.get_best_species()
+            if species:
+                _, specificity = self._get_species_hierarchy(species)
+                # Score: prioritize specificity, then confidence, then detection count
+                score = (specificity * 100) + confidence + (len(track_info.classifications) * 0.01)
+                track_scores.append({
+                    'track_id': track_id,
+                    'species': species,
+                    'confidence': confidence,
+                    'specificity': specificity,
+                    'detections': len(track_info.classifications),
+                    'score': score,
+                    'info': track_info,
+                })
+        
+        if not track_scores:
+            return 0
+        
+        # Sort by score (highest first)
+        track_scores.sort(key=lambda x: -x['score'])
+        
+        # The primary track is the highest scored one
+        primary = track_scores[0]
+        primary_info = primary['info']
+        
+        merged_count = 0
+        tracks_to_remove = set()
+        
+        for other in track_scores[1:]:
+            other_info = other['info']
+            
+            # Check for time overlap
+            overlaps = (
+                primary_info.first_seen_frame <= other_info.last_seen_frame and
+                other_info.first_seen_frame <= primary_info.last_seen_frame
+            )
+            
+            if overlaps:
+                LOGGER.debug("Cannot merge Track %d: overlaps with primary Track %d",
+                            other['track_id'], primary['track_id'])
+                continue
+            
+            # Merge into primary
+            LOGGER.info("Non-overlapping merge: Track %d (%s) <- Track %d (%s)",
+                       primary['track_id'], primary['species'],
+                       other['track_id'], other['species'])
+            
+            # Copy classifications
+            primary_info.classifications.extend(other_info.classifications)
+            
+            # Update frame range
+            primary_info.first_seen_frame = min(primary_info.first_seen_frame, 
+                                                other_info.first_seen_frame)
+            primary_info.last_seen_frame = max(primary_info.last_seen_frame, 
+                                               other_info.last_seen_frame)
+            
+            tracks_to_remove.add(other['track_id'])
+            merged_count += 1
+        
+        # Remove merged tracks
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+        
+        if merged_count > 0:
+            LOGGER.info("Non-overlapping merge: combined %d tracks into 1, %d tracks remaining",
+                       merged_count, len(self.tracks))
+        
+        return merged_count
+    
+    def _calculate_iou(self, bbox1: List[float], bbox2: List[float]) -> float:
+        """Calculate Intersection over Union between two bounding boxes.
+        
+        Args:
+            bbox1, bbox2: Bounding boxes as [x1, y1, x2, y2]
+            
+        Returns:
+            IoU value between 0.0 and 1.0
+        """
+        # Extract coordinates
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        
+        # Calculate intersection
+        xi1 = max(x1_1, x1_2)
+        yi1 = max(y1_1, y1_2)
+        xi2 = min(x2_1, x2_2)
+        yi2 = min(y2_1, y2_2)
+        
+        if xi2 <= xi1 or yi2 <= yi1:
+            return 0.0  # No intersection
+        
+        inter_area = (xi2 - xi1) * (yi2 - yi1)
+        
+        # Calculate union
+        box1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
+        box2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union_area = box1_area + box2_area - inter_area
+        
+        if union_area <= 0:
+            return 0.0
+        
+        return inter_area / union_area
+    
+    def merge_spatially_adjacent_tracks(self, iou_threshold: float = 0.3, max_frame_gap: int = 30) -> int:
+        """Merge tracks that end and start in similar spatial locations.
+        
+        This is a simpler, more robust merge strategy:
+        - If Track A ends at frame N with bounding box at position P
+        - And Track B starts at frame N+gap with bounding box at position Q
+        - And P and Q have high IoU (spatial overlap)
+        - Then they're probably the same animal
+        
+        This works regardless of species labels - pure spatial continuity.
+        
+        Args:
+            iou_threshold: Minimum IoU between ending/starting bboxes to merge (0.3 = 30% overlap)
+            max_frame_gap: Maximum frame gap to consider for spatial matching
+            
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+        
+        # Build track data with ending/starting bbox info
+        track_data = []
+        for track_id, track_info in self.tracks.items():
+            # Get bbox from last frame of this track
+            last_bbox = None
+            first_bbox = None
+            last_frame = track_info.last_seen_frame
+            first_frame = track_info.first_seen_frame
+            
+            # Find the actual bboxes at track boundaries
+            for c in track_info.classifications:
+                if c.bbox:
+                    if c.frame_idx == last_frame or last_bbox is None:
+                        last_bbox = c.bbox
+                    if c.frame_idx == first_frame or first_bbox is None:
+                        first_bbox = c.bbox
+            
+            if last_bbox is None and first_bbox is None:
+                continue
+                
+            species, confidence, _ = track_info.get_best_species()
+            
+            track_data.append({
+                'track_id': track_id,
+                'info': track_info,
+                'first_frame': first_frame,
+                'last_frame': last_frame,
+                'first_bbox': first_bbox or last_bbox,
+                'last_bbox': last_bbox or first_bbox,
+                'species': species,
+                'confidence': confidence,
+                'detections': len(track_info.classifications),
+            })
+        
+        if len(track_data) <= 1:
+            return 0
+        
+        # Sort by first frame (chronological order)
+        track_data.sort(key=lambda x: x['first_frame'])
+        
+        merged_count = 0
+        tracks_to_remove = set()
+        
+        # For each track, look for later tracks that start near where this one ended
+        for i, earlier in enumerate(track_data):
+            if earlier['track_id'] in tracks_to_remove:
+                continue
+            
+            earlier_info = earlier['info']
+            
+            for later in track_data[i+1:]:
+                if later['track_id'] in tracks_to_remove:
+                    continue
+                
+                # Check frame gap
+                frame_gap = later['first_frame'] - earlier['last_frame']
+                if frame_gap < 0:
+                    # Tracks overlap in time - skip
+                    continue
+                if frame_gap > max_frame_gap:
+                    # Too far apart temporally
+                    continue
+                
+                # Check spatial overlap (IoU between end of earlier and start of later)
+                iou = self._calculate_iou(earlier['last_bbox'], later['first_bbox'])
+                
+                if iou >= iou_threshold:
+                    LOGGER.info(
+                        "Spatial merge: Track %d (%s, frames %d-%d) + Track %d (%s, frames %d-%d), "
+                        "IoU=%.2f, gap=%d frames",
+                        earlier['track_id'], earlier['species'], 
+                        earlier['first_frame'], earlier['last_frame'],
+                        later['track_id'], later['species'],
+                        later['first_frame'], later['last_frame'],
+                        iou, frame_gap
+                    )
+                    
+                    later_info = later['info']
+                    
+                    # Merge later into earlier
+                    earlier_info.classifications.extend(later_info.classifications)
+                    earlier_info.last_seen_frame = max(earlier_info.last_seen_frame, 
+                                                       later_info.last_seen_frame)
+                    
+                    # Update best frame if later's is better
+                    if later_info.best_confidence > earlier_info.best_confidence:
+                        earlier_info.best_confidence = later_info.best_confidence
+                        earlier_info.best_bbox = later_info.best_bbox
+                        earlier_info.best_frame = later_info.best_frame
+                    
+                    # Update the earlier track's last_bbox for chaining
+                    earlier['last_bbox'] = later['last_bbox']
+                    earlier['last_frame'] = later['last_frame']
+                    
+                    tracks_to_remove.add(later['track_id'])
+                    merged_count += 1
+        
+        # Remove merged tracks
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+        
+        if merged_count > 0:
+            LOGGER.info("Spatial merge: merged %d tracks based on location continuity, %d tracks remaining",
+                       merged_count, len(self.tracks))
+        
+        return merged_count
+    
     @property
     def active_track_count(self) -> int:
         """Number of tracks being tracked."""

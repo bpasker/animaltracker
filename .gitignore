@@ -23,3 +23,4 @@ clips/
 config/cameras.yml
 config/secrets.env
 config/*.env
+config/cameras.mac.yml

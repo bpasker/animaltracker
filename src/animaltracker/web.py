@@ -1647,8 +1647,14 @@ class WebServer:
                         height: 18px;
                         accent-color: #4CAF50;
                     }}
-                    .reset-settings-btn {{
+                    .settings-actions {{
+                        display: flex;
+                        gap: 12px;
                         margin-top: 16px;
+                        justify-content: space-between;
+                        align-items: center;
+                    }}
+                    .reset-settings-btn {{
                         background: transparent;
                         border: 1px solid #666;
                         color: #888;
@@ -1660,6 +1666,21 @@ class WebServer:
                     .reset-settings-btn:hover {{
                         border-color: #888;
                         color: #fff;
+                    }}
+                    .apply-settings-btn {{
+                        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+                        border: none;
+                        color: white;
+                        padding: 10px 20px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 1em;
+                        font-weight: 600;
+                        transition: transform 0.1s, box-shadow 0.2s;
+                    }}
+                    .apply-settings-btn:hover {{
+                        transform: translateY(-1px);
+                        box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
                     }}
                     
                     @media (min-width: 768px) {{
@@ -1716,7 +1737,7 @@ class WebServer:
                 <!-- Processing Settings Panel -->
                 <div class="settings-panel" id="settingsPanel">
                     <h3>⚙️ Processing Settings</h3>
-                    <p class="settings-description">Adjust these settings and click "Reanalyze" to reprocess with new parameters.</p>
+                    <p class="settings-description">These settings are used when you click "Reanalyze" below. Changes are applied per-run, not saved permanently.</p>
                     
                     <div class="settings-grid">
                         <div class="setting-group">
@@ -1740,7 +1761,7 @@ class WebServer:
                         <div class="setting-group">
                             <label for="mergeGap">Track Merge Gap</label>
                             <input type="number" id="mergeGap" value="120" min="10" max="500">
-                            <span class="setting-help">Max frame gap to merge same-animal tracks</span>
+                            <span class="setting-help">Max frame gap to merge same-species tracks</span>
                         </div>
                         
                         <div class="setting-group checkbox-group">
@@ -1753,14 +1774,39 @@ class WebServer:
                         
                         <div class="setting-group checkbox-group">
                             <label>
+                                <input type="checkbox" id="spatialMerge" checked>
+                                Spatial Merge (Recommended)
+                            </label>
+                            <span class="setting-help">Merge tracks in same location - ignores species misclassifications</span>
+                        </div>
+                        
+                        <div class="setting-group">
+                            <label for="spatialIoU">Spatial Overlap (IoU)</label>
+                            <input type="number" id="spatialIoU" value="0.30" min="0.1" max="0.9" step="0.05">
+                            <span class="setting-help">Min bounding box overlap to merge (0.3 = 30%)</span>
+                        </div>
+                        
+                        <div class="setting-group checkbox-group">
+                            <label>
                                 <input type="checkbox" id="hierarchicalMerge" checked>
-                                Enable Hierarchical Merging
+                                Hierarchical Merging
                             </label>
                             <span class="setting-help">Merge "animal" tracks into specific species tracks</span>
                         </div>
+                        
+                        <div class="setting-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="singleAnimalMode">
+                                Single Animal Mode
+                            </label>
+                            <span class="setting-help">Force merge ALL non-overlapping tracks into one</span>
+                        </div>
                     </div>
                     
-                    <button class="reset-settings-btn" onclick="resetSettings()">Reset to Defaults</button>
+                    <div class="settings-actions">
+                        <button class="reset-settings-btn" onclick="resetSettings()">Reset to Defaults</button>
+                        <button class="apply-settings-btn" onclick="reprocessRecording()">🔄 Apply & Reanalyze</button>
+                    </div>
                 </div>
                 
                 {thumbnails_html}
@@ -1820,8 +1866,12 @@ class WebServer:
                             generic_confidence: parseFloat(document.getElementById('genericConfidence').value) || 0.5,
                             same_species_merge_gap: parseInt(document.getElementById('mergeGap').value) || 120,
                             hierarchical_merge_gap: parseInt(document.getElementById('mergeGap').value) || 120,
+                            spatial_merge_enabled: document.getElementById('spatialMerge').checked,
+                            spatial_merge_iou: parseFloat(document.getElementById('spatialIoU').value) || 0.3,
+                            spatial_merge_gap: 30,
                             tracking_enabled: document.getElementById('trackingEnabled').checked,
                             hierarchical_merge_enabled: document.getElementById('hierarchicalMerge').checked,
+                            single_animal_mode: document.getElementById('singleAnimalMode').checked,
                             merge_enabled: true
                         }};
                         
@@ -1876,7 +1926,10 @@ class WebServer:
                         document.getElementById('genericConfidence').value = 0.50;
                         document.getElementById('mergeGap').value = 120;
                         document.getElementById('trackingEnabled').checked = true;
+                        document.getElementById('spatialMerge').checked = true;
+                        document.getElementById('spatialIoU').value = 0.30;
                         document.getElementById('hierarchicalMerge').checked = true;
+                        document.getElementById('singleAnimalMode').checked = false;
                     }}
                     
                     // Processing log functions

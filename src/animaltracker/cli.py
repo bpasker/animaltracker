@@ -116,7 +116,14 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
         # Process single clip
         clip_path = Path(args.clip)
         if not clip_path.is_absolute():
-            clip_path = storage_root / 'clips' / clip_path
+            # Check if path already contains 'storage/clips' or 'clips/'
+            path_str = str(clip_path)
+            if path_str.startswith('storage/clips/') or path_str.startswith('clips/'):
+                # Path is relative to project root, make it absolute
+                clip_path = Path.cwd() / clip_path
+            else:
+                # Just a filename, look in storage_root/clips
+                clip_path = storage_root / 'clips' / clip_path
         
         processor = ClipPostProcessor(
             detector=detector,

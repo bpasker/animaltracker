@@ -94,6 +94,56 @@ class YoloDetector(BaseDetector):
 # SpeciesNet Backend
 # ============================================================================
 
+# Regional species blocklists - species that are definitely NOT in these regions
+# SpeciesNet's geofencing isn't always complete, so this provides additional filtering
+# Users can customize via config's `species_blocklist` option
+REGIONAL_BLOCKLISTS = {
+    # North America (USA, CAN, MEX) - no wild primates, African megafauna, etc.
+    "north_america": {
+        # Primates (no wild primates in North America)
+        "gibbon", "hylobatidae", "primate", "primates", "ape", "monkey", "chimpanzee", "gorilla",
+        "orangutan", "baboon", "macaque", "lemur", "marmoset", "tamarin", "spider_monkey",
+        "howler_monkey", "capuchin",
+        # African megafauna
+        "elephant", "lion", "leopard", "cheetah", "hyena", "zebra", "giraffe", "hippopotamus",
+        "rhinoceros", "warthog", "wildebeest", "gnu", "impala", "springbok", "kudu", "oryx",
+        "african_buffalo", "cape_buffalo", "aardvark", "pangolin", "okapi", "serval", "caracal",
+        # Asian megafauna
+        "tiger", "asian_elephant", "gaur", "banteng", "sambar", "chital", "nilgai", "blackbuck",
+        "water_buffalo", "yak", "takin", "serow", "goral", "giant_panda",
+        "clouded_leopard", "snow_leopard", "dhole", "sloth_bear", "sun_bear", "asian_black_bear",
+        # Australian animals
+        "kangaroo", "wallaby", "koala", "wombat", "platypus", "echidna", "tasmanian_devil",
+        "cassowary", "emu",
+        # South American (not in North America proper)
+        "jaguar", "tapir", "capybara", "anteater", "sloth", "llama", "alpaca", "vicuna", 
+        "guanaco", "mara", "chinchilla",
+    },
+    # Europe - different set of impossible species
+    "europe": {
+        "kangaroo", "wallaby", "koala", "platypus", "echidna", "tasmanian_devil",
+        "lion", "elephant", "giraffe", "zebra", "hippopotamus", "rhinoceros",
+        "tiger", "giant_panda", "gibbon", "orangutan", "gorilla", "chimpanzee",
+        "capybara", "tapir", "jaguar", "anteater", "sloth",
+    },
+    # Australia - filter out non-Australian species often misidentified
+    "australia": {
+        "lion", "tiger", "leopard", "cheetah", "elephant", "giraffe", "zebra",
+        "gorilla", "chimpanzee", "orangutan", "gibbon", "rhinoceros", "hippopotamus",
+    },
+}
+
+# Map country codes to regional blocklists
+COUNTRY_TO_REGION = {
+    "USA": "north_america", "CAN": "north_america", "MEX": "north_america",
+    "GBR": "europe", "DEU": "europe", "FRA": "europe", "ITA": "europe", 
+    "ESP": "europe", "POL": "europe", "NLD": "europe", "BEL": "europe",
+    "AUT": "europe", "CHE": "europe", "SWE": "europe", "NOR": "europe",
+    "FIN": "europe", "DNK": "europe", "IRL": "europe", "PRT": "europe",
+    "AUS": "australia",
+}
+
+
 class SpeciesNetDetector(BaseDetector):
     """Google SpeciesNet detection backend for wildlife camera traps.
     
@@ -282,6 +332,12 @@ class SpeciesNetDetector(BaseDetector):
                 LOGGER.debug("Skipping UUID-like species: %s", display_species[:50])
                 continue
             
+            # Geographic filter: reject species impossible for configured region
+            if self._is_exotic_species(display_species, species):
+                LOGGER.debug("Filtering exotic species '%s' (impossible in %s)", 
+                            display_species, self.country)
+                continue
+            
             detections.append(Detection(
                 species=display_species,
                 confidence=score,
@@ -290,6 +346,38 @@ class SpeciesNetDetector(BaseDetector):
             ))
         
         return detections
+    
+    def _is_exotic_species(self, display_name: str, taxonomy: str) -> bool:
+        """Check if a species is impossible for the configured region.
+        
+        Uses regional blocklists based on country setting. SpeciesNet's
+        geofencing isn't always complete, so this provides extra filtering.
+        """
+        if not self.country:
+            return False  # No filtering if no location set
+        
+        # Get blocklist for this region
+        region = COUNTRY_TO_REGION.get(self.country)
+        if not region:
+            return False  # Country not in our regional mappings
+        
+        blocklist = REGIONAL_BLOCKLISTS.get(region, set())
+        if not blocklist:
+            return False
+        
+        # Check display name
+        display_lower = display_name.lower().replace(" ", "_").replace("-", "_")
+        for exotic in blocklist:
+            if exotic in display_lower:
+                return True
+        
+        # Check taxonomy parts (handles "mammalia_primates_hylobatidae")
+        taxonomy_lower = taxonomy.lower().replace(" ", "_").replace("-", "_")
+        for exotic in blocklist:
+            if exotic in taxonomy_lower:
+                return True
+        
+        return False
     
     def _simplify_species_name(self, taxonomy: str) -> str:
         """Convert taxonomy label to display-friendly name.

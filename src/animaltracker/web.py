@@ -65,6 +65,8 @@ class WebServer:
         self.port = port
         self.config_path = config_path
         self.runtime = runtime
+        # Track active reprocessing jobs: {clip_path: {'started': timestamp, 'clip_name': name}}
+        self.reprocessing_jobs: Dict[str, dict] = {}
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
@@ -1110,6 +1112,14 @@ class WebServer:
         
         detector = next(iter(self.workers.values())).detector
         
+        # Track this reprocessing job
+        job_key = clip_path
+        self.reprocessing_jobs[job_key] = {
+            'started': datetime.now(tz=CENTRAL_TZ).isoformat(),
+            'clip_name': full_path.stem,
+            'camera': full_path.parent.name,
+        }
+        
         # Run reprocessing in thread pool
         loop = asyncio.get_running_loop()
         
@@ -1136,6 +1146,9 @@ class WebServer:
             )
         
         result = await loop.run_in_executor(None, do_reprocess)
+        
+        # Remove from active jobs
+        self.reprocessing_jobs.pop(job_key, None)
         
         if result.success:
             # Log thumbnail paths for debugging
@@ -1778,8 +1791,10 @@ class WebServer:
                 'name': worker.camera.name,
                 'location': worker.camera.location,
                 'status': 'connected' if worker.latest_frame is not None else 'disconnected',
-                'buffer_frames': len(worker.clip_buffer._buffer) if hasattr(worker.clip_buffer, '_buffer') else 0,
-                'buffer_seconds': worker.clip_buffer.duration if hasattr(worker.clip_buffer, 'duration') else 0,
+                'buffer_frames': worker.clip_buffer.frame_count,
+                'buffer_max_frames': worker.clip_buffer.max_frames,
+                'buffer_seconds': round(worker.clip_buffer.duration, 1),
+                'buffer_max_seconds': worker.clip_buffer.max_seconds,
                 'event_active': worker.event_state is not None,
                 'event_species': list(worker.event_state.species) if worker.event_state else [],
                 'event_duration': round(worker.event_state.duration, 1) if worker.event_state else 0,
@@ -1892,6 +1907,9 @@ class WebServer:
                     'camera': clip.parent.name,
                 })
         
+        # Active reprocessing jobs
+        reprocessing = list(self.reprocessing_jobs.values())
+        
         return web.json_response({
             'timestamp': datetime.now(tz=CENTRAL_TZ).isoformat(),
             'cameras': cameras,
@@ -1899,6 +1917,7 @@ class WebServer:
             'gpu': gpu,
             'detector': detector_info,
             'recent_clips': recent_clips,
+            'reprocessing_jobs': reprocessing,
         })
 
     async def handle_get_logs(self, request):
@@ -2280,6 +2299,42 @@ class WebServer:
                         font-size: 0.85em;
                     }
                     .refresh-logs-btn:hover { background: #444; }
+                    /* Reprocessing jobs */
+                    .reprocessing-list {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 8px;
+                    }
+                    .reprocessing-item {
+                        background: #2a2a2a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        display: flex;
+                        align-items: center;
+                        gap: 12px;
+                    }
+                    .reprocessing-spinner {
+                        width: 20px;
+                        height: 20px;
+                        border: 2px solid #333;
+                        border-top-color: #4CAF50;
+                        border-radius: 50%;
+                        animation: spin 1s linear infinite;
+                    }
+                    @keyframes spin {
+                        to { transform: rotate(360deg); }
+                    }
+                    .reprocessing-info {
+                        flex: 1;
+                    }
+                    .reprocessing-clip {
+                        font-weight: 500;
+                        color: #fff;
+                    }
+                    .reprocessing-meta {
+                        font-size: 0.85em;
+                        color: #888;
+                    }
                     .log-info {
                         font-size: 0.8em;
                         color: #888;
@@ -2419,6 +2474,13 @@ class WebServer:
                     </div>
                 </div>
                 
+                <div class="section" id="reprocessingSection" style="display: none;">
+                    <h2>🔄 Active Reprocessing</h2>
+                    <div class="reprocessing-list" id="reprocessingList">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+                
                 <div class="section">
                     <h2>📜 System Logs</h2>
                     <div class="log-controls">
@@ -2543,8 +2605,7 @@ class WebServer:
                                         <span class="status-badge ${statusClass}">${statusText}</span>
                                     </div>
                                     <div class="camera-stats">
-                                        <span>📦 ${cam.buffer_frames} frames</span>
-                                        <span>⏱️ ${cam.buffer_seconds.toFixed(1)}s buffer</span>
+                                        <span title="${cam.buffer_frames}/${cam.buffer_max_frames} frames">⏱️ ${cam.buffer_seconds.toFixed(1)}s / ${cam.buffer_max_seconds}s</span>
                                         <span>${cam.tracking_enabled ? '🎯 Tracking' : '📍 No tracking'}</span>
                                     </div>
                                     ${eventHtml}
@@ -2563,6 +2624,27 @@ class WebServer:
                             `).join('');
                         } else {
                             clipList.innerHTML = '<div style="color: #666; text-align: center; padding: 20px;">No recent clips</div>';
+                        }
+                        
+                        // Reprocessing jobs
+                        const reprocessSection = document.getElementById('reprocessingSection');
+                        const reprocessList = document.getElementById('reprocessingList');
+                        if (data.reprocessing_jobs && data.reprocessing_jobs.length > 0) {
+                            reprocessSection.style.display = 'block';
+                            reprocessList.innerHTML = data.reprocessing_jobs.map(job => {
+                                const startTime = new Date(job.started).toLocaleTimeString();
+                                return `
+                                    <div class="reprocessing-item">
+                                        <div class="reprocessing-spinner"></div>
+                                        <div class="reprocessing-info">
+                                            <div class="reprocessing-clip">${job.clip_name}</div>
+                                            <div class="reprocessing-meta">${job.camera} • Started ${startTime}</div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('');
+                        } else {
+                            reprocessSection.style.display = 'none';
                         }
                         
                         // Update camera dropdown for logs

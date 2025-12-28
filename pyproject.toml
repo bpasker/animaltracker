@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "animaltracker"
 version = "0.1.0"
-description = "Multi-camera RTSP animal detection pipeline for Jetson Nano"
+description = "Multi-camera RTSP animal detection pipeline with NVIDIA GPU support"
 authors = [{name = "Animal Tracker"}]
 readme = "README.md"
 requires-python = ">=3.8"
@@ -22,12 +22,12 @@ dependencies = [
     "pydantic>=2.7",
     "python-dotenv>=1.0",
     "supervision>=0.19",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
-jetson = [
-    "jetson-stats>=4.2",
-    "psutil>=5.9",
+gpu = [
+    "pynvml>=11.5",
 ]
 speciesnet = [
     "speciesnet>=1.0",

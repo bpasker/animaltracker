@@ -1,6 +1,6 @@
 general:
-  storage_root: /home/jetson/animaltracker/storage
-  logs_root: /home/jetson/animaltracker/logs
+  storage_root: /home/animaltracker/storage
+  logs_root: /home/animaltracker/logs
   metrics_port: 9500
   clip:
     pre_seconds: 5

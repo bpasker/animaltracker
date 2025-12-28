@@ -5,8 +5,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=jetson
-WorkingDirectory=/home/jetson/animaltracker
-EnvironmentFile=/home/jetson/animaltracker/config/secrets.env
-ExecStart=/home/jetson/animaltracker/.venv/bin/python -m animaltracker.cli cleanup \
-    --config /home/jetson/animaltracker/config/cameras.yml
+# Update User and paths to match your system
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/animaltracker
+EnvironmentFile=/home/YOUR_USERNAME/animaltracker/config/secrets.env
+ExecStart=/home/YOUR_USERNAME/animaltracker/.venv/bin/python -m animaltracker.cli cleanup \
+    --config /home/YOUR_USERNAME/animaltracker/config/cameras.yml

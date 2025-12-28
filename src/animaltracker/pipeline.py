@@ -50,7 +50,7 @@ def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp", hwaccel: bool = Fals
     return rtsp_uri
 
 
-# Keep GStreamer pipelines for systems that have it (e.g., Jetson)
+# GStreamer pipelines for systems with NVIDIA GPU hardware decoding
 def build_gstreamer_pipeline(rtsp_uri: str, transport: str = "tcp", latency_ms: int = 0) -> str:
     """Build GStreamer pipeline string for NVDEC hardware decoding.
     
@@ -61,7 +61,7 @@ def build_gstreamer_pipeline(rtsp_uri: str, transport: str = "tcp", latency_ms: 
     latency = max(latency_ms, 100)  # Minimum 100ms for stable streaming
     
     # GStreamer pipeline for NVDEC hardware decoding
-    # Works with GTX 1080, RTX series, Jetson, etc.
+    # Works with GTX 1080, RTX series, and other NVIDIA GPUs
     pipeline = (
         f"rtspsrc location={rtsp_uri} protocols={protocols} latency={latency} ! "
         f"rtph264depay ! h264parse ! "

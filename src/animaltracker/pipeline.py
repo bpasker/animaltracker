@@ -536,6 +536,11 @@ class StreamWorker:
         conf_threshold = getattr(clip_cfg, 'post_analysis_confidence', 0.3)
         generic_conf = getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5)
         
+        # Get eBird filter mode if enabled
+        ebird_mode = None
+        if self.ebird_client and self.ebird_client.enabled:
+            ebird_mode = self.runtime.general.ebird.filter_mode
+        
         # Sample frames evenly throughout the clip
         total_frames = len(frames)
         if total_frames <= num_samples:
@@ -594,11 +599,33 @@ class StreamWorker:
                 if '_' in species and len(species.split('_')) >= 2:
                     specificity += 2
                 
+                # Check eBird for bird species - boost if present in region
+                ebird_boost = 0
+                ebird_present = None
+                if ebird_mode and self._is_bird_species(det.taxonomy or det.species):
+                    ebird_present = self.ebird_client.is_species_present(det.taxonomy or det.species)
+                    if ebird_present is True:
+                        # Species confirmed in region - boost priority
+                        ebird_boost = 3
+                        LOGGER.debug("eBird: %s confirmed in region, boosting", species)
+                    elif ebird_present is False:
+                        # Species NOT seen in region - penalize
+                        if ebird_mode == "filter":
+                            # Skip entirely in filter mode
+                            LOGGER.debug("eBird filter: %s not in region, skipping", species)
+                            continue
+                        else:
+                            # Flag/boost mode: just penalize
+                            ebird_boost = -2
+                            LOGGER.debug("eBird: %s not reported in region, penalizing", species)
+                
                 species_scores[species] = {
                     'max_confidence': det.confidence,
                     'count': 1,
                     'specificity': specificity,
                     'taxonomy': det.taxonomy or species,
+                    'ebird_boost': ebird_boost,
+                    'ebird_present': ebird_present,
                 }
             else:
                 species_scores[species]['count'] += 1
@@ -620,10 +647,11 @@ class StreamWorker:
         if not candidates:
             return "", 0.0
         
-        # Pick the best: prioritize specificity, then count, then confidence
+        # Pick the best: prioritize eBird presence, then specificity, then count, then confidence
         best_species = max(
             candidates.keys(),
             key=lambda s: (
+                candidates[s].get('ebird_boost', 0),  # eBird confirmed species first
                 candidates[s]['specificity'],
                 candidates[s]['count'],
                 candidates[s]['max_confidence']
@@ -631,11 +659,38 @@ class StreamWorker:
         )
         
         best_confidence = candidates[best_species]['max_confidence']
+        ebird_info = candidates[best_species].get('ebird_present')
+        ebird_status = ""
+        if ebird_info is True:
+            ebird_status = " [eBird: confirmed in region]"
+        elif ebird_info is False:
+            ebird_status = " [eBird: not reported in region]"
         
-        LOGGER.info("Post-clip analysis: %d valid detections across %d frames -> %s (%.2f)", 
-                   len(valid_detections), len(sample_indices), best_species, best_confidence)
+        LOGGER.info("Post-clip analysis: %d valid detections across %d frames -> %s (%.2f)%s", 
+                   len(valid_detections), len(sample_indices), best_species, best_confidence, ebird_status)
         
         return best_species, best_confidence
+    
+    def _is_bird_species(self, taxonomy: str) -> bool:
+        """Check if a taxonomy string represents a bird species."""
+        taxonomy_lower = taxonomy.lower()
+        
+        # Check taxonomy for bird indicators
+        bird_indicators = ['aves', ';aves;', 'animalia;chordata;aves']
+        for indicator in bird_indicators:
+            if indicator in taxonomy_lower:
+                return True
+        
+        # Check common bird family/order names
+        bird_terms = {
+            'passeriformes', 'piciformes', 'strigiformes', 'falconiformes',
+            'accipitriformes', 'anseriformes', 'columbiformes', 'apodiformes'
+        }
+        for term in bird_terms:
+            if term in taxonomy_lower:
+                return True
+        
+        return False
 
 
 class PipelineOrchestrator:

@@ -1295,7 +1295,7 @@ class WebServer:
                     start_str = f"{int(start // 60)}:{int(start % 60):02d}"
                     end_str = f"{int(end // 60)}:{int(end % 60):02d}"
                     
-                    timing_html = f'<div class="thumbnail-timing">⏱️ {start_str} - {end_str} ({duration:.1f}s)</div>'
+                    timing_html = f'<div class="thumbnail-timing" data-start-time="{start}" onclick="seekVideo({start})" title="Click to jump to this time">⏱️ {start_str} - {end_str} ({duration:.1f}s)</div>'
                     
                     # Add confidence if available
                     if thumb.get('confidence'):
@@ -1474,6 +1474,14 @@ class WebServer:
                         font-size: 0.8em;
                         color: #aaa;
                         text-align: center;
+                        cursor: pointer;
+                        transition: color 0.2s, background 0.2s;
+                        border-radius: 4px;
+                        margin: 2px 8px;
+                    }}
+                    .thumbnail-timing:hover {{
+                        color: #4CAF50;
+                        background: rgba(76, 175, 80, 0.1);
                     }}
                     .thumbnail-confidence {{
                         padding: 2px 12px 8px;
@@ -1740,7 +1748,7 @@ class WebServer:
                 </div>
                 
                 <div class="video-section">
-                    <video controls playsinline autoplay>
+                    <video id="clipVideo" controls playsinline autoplay>
                         <source src="/clips/{clip_info['path']}" type="video/mp4">
                         Your browser does not support video playback.
                     </video>
@@ -1853,6 +1861,16 @@ class WebServer:
                         document.getElementById('lightbox-img').src = url;
                         document.getElementById('lightbox').classList.add('active');
                         document.body.style.overflow = 'hidden';
+                    }}
+                    
+                    function seekVideo(seconds) {{
+                        const video = document.getElementById('clipVideo');
+                        if (video) {{
+                            video.currentTime = seconds;
+                            video.play().catch(() => {{}});
+                            // Scroll video into view
+                            video.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                        }}
                     }}
                     
                     function closeLightbox() {{

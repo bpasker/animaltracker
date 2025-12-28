@@ -3,6 +3,9 @@
 This module provides functionality to reanalyze saved video clips using
 the detector to get more accurate species classifications and better
 detection thumbnails.
+
+This is the UNIFIED classification engine - both auto-processing after
+clip save and manual reanalysis use this same module.
 """
 from __future__ import annotations
 
@@ -20,10 +23,74 @@ from .tracker import ObjectTracker, create_tracker
 
 LOGGER = logging.getLogger(__name__)
 
-# Configuration
-DEFAULT_SAMPLE_RATE = 5  # Analyze every Nth frame
-DEFAULT_CONFIDENCE_THRESHOLD = 0.3  # Lower threshold to catch more candidates
+# Default configuration values
+DEFAULT_SAMPLE_RATE = 3  # Analyze every Nth frame (lower = more accurate tracking)
+DEFAULT_CONFIDENCE_THRESHOLD = 0.3  # Minimum confidence for specific species
+DEFAULT_GENERIC_CONFIDENCE = 0.5  # Minimum confidence for generic categories
 MAX_KEY_FRAMES_PER_SPECIES = 3
+
+
+@dataclass
+class ProcessingSettings:
+    """Unified settings for video classification processing.
+    
+    These settings control how the classification engine analyzes video clips.
+    The same settings structure is used for both auto-processing and manual reanalysis.
+    """
+    # Detection settings
+    sample_rate: int = DEFAULT_SAMPLE_RATE  # Analyze every Nth frame
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD  # Min confidence for species
+    generic_confidence: float = DEFAULT_GENERIC_CONFIDENCE  # Min confidence for "animal", "bird"
+    
+    # Tracking settings
+    tracking_enabled: bool = True
+    lost_track_buffer: int = 120  # Frames to keep lost track alive
+    
+    # Merge settings - for consolidating fragmented tracks
+    merge_enabled: bool = True
+    same_species_merge_gap: int = 120  # Max frame gap for same-species merge
+    hierarchical_merge_enabled: bool = True  # Merge generic→specific (animal→canidae)
+    hierarchical_merge_gap: int = 120  # Max frame gap for hierarchical merge
+    min_specific_detections: int = 2  # Min detections for specific track to absorb generic
+    
+    # Output settings
+    max_thumbnails: int = MAX_KEY_FRAMES_PER_SPECIES
+    save_processing_log: bool = True
+    
+    def to_dict(self) -> Dict:
+        """Convert settings to dictionary for JSON serialization."""
+        return {
+            "sample_rate": self.sample_rate,
+            "confidence_threshold": self.confidence_threshold,
+            "generic_confidence": self.generic_confidence,
+            "tracking_enabled": self.tracking_enabled,
+            "lost_track_buffer": self.lost_track_buffer,
+            "merge_enabled": self.merge_enabled,
+            "same_species_merge_gap": self.same_species_merge_gap,
+            "hierarchical_merge_enabled": self.hierarchical_merge_enabled,
+            "hierarchical_merge_gap": self.hierarchical_merge_gap,
+            "min_specific_detections": self.min_specific_detections,
+            "max_thumbnails": self.max_thumbnails,
+            "save_processing_log": self.save_processing_log,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> "ProcessingSettings":
+        """Create settings from dictionary, using defaults for missing keys."""
+        return cls(
+            sample_rate=data.get("sample_rate", DEFAULT_SAMPLE_RATE),
+            confidence_threshold=data.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD),
+            generic_confidence=data.get("generic_confidence", DEFAULT_GENERIC_CONFIDENCE),
+            tracking_enabled=data.get("tracking_enabled", True),
+            lost_track_buffer=data.get("lost_track_buffer", 120),
+            merge_enabled=data.get("merge_enabled", True),
+            same_species_merge_gap=data.get("same_species_merge_gap", 120),
+            hierarchical_merge_enabled=data.get("hierarchical_merge_enabled", True),
+            hierarchical_merge_gap=data.get("hierarchical_merge_gap", 120),
+            min_specific_detections=data.get("min_specific_detections", 2),
+            max_thumbnails=data.get("max_thumbnails", MAX_KEY_FRAMES_PER_SPECIES),
+            save_processing_log=data.get("save_processing_log", True),
+        )
 
 
 @dataclass
@@ -66,38 +133,67 @@ class PostProcessResult:
     filtered_detections: int = 0  # Detections filtered out
     processing_log: List[ProcessingLogEntry] = field(default_factory=list)
     tracking_summary: Optional[Dict] = None  # Track consolidation info
+    settings_used: Optional[ProcessingSettings] = None  # Settings that produced this result
+    tracks_detected: int = 0  # Number of unique animals/tracks
     success: bool = True
     error: Optional[str] = None
 
 
 class ClipPostProcessor:
-    """Post-processor for analyzing and improving clip classifications."""
+    """Unified post-processor for analyzing and classifying video clips.
+    
+    This is the SINGLE engine used for both:
+    - Auto-processing after a clip is saved from real-time detection
+    - Manual reanalysis via the web UI "Reanalyze" button
+    
+    Using the same engine ensures consistent results regardless of how
+    processing is triggered.
+    """
     
     def __init__(
         self,
         detector: BaseDetector,
         storage_root: Path,
-        sample_rate: int = DEFAULT_SAMPLE_RATE,
-        confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-        generic_confidence: float = 0.5,
-        tracking_enabled: bool = True,
+        settings: Optional[ProcessingSettings] = None,
+        # Legacy parameters for backward compatibility
+        sample_rate: Optional[int] = None,
+        confidence_threshold: Optional[float] = None,
+        generic_confidence: Optional[float] = None,
+        tracking_enabled: Optional[bool] = None,
     ):
         """Initialize the post-processor.
         
         Args:
             detector: Detection backend to use for analysis
             storage_root: Root directory for clip storage
-            sample_rate: Analyze every Nth frame (lower = more thorough but slower)
-            confidence_threshold: Minimum confidence for specific species detections
-            generic_confidence: Minimum confidence for generic categories (animal, bird)
-            tracking_enabled: Use object tracking to consolidate species across frames
+            settings: ProcessingSettings instance (preferred)
+            
+            Legacy parameters (deprecated, use settings instead):
+            sample_rate: Analyze every Nth frame
+            confidence_threshold: Minimum confidence for specific species
+            generic_confidence: Minimum confidence for generic categories
+            tracking_enabled: Use object tracking
         """
         self.detector = detector
         self.storage_root = storage_root
-        self.sample_rate = sample_rate
-        self.tracking_enabled = tracking_enabled
-        self.confidence_threshold = confidence_threshold
-        self.generic_confidence = generic_confidence
+        
+        # Use provided settings or create from legacy parameters
+        if settings:
+            self.settings = settings
+        else:
+            # Build settings from legacy parameters with defaults
+            self.settings = ProcessingSettings(
+                sample_rate=sample_rate if sample_rate is not None else DEFAULT_SAMPLE_RATE,
+                confidence_threshold=confidence_threshold if confidence_threshold is not None else DEFAULT_CONFIDENCE_THRESHOLD,
+                generic_confidence=generic_confidence if generic_confidence is not None else DEFAULT_GENERIC_CONFIDENCE,
+                tracking_enabled=tracking_enabled if tracking_enabled is not None else True,
+            )
+        
+        # Expose settings as instance attributes for backward compatibility
+        self.sample_rate = self.settings.sample_rate
+        self.tracking_enabled = self.settings.tracking_enabled
+        self.confidence_threshold = self.settings.confidence_threshold
+        self.generic_confidence = self.settings.generic_confidence
         
         # Terms to filter out
         self.invalid_terms = {
@@ -207,9 +303,12 @@ class ClipPostProcessor:
         # Save processing log as JSON alongside the clip
         self._save_processing_log(working_path, processing_log, tracking_summary, video_metadata)
         
+        # Count unique tracks (animals) detected
+        tracks_detected = tracking_summary.get("total_tracks", 0) if tracking_summary else len(species_results)
+        
         LOGGER.info(
-            "Post-processing complete: %s -> %s (%.1f%% confidence, %d species found)",
-            original_species, new_species, confidence * 100, len(species_results)
+            "Post-processing complete: %s -> %s (%.1f%% confidence, %d tracks, %d species found)",
+            original_species, new_species, confidence * 100, tracks_detected, len(species_results)
         )
         
         return PostProcessResult(
@@ -226,6 +325,8 @@ class ClipPostProcessor:
             filtered_detections=filtered_count,
             processing_log=processing_log,
             tracking_summary=tracking_summary,
+            settings_used=self.settings,
+            tracks_detected=tracks_detected,
             success=True,
         )
     
@@ -246,13 +347,8 @@ class ClipPostProcessor:
             log_data = {
                 "clip": str(clip_path.name),
                 "timestamp": str(Path(clip_path.stem).name.split('_')[0]) if '_' in clip_path.stem else "",
-                "settings": {
-                    "sample_rate": self.sample_rate,
-                    "confidence_threshold": self.confidence_threshold,
-                    "generic_confidence": self.generic_confidence,
-                    "tracking_enabled": self.tracking_enabled,
-                    "detector_type": type(self.detector).__name__,
-                },
+                "settings": self.settings.to_dict(),  # Full settings object
+                "detector_type": type(self.detector).__name__,
                 "video": video_metadata or {},
                 "tracking_summary": tracking_summary,
                 "log_entries": [asdict(entry) for entry in processing_log],
@@ -307,10 +403,15 @@ class ClipPostProcessor:
         LOGGER.info("Video fps=%.1f, sample_rate=%d (effective %.1f fps, tracking=%s)", 
                    fps, actual_sample_rate, effective_fps, self.tracking_enabled)
         
-        # Create tracker if enabled
-        tracker = create_tracker(enabled=self.tracking_enabled, frame_rate=effective_fps)
+        # Create tracker if enabled, using settings for buffer size
+        tracker = create_tracker(
+            enabled=self.tracking_enabled, 
+            frame_rate=effective_fps,
+            lost_track_buffer=self.settings.lost_track_buffer
+        )
         if tracker:
-            LOGGER.info("Object tracking enabled for post-processing")
+            LOGGER.info("Object tracking enabled for post-processing (lost_buffer=%d)", 
+                       self.settings.lost_track_buffer)
         
         species_results: Dict[str, SpeciesResult] = {}
         frame_idx = 0
@@ -399,28 +500,35 @@ class ClipPostProcessor:
             # First pass: Merge fragmented tracks with the SAME species
             # This handles cases where ByteTrack loses a track due to movement
             # but later detections are clearly the same species
-            merged_count = tracker.merge_similar_tracks(max_frame_gap=120)
-            if merged_count > 0:
-                processing_log.append(ProcessingLogEntry(
-                    frame_idx=-1,
-                    event="tracks_merged",
-                    species="",
-                    confidence=0.0,
-                    reason=f"Merged {merged_count} fragmented tracks with same species",
-                ))
+            if self.settings.merge_enabled:
+                merged_count = tracker.merge_similar_tracks(
+                    max_frame_gap=self.settings.same_species_merge_gap
+                )
+                if merged_count > 0:
+                    processing_log.append(ProcessingLogEntry(
+                        frame_idx=-1,
+                        event="tracks_merged",
+                        species="",
+                        confidence=0.0,
+                        reason=f"Merged {merged_count} fragmented tracks with same species (gap≤{self.settings.same_species_merge_gap})",
+                    ))
             
-            # Second pass: Merge GENERIC tracks into more SPECIFIC tracks
-            # E.g., "animal" track absorbed into "canidae" track if temporally adjacent
-            # This only merges hierarchically compatible species (animal->mammal->canidae)
-            hierarchical_merged = tracker.merge_hierarchical_tracks(max_frame_gap=120, min_specific_detections=2)
-            if hierarchical_merged > 0:
-                processing_log.append(ProcessingLogEntry(
-                    frame_idx=-1,
-                    event="hierarchical_merge",
-                    species="",
-                    confidence=0.0,
-                    reason=f"Absorbed {hierarchical_merged} generic tracks into specific species tracks",
-                ))
+                # Second pass: Merge GENERIC tracks into more SPECIFIC tracks
+                # E.g., "animal" track absorbed into "canidae" track if temporally adjacent
+                # This only merges hierarchically compatible species (animal->mammal->canidae)
+                if self.settings.hierarchical_merge_enabled:
+                    hierarchical_merged = tracker.merge_hierarchical_tracks(
+                        max_frame_gap=self.settings.hierarchical_merge_gap,
+                        min_specific_detections=self.settings.min_specific_detections
+                    )
+                    if hierarchical_merged > 0:
+                        processing_log.append(ProcessingLogEntry(
+                            frame_idx=-1,
+                            event="hierarchical_merge",
+                            species="",
+                            confidence=0.0,
+                            reason=f"Absorbed {hierarchical_merged} generic tracks into specific species tracks (gap≤{self.settings.hierarchical_merge_gap})",
+                        ))
             
             tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(
                 tracker, all_frames_data

@@ -502,14 +502,21 @@ class StreamWorker:
         loop = asyncio.get_running_loop()
         post_analysis_enabled = self.runtime.general.clip.post_analysis
         post_analysis_frames = self.runtime.general.clip.post_analysis_frames
+        # Check if unified post-processor should be used (new approach)
+        use_unified_processor = getattr(self.runtime.general.clip, 'unified_post_processing', False)
+        
+        # Capture detector reference for unified processor
+        detector = self.detector
+        storage_root = self.storage.root_path
         
         def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames):
             """Finalize event with optional post-clip species analysis."""
             final_species = ctx_base['species']
             final_confidence = ctx_base['confidence']
+            tracks_count = 1  # Default assumption
             
-            # Step 1: Run post-clip analysis if enabled
-            if post_analysis_enabled:
+            # Step 1: Run post-clip analysis if enabled (OLD approach - analyze in memory)
+            if post_analysis_enabled and not use_unified_processor:
                 refined_species, refined_confidence = self._analyze_clip_frames(
                     frames, num_samples=post_analysis_frames
                 )
@@ -529,11 +536,38 @@ class StreamWorker:
             # Step 3: Write the clip
             self.storage.write_clip(frames, clip_path)
             
-            # Step 4: Save detection thumbnails for each species
-            if species_key_frames:
+            # Step 4: Save detection thumbnails for each species (skip if unified processor will regenerate)
+            if species_key_frames and not use_unified_processor:
                 self.storage.save_detection_thumbnails(clip_path, species_key_frames)
             
-            # Step 5: Send notification with refined info
+            # Step 5: Run UNIFIED post-processor if enabled (NEW approach - analyze saved file)
+            if use_unified_processor:
+                try:
+                    from .postprocess import ClipPostProcessor, ProcessingSettings
+                    settings = ProcessingSettings()  # Use defaults
+                    processor = ClipPostProcessor(
+                        detector=detector,
+                        storage_root=storage_root,
+                        settings=settings,
+                    )
+                    result = processor.process_clip(
+                        clip_path,
+                        update_filename=True,
+                        regenerate_thumbnails=True,
+                    )
+                    if result.success:
+                        final_species = result.new_species
+                        final_confidence = result.confidence
+                        tracks_count = result.tracks_detected
+                        # Update clip_path if file was renamed
+                        if result.new_path:
+                            clip_path = result.new_path
+                        LOGGER.info("Unified post-processing complete: %s (%.1f%%, %d tracks)", 
+                                   final_species, final_confidence * 100, tracks_count)
+                except Exception as e:
+                    LOGGER.error("Unified post-processing failed: %s", e)
+            
+            # Step 6: Send notification with refined info
             ctx = NotificationContext(
                 species=final_species,
                 confidence=final_confidence,
@@ -544,8 +578,8 @@ class StreamWorker:
                 event_duration=ctx_base['event_duration'],
             )
             self.notifier.send(ctx, priority=priority, sound=sound)
-            LOGGER.info("Event for %s closed; clip at %s (species: %s)", 
-                       ctx.camera_id, clip_path, final_species)
+            LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)", 
+                       ctx.camera_id, clip_path, final_species, tracks_count)
 
         # Use tracked species if available (more accurate than raw detections)
         tracked_species = self.event_state.get_tracked_species_label()

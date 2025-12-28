@@ -1087,11 +1087,28 @@ class WebServer:
         })
 
     async def handle_reprocess(self, request):
-        """Reprocess a clip to improve species classification."""
+        """Reprocess a clip to improve species classification.
+        
+        Accepts optional settings overrides in the request body:
+        {
+            "path": "camera/clip.mp4",
+            "settings": {
+                "sample_rate": 3,
+                "confidence_threshold": 0.3,
+                "generic_confidence": 0.5,
+                "tracking_enabled": true,
+                "merge_enabled": true,
+                "same_species_merge_gap": 120,
+                "hierarchical_merge_enabled": true,
+                "hierarchical_merge_gap": 120,
+                "min_specific_detections": 2
+            }
+        }
+        """
         try:
             data = await request.json()
             clip_path = data.get('path')
-            sample_rate = data.get('sample_rate', 5)
+            settings_override = data.get('settings', {})
         except Exception:
             return web.Response(status=400, text="Invalid JSON body")
         
@@ -1123,21 +1140,37 @@ class WebServer:
         # Run reprocessing in thread pool
         loop = asyncio.get_running_loop()
         
-        # Get post-processing settings from runtime config
+        # Build ProcessingSettings from defaults + overrides
+        from .postprocess import ProcessingSettings
+        
+        # Start with defaults from runtime config
         clip_cfg = self.runtime.general.clip if self.runtime else None
-        conf_threshold = getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3
-        generic_conf = getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5
-        tracking_enabled = getattr(clip_cfg, 'tracking_enabled', True) if clip_cfg else True
+        default_settings = {
+            'sample_rate': 3,
+            'confidence_threshold': getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3,
+            'generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5,
+            'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True) if clip_cfg else True,
+            'merge_enabled': True,
+            'same_species_merge_gap': 120,
+            'hierarchical_merge_enabled': True,
+            'hierarchical_merge_gap': 120,
+            'min_specific_detections': 2,
+            'lost_track_buffer': 120,
+        }
+        
+        # Apply overrides from request
+        for key, value in settings_override.items():
+            if key in default_settings:
+                default_settings[key] = value
+        
+        settings = ProcessingSettings.from_dict(default_settings)
         
         def do_reprocess():
             from .postprocess import ClipPostProcessor
             processor = ClipPostProcessor(
                 detector=detector,
                 storage_root=self.storage_root,
-                sample_rate=sample_rate,
-                confidence_threshold=conf_threshold,
-                generic_confidence=generic_conf,
-                tracking_enabled=tracking_enabled,
+                settings=settings,
             )
             return processor.process_clip(
                 full_path,
@@ -1165,10 +1198,12 @@ class WebServer:
                 'raw_detections': result.raw_detections,
                 'filtered_detections': result.filtered_detections,
                 'species_found': list(result.species_results.keys()),
+                'tracks_detected': result.tracks_detected,
                 'thumbnails_saved': len(result.thumbnails_saved),
-                'thumbnail_paths': [str(p) for p in result.thumbnails_saved],  # Add actual paths for debugging
+                'thumbnail_paths': [str(p) for p in result.thumbnails_saved],
                 'renamed': result.new_path is not None,
                 'new_path': str(result.new_path.relative_to(self.storage_root / 'clips')) if result.new_path else None,
+                'settings_used': result.settings_used.to_dict() if result.settings_used else None,
             })
         else:
             return web.json_response({
@@ -1540,6 +1575,93 @@ class WebServer:
                     .log-event .reason {{ color: #aaa; font-style: italic; font-size: 0.9em; }}
                     .log-no-data {{ color: #666; font-style: italic; text-align: center; padding: 20px; }}
                     
+                    /* Settings Panel Styles */
+                    .settings-toggle {{
+                        background: #607D8B !important;
+                    }}
+                    .settings-toggle:hover {{
+                        background: #455A64 !important;
+                    }}
+                    .settings-panel {{
+                        background: #252525;
+                        border-radius: 12px;
+                        padding: 20px;
+                        margin: 16px 0;
+                        display: none;
+                        border: 1px solid #333;
+                    }}
+                    .settings-panel.visible {{
+                        display: block;
+                    }}
+                    .settings-panel h3 {{
+                        margin: 0 0 8px 0;
+                        font-size: 1.1em;
+                        color: #fff;
+                    }}
+                    .settings-description {{
+                        color: #888;
+                        font-size: 0.9em;
+                        margin-bottom: 16px;
+                    }}
+                    .settings-grid {{
+                        display: grid;
+                        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+                        gap: 16px;
+                    }}
+                    .setting-group {{
+                        display: flex;
+                        flex-direction: column;
+                        gap: 4px;
+                    }}
+                    .setting-group label {{
+                        font-weight: 500;
+                        color: #ddd;
+                        font-size: 0.9em;
+                    }}
+                    .setting-group input[type="number"] {{
+                        background: #1a1a1a;
+                        border: 1px solid #444;
+                        border-radius: 6px;
+                        padding: 8px 12px;
+                        color: #fff;
+                        font-size: 1em;
+                        width: 100%;
+                        box-sizing: border-box;
+                    }}
+                    .setting-group input[type="number"]:focus {{
+                        outline: none;
+                        border-color: #4CAF50;
+                    }}
+                    .setting-help {{
+                        font-size: 0.75em;
+                        color: #666;
+                    }}
+                    .checkbox-group label {{
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        cursor: pointer;
+                    }}
+                    .checkbox-group input[type="checkbox"] {{
+                        width: 18px;
+                        height: 18px;
+                        accent-color: #4CAF50;
+                    }}
+                    .reset-settings-btn {{
+                        margin-top: 16px;
+                        background: transparent;
+                        border: 1px solid #666;
+                        color: #888;
+                        padding: 8px 16px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 0.9em;
+                    }}
+                    .reset-settings-btn:hover {{
+                        border-color: #888;
+                        color: #fff;
+                    }}
+                    
                     @media (min-width: 768px) {{
                         body {{ padding: 24px; max-width: 900px; margin: 0 auto; }}
                         .thumbnail-gallery {{ grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }}
@@ -1581,10 +1703,64 @@ class WebServer:
                         <svg fill="currentColor" viewBox="0 0 24 24"><path d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8c-.45-.83-.7-1.79-.7-2.8 0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>
                         <span id="reprocessText">Reanalyze</span>
                     </button>
+                    <button class="action-btn settings-toggle" onclick="toggleSettings()">
+                        <svg fill="currentColor" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                        Settings
+                    </button>
                     <button class="action-btn delete" onclick="deleteRecording()">
                         <svg fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                         Delete
                     </button>
+                </div>
+                
+                <!-- Processing Settings Panel -->
+                <div class="settings-panel" id="settingsPanel">
+                    <h3>⚙️ Processing Settings</h3>
+                    <p class="settings-description">Adjust these settings and click "Reanalyze" to reprocess with new parameters.</p>
+                    
+                    <div class="settings-grid">
+                        <div class="setting-group">
+                            <label for="sampleRate">Sample Rate</label>
+                            <input type="number" id="sampleRate" value="3" min="1" max="30">
+                            <span class="setting-help">Analyze every Nth frame (lower = more thorough)</span>
+                        </div>
+                        
+                        <div class="setting-group">
+                            <label for="confidenceThreshold">Confidence Threshold</label>
+                            <input type="number" id="confidenceThreshold" value="0.30" min="0.1" max="1.0" step="0.05">
+                            <span class="setting-help">Min confidence for species detection (0.3 recommended)</span>
+                        </div>
+                        
+                        <div class="setting-group">
+                            <label for="genericConfidence">Generic Confidence</label>
+                            <input type="number" id="genericConfidence" value="0.50" min="0.1" max="1.0" step="0.05">
+                            <span class="setting-help">Min confidence for generic categories (animal, bird)</span>
+                        </div>
+                        
+                        <div class="setting-group">
+                            <label for="mergeGap">Track Merge Gap</label>
+                            <input type="number" id="mergeGap" value="120" min="10" max="500">
+                            <span class="setting-help">Max frame gap to merge same-animal tracks</span>
+                        </div>
+                        
+                        <div class="setting-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="trackingEnabled" checked>
+                                Enable Object Tracking
+                            </label>
+                            <span class="setting-help">Track animals across frames for better accuracy</span>
+                        </div>
+                        
+                        <div class="setting-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="hierarchicalMerge" checked>
+                                Enable Hierarchical Merging
+                            </label>
+                            <span class="setting-help">Merge "animal" tracks into specific species tracks</span>
+                        </div>
+                    </div>
+                    
+                    <button class="reset-settings-btn" onclick="resetSettings()">Reset to Defaults</button>
                 </div>
                 
                 {thumbnails_html}
@@ -1637,13 +1813,25 @@ class WebServer:
                         btn.disabled = true;
                         textEl.textContent = 'Analyzing...';
                         
+                        // Gather settings from the panel
+                        const settings = {{
+                            sample_rate: parseInt(document.getElementById('sampleRate').value) || 3,
+                            confidence_threshold: parseFloat(document.getElementById('confidenceThreshold').value) || 0.3,
+                            generic_confidence: parseFloat(document.getElementById('genericConfidence').value) || 0.5,
+                            same_species_merge_gap: parseInt(document.getElementById('mergeGap').value) || 120,
+                            hierarchical_merge_gap: parseInt(document.getElementById('mergeGap').value) || 120,
+                            tracking_enabled: document.getElementById('trackingEnabled').checked,
+                            hierarchical_merge_enabled: document.getElementById('hierarchicalMerge').checked,
+                            merge_enabled: true
+                        }};
+                        
                         try {{
                             const response = await fetch('/recordings/reprocess', {{
                                 method: 'POST',
                                 headers: {{ 'Content-Type': 'application/json' }},
                                 body: JSON.stringify({{
                                     path: '{clip_info['path']}',
-                                    sample_rate: 3  // More thorough analysis
+                                    settings: settings
                                 }})
                             }});
                             
@@ -1652,13 +1840,11 @@ class WebServer:
                             if (result.success) {{
                                 let msg = `Analysis complete!\\n\\n`;
                                 msg += `Species: ${{result.new_species || 'Unknown'}} (${{(result.confidence * 100).toFixed(1)}}% confidence)\\n`;
+                                msg += `Tracks detected: ${{result.tracks_detected || 1}} animal(s)\\n`;
                                 msg += `Frames analyzed: ${{result.frames_analyzed}}/${{result.total_frames}}\\n`;
                                 msg += `Raw detections: ${{result.raw_detections}} (filtered: ${{result.filtered_detections}})\\n`;
                                 msg += `Valid species found: ${{result.species_found.join(', ') || 'None'}}\\n`;
-                                msg += `Thumbnails saved: ${{result.thumbnails_saved}}\\n`;
-                                if (result.thumbnail_paths && result.thumbnail_paths.length > 0) {{
-                                    msg += `Thumbnail files: ${{result.thumbnail_paths.join(', ')}}`;
-                                }}
+                                msg += `Thumbnails saved: ${{result.thumbnails_saved}}`;
                                 
                                 if (result.renamed) {{
                                     msg += `\\n\\nFile was renamed. Redirecting...`;
@@ -1678,6 +1864,19 @@ class WebServer:
                             btn.disabled = false;
                             textEl.textContent = 'Reanalyze';
                         }}
+                    }}
+                    
+                    function toggleSettings() {{
+                        document.getElementById('settingsPanel').classList.toggle('visible');
+                    }}
+                    
+                    function resetSettings() {{
+                        document.getElementById('sampleRate').value = 3;
+                        document.getElementById('confidenceThreshold').value = 0.30;
+                        document.getElementById('genericConfidence').value = 0.50;
+                        document.getElementById('mergeGap').value = 120;
+                        document.getElementById('trackingEnabled').checked = true;
+                        document.getElementById('hierarchicalMerge').checked = true;
                     }}
                     
                     // Processing log functions

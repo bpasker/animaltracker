@@ -10,6 +10,8 @@ general:
     # Post-clip analysis: re-analyze frames after recording for better species ID
     post_analysis: true          # Enable post-clip species refinement
     post_analysis_frames: 5      # Number of frames to analyze (1-20)
+    # Object tracking: track same animal across frames for consistent identification
+    tracking_enabled: true       # Uses ByteTrack to assign persistent IDs
   # Detector backend configuration
   detector:
     # Options: "yolo" (fast, general objects) or "speciesnet" (2000+ wildlife species)

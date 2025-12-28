@@ -24,6 +24,7 @@ class ClipSettings(BaseModel):
     post_analysis_frames: int = Field(default=60, ge=1, le=200, description="Number of frames to analyze from each clip")
     post_analysis_confidence: float = Field(default=0.3, ge=0, le=1, description="Confidence threshold for post-analysis (lower catches more)")
     post_analysis_generic_confidence: float = Field(default=0.5, ge=0, le=1, description="Generic category threshold for post-analysis")
+    tracking_enabled: bool = Field(default=True, description="Enable object tracking to identify same animal across frames")
 
 
 class DetectorSettings(BaseModel):

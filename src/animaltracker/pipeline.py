@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import cv2
 import numpy as np
@@ -20,6 +20,7 @@ from .ebird import EBirdClient, create_ebird_client
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
+from .tracker import ObjectTracker, create_tracker
 from .web import WebServer
 
 LOGGER = logging.getLogger(__name__)
@@ -105,15 +106,32 @@ class EventState:
     # Track top N detection frames for each species (for thumbnails)
     # species -> list of (frame, confidence, bbox) tuples, sorted by confidence desc
     species_key_frames: dict = field(default_factory=dict)
+    # Object tracker for this event
+    tracker: Optional[ObjectTracker] = None
 
     def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray) -> None:
         self.last_detection_ts = frame_ts
+        
+        # Update tracker if available
+        if self.tracker:
+            tracked_detections = self.tracker.update(detections, frame)
+            # Use tracked detections for species updates
+            for track_id, det in tracked_detections.items():
+                # Get best species for this track so far
+                best_species, best_conf, _ = self.tracker.get_track_species(track_id)
+                if best_species:
+                    self.species.add(best_species)
+                    if best_conf > self.max_confidence:
+                        self.max_confidence = best_conf
+        else:
+            # Fallback: use detections directly (no tracking)
+            for det in detections:
+                self.species.add(det.species)
+                if det.confidence > self.max_confidence:
+                    self.max_confidence = det.confidence
+        
+        # Track top N frames for each species (highest confidence)
         for det in detections:
-            self.species.add(det.species)
-            if det.confidence > self.max_confidence:
-                self.max_confidence = det.confidence
-            
-            # Track top N frames for each species (highest confidence)
             if det.species not in self.species_key_frames:
                 self.species_key_frames[det.species] = []
             
@@ -138,6 +156,38 @@ class EventState:
         # Frames are now appended in the main loop to ensure full framerate
         # self.frames.append((frame_ts, frame))
 
+    def get_tracked_species_label(self) -> str:
+        """Get species label using tracked object classifications."""
+        if self.tracker:
+            unique_species = self.tracker.get_unique_species()
+            if unique_species:
+                # Sort by confidence descending
+                unique_species.sort(key=lambda x: x[1], reverse=True)
+                return "+".join(s[0] for s in unique_species)
+        return self.species_label
+    
+    def get_tracked_key_frames(self) -> dict:
+        """Get key frames using tracked object data."""
+        if self.tracker:
+            tracked_data = self.tracker.get_all_species()
+            key_frames = {}
+            for track_id, data in tracked_data.items():
+                species = data['species']
+                if species and data.get('best_frame') is not None:
+                    if species not in key_frames:
+                        key_frames[species] = []
+                    key_frames[species].append((
+                        data['best_frame'],
+                        data['confidence'],
+                        data.get('best_bbox'),
+                    ))
+            # Sort each species by confidence
+            for species in key_frames:
+                key_frames[species].sort(key=lambda x: x[1], reverse=True)
+                key_frames[species] = key_frames[species][:MAX_KEY_FRAMES_PER_SPECIES]
+            return key_frames
+        return self.species_key_frames
+
     @property
     def species_label(self) -> str:
         return "+".join(sorted(self.species))
@@ -156,6 +206,7 @@ class StreamWorker:
         notifier: PushoverNotifier,
         storage: StorageManager,
         ebird_client: Optional[EBirdClient] = None,
+        tracking_enabled: bool = True,
     ) -> None:
         self.camera = camera
         self.runtime = runtime
@@ -163,6 +214,7 @@ class StreamWorker:
         self.notifier = notifier
         self.storage = storage
         self.ebird_client = ebird_client
+        self.tracking_enabled = tracking_enabled
         # Ensure buffer is at least 30s for manual clips
         clip_seconds = max(30.0, runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds)
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
@@ -356,12 +408,21 @@ class StreamWorker:
             # Duration met, start event
             self.pending_detection_start_ts = None
             LOGGER.info("Started tracking %s on %s (%.2f)", primary.species, self.camera.id, primary.confidence)
+            
+            # Create tracker for this event if enabled
+            event_tracker = None
+            if self.tracking_enabled:
+                event_tracker = create_tracker(enabled=True, frame_rate=15)
+                if event_tracker:
+                    LOGGER.debug("Object tracking enabled for event on %s", self.camera.id)
+            
             self.event_state = EventState(
                 camera=self.camera,
                 start_ts=ts,
                 species={d.species for d in filtered},
                 max_confidence=max(d.confidence for d in filtered),
                 last_detection_ts=ts,
+                tracker=event_tracker,
             )
             # Add pre-event frames from buffer, filtered by pre_seconds
             buffered = self.clip_buffer.dump()
@@ -486,8 +547,14 @@ class StreamWorker:
             LOGGER.info("Event for %s closed; clip at %s (species: %s)", 
                        ctx.camera_id, clip_path, final_species)
 
+        # Use tracked species if available (more accurate than raw detections)
+        tracked_species = self.event_state.get_tracked_species_label()
+        if tracked_species and self.event_state.tracker:
+            LOGGER.info("Tracked species for event: %s (from %d tracked objects)", 
+                       tracked_species, self.event_state.tracker.active_track_count)
+        
         ctx_base = {
-            'species': self.event_state.species_label,
+            'species': tracked_species or self.event_state.species_label,
             'confidence': self.event_state.max_confidence,
             'camera_id': self.camera.id,
             'camera_name': self.camera.name,
@@ -495,8 +562,8 @@ class StreamWorker:
             'event_duration': self.event_state.duration,
         }
         
-        # Copy species key frames before clearing event state
-        species_key_frames = dict(self.event_state.species_key_frames)
+        # Use tracked key frames if available
+        species_key_frames = self.event_state.get_tracked_key_frames()
         
         loop.run_in_executor(
             None, 
@@ -516,8 +583,8 @@ class StreamWorker:
     def _analyze_clip_frames(self, frames: List[tuple], num_samples: int = None) -> tuple[str, float]:
         """Analyze frames from a clip to get the most specific species identification.
         
-        Samples frames evenly throughout the clip, runs detection on each,
-        and returns the most specific/confident identification.
+        Uses object tracking to follow the same animal across frames and
+        accumulate classifications for more accurate identification.
         
         Args:
             frames: List of (timestamp, frame) tuples
@@ -549,7 +616,10 @@ class StreamWorker:
             step = total_frames / num_samples
             sample_indices = [int(i * step) for i in range(num_samples)]
         
-        # Collect all detections across sampled frames
+        # Create a tracker for post-analysis to track objects across sampled frames
+        analysis_tracker = create_tracker(enabled=self.tracking_enabled, frame_rate=15)
+        
+        # Collect all detections across sampled frames, using tracker if available
         all_detections = []
         for idx in sample_indices:
             _, frame = frames[idx]
@@ -560,11 +630,52 @@ class StreamWorker:
                     conf_threshold=conf_threshold,
                     generic_confidence=generic_conf,
                 )
+                
+                # Update tracker if available
+                if analysis_tracker and detections:
+                    analysis_tracker.update(detections, frame)
+                
                 all_detections.extend(detections)
             except Exception as e:
                 LOGGER.warning("Post-clip analysis failed on frame %d: %s", idx, e)
                 continue
         
+        # If tracking was used, get the best species from tracked objects
+        if analysis_tracker and analysis_tracker.active_track_count > 0:
+            tracked_species = analysis_tracker.get_unique_species()
+            if tracked_species:
+                # Apply eBird filtering to tracked results
+                best_species = None
+                best_conf = 0.0
+                
+                for species, conf in tracked_species:
+                    # Check eBird if enabled
+                    if ebird_mode and self._is_bird_species(species):
+                        is_present = self.ebird_client.is_species_present(species)
+                        if is_present is False and ebird_mode == "filter":
+                            LOGGER.debug("eBird filter: %s not in region, skipping", species)
+                            continue
+                        elif is_present is True and (best_species is None or conf > best_conf):
+                            best_species = species
+                            best_conf = conf
+                            LOGGER.debug("eBird: %s confirmed in region", species)
+                        elif is_present is None or is_present is False:
+                            # Not a bird or not confirmed - use if no better option
+                            if best_species is None or conf > best_conf:
+                                best_species = species
+                                best_conf = conf
+                    else:
+                        # Non-bird or no eBird filtering
+                        if best_species is None or conf > best_conf:
+                            best_species = species
+                            best_conf = conf
+                
+                if best_species:
+                    LOGGER.info("Post-clip analysis (tracked): %d objects -> %s (%.2f)", 
+                               analysis_tracker.active_track_count, best_species, best_conf)
+                    return best_species, best_conf
+        
+        # Fallback to non-tracked analysis if tracking didn't produce results
         if not all_detections:
             return "", 0.0
         
@@ -748,6 +859,12 @@ class PipelineOrchestrator:
 
     async def run(self) -> None:
         stop_event = asyncio.Event()
+        
+        # Check if tracking is enabled in config
+        tracking_enabled = getattr(self.runtime.general.clip, 'tracking_enabled', True)
+        if tracking_enabled:
+            LOGGER.info("Object tracking enabled for species identification")
+        
         workers = [
             StreamWorker(
                 camera=cam,
@@ -756,6 +873,7 @@ class PipelineOrchestrator:
                 notifier=self.notifier,
                 storage=self.storage,
                 ebird_client=self.ebird_client,
+                tracking_enabled=tracking_enabled,
             )
             for cam in self.cameras
         ]

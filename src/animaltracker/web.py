@@ -1284,10 +1284,29 @@ class WebServer:
                     <div class="thumbnail-gallery">
             """
             for thumb in clip_info['thumbnails']:
+                # Format timing info if available
+                timing_html = ""
+                if thumb.get('start_time') is not None:
+                    start = thumb['start_time']
+                    end = thumb['end_time']
+                    duration = thumb.get('duration', end - start)
+                    
+                    # Format as mm:ss
+                    start_str = f"{int(start // 60)}:{int(start % 60):02d}"
+                    end_str = f"{int(end // 60)}:{int(end % 60):02d}"
+                    
+                    timing_html = f'<div class="thumbnail-timing">⏱️ {start_str} - {end_str} ({duration:.1f}s)</div>'
+                    
+                    # Add confidence if available
+                    if thumb.get('confidence'):
+                        conf_pct = thumb['confidence'] * 100
+                        timing_html += f'<div class="thumbnail-confidence">{conf_pct:.0f}% confidence</div>'
+                
                 thumbnails_html += f"""
                         <div class="thumbnail-card">
                             <img src="{thumb['url']}" alt="{thumb['species']}" onclick="openImage('{thumb['url']}')">
                             <div class="thumbnail-label">{thumb['species']}</div>
+                            {timing_html}
                         </div>
                 """
             thumbnails_html += """
@@ -1444,10 +1463,22 @@ class WebServer:
                         transform: scale(1.02);
                     }}
                     .thumbnail-label {{
-                        padding: 10px 12px;
+                        padding: 10px 12px 4px;
                         font-size: 0.9em;
                         font-weight: 600;
                         color: #4CAF50;
+                        text-align: center;
+                    }}
+                    .thumbnail-timing {{
+                        padding: 2px 12px;
+                        font-size: 0.8em;
+                        color: #aaa;
+                        text-align: center;
+                    }}
+                    .thumbnail-confidence {{
+                        padding: 2px 12px 8px;
+                        font-size: 0.75em;
+                        color: #888;
                         text-align: center;
                     }}
                     
@@ -2094,6 +2125,8 @@ class WebServer:
 
     def _get_clip_detail(self, rel_path: str) -> dict | None:
         """Get detailed information about a specific clip."""
+        import json
+        
         clips_dir = self.storage_root / 'clips'
         clip_path = clips_dir / rel_path
         
@@ -2103,6 +2136,54 @@ class WebServer:
         stat = clip_path.stat()
         species = self._parse_species_from_filename(clip_path.name)
         thumbnails = self._get_thumbnails_for_clip(clip_path)
+        
+        # Try to load processing log for track timing info
+        log_path = clip_path.with_suffix('.log.json')
+        track_info = {}
+        video_fps = 15.0  # Default
+        
+        if log_path.exists():
+            try:
+                with open(log_path, 'r') as f:
+                    log_data = json.load(f)
+                
+                # Get video FPS for time calculation
+                if log_data.get('video', {}).get('fps'):
+                    video_fps = log_data['video']['fps']
+                
+                # Build track info keyed by species
+                tracking_summary = log_data.get('tracking_summary', {})
+                if tracking_summary and tracking_summary.get('tracks'):
+                    for track in tracking_summary['tracks']:
+                        species_name = track.get('best_species', '')
+                        if species_name:
+                            # Convert frames to timestamps
+                            first_frame = track.get('first_frame', 0)
+                            last_frame = track.get('last_frame', 0)
+                            start_sec = first_frame / video_fps
+                            end_sec = last_frame / video_fps
+                            
+                            common_name = get_common_name(species_name)
+                            track_info[common_name] = {
+                                'track_id': track.get('track_id'),
+                                'start_time': start_sec,
+                                'end_time': end_sec,
+                                'duration': end_sec - start_sec,
+                                'confidence': track.get('best_confidence', 0),
+                            }
+            except Exception as e:
+                LOGGER.warning("Failed to load processing log: %s", e)
+        
+        # Enrich thumbnails with track timing
+        for thumb in thumbnails:
+            thumb_species = thumb.get('species', '')
+            if thumb_species in track_info:
+                ti = track_info[thumb_species]
+                thumb['start_time'] = ti['start_time']
+                thumb['end_time'] = ti['end_time']
+                thumb['duration'] = ti['duration']
+                thumb['track_id'] = ti['track_id']
+                thumb['confidence'] = ti['confidence']
         
         # Determine camera from path
         parts = rel_path.split('/')
@@ -2116,7 +2197,8 @@ class WebServer:
             'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
             'size': stat.st_size,
             'size_mb': stat.st_size / (1024 * 1024),
-            'thumbnails': thumbnails
+            'thumbnails': thumbnails,
+            'fps': video_fps,
         }
 
     async def handle_get_monitor_data(self, request):

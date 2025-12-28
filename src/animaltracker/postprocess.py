@@ -726,6 +726,8 @@ class ClipPostProcessor:
                 "track_id": track_id,
                 "best_species": best_species,
                 "best_confidence": round(best_conf, 3),
+                "first_frame": track_info.first_seen_frame,
+                "last_frame": track_info.last_seen_frame,
                 "frames_seen": track_info.last_seen_frame - track_info.first_seen_frame + 1,
                 "classification_count": len(track_info.classifications),
                 "all_classifications": all_classifications,

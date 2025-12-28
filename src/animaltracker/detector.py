@@ -157,8 +157,14 @@ class SpeciesNetDetector(BaseDetector):
     def backend_name(self) -> str:
         return "speciesnet"
 
-    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5) -> List[Detection]:
+    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5, generic_confidence: float = None) -> List[Detection]:
         """Run SpeciesNet inference on a frame.
+        
+        Args:
+            frame: Input image as numpy array
+            conf_threshold: Minimum confidence for specific species detections
+            generic_confidence: Higher threshold for generic categories (animal, bird).
+                               If None, uses the detector's default generic_confidence.
         
         Note: SpeciesNet is optimized for batch processing of images.
         For real-time streaming, consider batching frames or using 
@@ -168,6 +174,9 @@ class SpeciesNetDetector(BaseDetector):
         as the Python API only supports country/admin1_region for geofencing.
         The lat/long would be used for batch JSON input format.
         """
+        # Use instance default if not specified
+        if generic_confidence is None:
+            generic_confidence = self.generic_confidence
         import tempfile
         import cv2
         
@@ -230,7 +239,7 @@ class SpeciesNetDetector(BaseDetector):
             )
             
             # Apply tiered confidence threshold
-            required_conf = self.generic_confidence if is_generic else conf_threshold
+            required_conf = generic_confidence if is_generic else conf_threshold
             if score < required_conf:
                 if is_generic:
                     LOGGER.debug("Skipping generic '%s' (%.2f < %.2f generic threshold)", 

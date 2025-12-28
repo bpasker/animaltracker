@@ -2041,17 +2041,6 @@ class WebServer:
                                 </div>
                                 
                                 <div class="setting-row">
-                                    <label class="setting-label">Generic Category Threshold</label>
-                                    <div class="slider-container">
-                                        <input type="range" min="0" max="100" step="5" 
-                                               value="${Math.round((g.detector.generic_confidence || 0.9) * 100)}"
-                                               oninput="updateGlobalSlider(this, 'detector', 'generic_confidence')">
-                                        <span class="slider-value" id="generic_confidence-value">${Math.round((g.detector.generic_confidence || 0.9) * 100)}%</span>
-                                    </div>
-                                    <div class="setting-description">Higher threshold for generic labels (animal, bird). Specific species use camera's threshold.</div>
-                                </div>
-                                
-                                <div class="setting-row">
                                     <label class="setting-label">Location</label>
                                     <input type="text" value="${g.detector.country || ''} ${g.detector.admin1_region || ''}" disabled 
                                            style="opacity: 0.6; cursor: not-allowed;">
@@ -2171,7 +2160,7 @@ class WebServer:
                                 </div>
                                 
                                 <div class="setting-row">
-                                    <label class="setting-label">Confidence Threshold</label>
+                                    <label class="setting-label">Species Confidence</label>
                                     <div class="slider-container">
                                         <input type="range" min="0" max="100" step="5" 
                                                value="${Math.round(cam.thresholds.confidence * 100)}"
@@ -2179,7 +2168,19 @@ class WebServer:
                                                data-field="confidence">
                                         <span class="slider-value" id="confidence-value">${Math.round(cam.thresholds.confidence * 100)}%</span>
                                     </div>
-                                    <div class="setting-description">Minimum detection confidence required to trigger an event (0-100%)</div>
+                                    <div class="setting-description">Threshold for specific species (cardinal, deer, etc.)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Generic Category Confidence</label>
+                                    <div class="slider-container">
+                                        <input type="range" min="0" max="100" step="5" 
+                                               value="${Math.round((cam.thresholds.generic_confidence || 0.9) * 100)}"
+                                               oninput="updateSlider(this, 'generic_confidence')"
+                                               data-field="generic_confidence">
+                                        <span class="slider-value" id="generic_confidence-value">${Math.round((cam.thresholds.generic_confidence || 0.9) * 100)}%</span>
+                                    </div>
+                                    <div class="setting-description">Higher threshold for vague labels (animal, bird, mammal)</div>
                                 </div>
                                 
                                 <div class="setting-row">
@@ -2535,6 +2536,7 @@ class WebServer:
                 'detect_enabled': getattr(cam, 'detect_enabled', True),
                 'thresholds': {
                     'confidence': cam.thresholds.confidence,
+                    'generic_confidence': getattr(cam.thresholds, 'generic_confidence', 0.9),
                     'min_frames': cam.thresholds.min_frames,
                     'min_duration': cam.thresholds.min_duration,
                 },
@@ -2673,6 +2675,8 @@ class WebServer:
                 thresholds = cam_settings['thresholds']
                 if 'confidence' in thresholds:
                     cam.thresholds.confidence = float(thresholds['confidence'])
+                if 'generic_confidence' in thresholds:
+                    cam.thresholds.generic_confidence = float(thresholds['generic_confidence'])
                 if 'min_frames' in thresholds:
                     cam.thresholds.min_frames = int(thresholds['min_frames'])
                 if 'min_duration' in thresholds:
@@ -2837,6 +2841,7 @@ class WebServer:
                     if 'thresholds' not in cam_cfg:
                         cam_cfg['thresholds'] = {}
                     cam_cfg['thresholds']['confidence'] = cam.thresholds.confidence
+                    cam_cfg['thresholds']['generic_confidence'] = getattr(cam.thresholds, 'generic_confidence', 0.9)
                     cam_cfg['thresholds']['min_frames'] = cam.thresholds.min_frames
                     cam_cfg['thresholds']['min_duration'] = cam.thresholds.min_duration
                     

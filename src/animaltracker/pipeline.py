@@ -323,12 +323,14 @@ class StreamWorker:
                 await asyncio.sleep(1)  # Brief pause before reconnect
 
     async def _process_frame(self, frame: np.ndarray, ts: float) -> None:
-        loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()        
         detections = await loop.run_in_executor(
             None, 
-            self.detector.infer, 
-            frame, 
-            self.camera.thresholds.confidence
+            lambda: self.detector.infer(
+                frame, 
+                conf_threshold=self.camera.thresholds.confidence,
+                generic_confidence=self.camera.thresholds.generic_confidence
+            )
         )
         filtered = self._filter_detections(detections)
 
@@ -491,7 +493,12 @@ class StreamWorker:
         for idx in sample_indices:
             _, frame = frames[idx]
             try:
-                detections = self.detector.infer(frame, conf_threshold=0.3)  # Lower threshold for analysis
+                # Use lower thresholds for post-analysis to catch more species
+                detections = self.detector.infer(
+                    frame, 
+                    conf_threshold=0.3,
+                    generic_confidence=0.5  # Lower generic threshold for post-analysis
+                )
                 all_detections.extend(detections)
             except Exception as e:
                 LOGGER.warning("Post-clip analysis failed on frame %d: %s", idx, e)

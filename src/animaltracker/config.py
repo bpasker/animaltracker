@@ -77,6 +77,7 @@ class RTSPSettings(BaseModel):
 
 class ThresholdSettings(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
+    generic_confidence: float = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
     min_frames: int = Field(default=3, ge=1)
     min_duration: float = Field(default=2.0, ge=0)
 

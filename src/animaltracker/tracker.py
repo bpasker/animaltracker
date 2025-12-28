@@ -359,6 +359,74 @@ class ObjectTracker:
         self.tracks.clear()
         self.frame_count = 0
     
+    def _get_species_hierarchy(self, species: str) -> tuple:
+        """Get the hierarchy category and specificity of a species.
+        
+        Returns:
+            (category, specificity) where category is 'bird', 'mammal', 'animal', etc.
+            and specificity is how specific the identification is (higher = more specific).
+        """
+        species_lower = species.lower().replace('-', '_').strip()
+        
+        # Determine specificity (same logic as TrackInfo._calculate_specificity)
+        if species_lower in {'animal', 'unknown'}:
+            specificity = 0
+            category = 'animal'
+        elif species_lower in {'bird', 'aves'}:
+            specificity = 1
+            category = 'bird'
+        elif species_lower in {'mammal', 'mammalia', 'mammalia_mammal'}:
+            specificity = 1
+            category = 'mammal'
+        elif species_lower in {'reptile', 'reptilia'}:
+            specificity = 1
+            category = 'reptile'
+        elif 'aves' in species_lower or 'bird' in species_lower:
+            specificity = 2 + species_lower.count('_')
+            category = 'bird'
+        elif 'mammalia' in species_lower or 'mammal' in species_lower:
+            specificity = 2 + species_lower.count('_')
+            category = 'mammal'
+        elif 'canidae' in species_lower or 'dog' in species_lower or 'coyote' in species_lower or 'fox' in species_lower:
+            specificity = 3 + species_lower.count('_')
+            category = 'mammal'
+        elif 'felidae' in species_lower or 'cat' in species_lower:
+            specificity = 3 + species_lower.count('_')
+            category = 'mammal'
+        elif 'carnivora' in species_lower or 'carnivore' in species_lower:
+            specificity = 2 + species_lower.count('_')
+            category = 'mammal'
+        else:
+            # Unknown - treat as generic animal
+            specificity = 1
+            category = 'animal'
+        
+        return (category, specificity)
+    
+    def _species_compatible(self, species1: str, species2: str) -> bool:
+        """Check if two species are compatible for merging.
+        
+        Species are compatible if:
+        1. One is more generic than the other (e.g., "animal" and "canidae")
+        2. They're in the same category hierarchy (both mammals, both birds, etc.)
+        
+        Returns:
+            True if species can be merged (one subsumes the other)
+        """
+        cat1, spec1 = self._get_species_hierarchy(species1)
+        cat2, spec2 = self._get_species_hierarchy(species2)
+        
+        # "animal" is compatible with everything
+        if cat1 == 'animal' or cat2 == 'animal':
+            return True
+        
+        # Same category - compatible (e.g., both mammals)
+        if cat1 == cat2:
+            return True
+        
+        # Different categories (bird vs mammal) - not compatible
+        return False
+    
     def merge_similar_tracks(self, max_frame_gap: int = 60) -> int:
         """Merge tracks that likely represent the same animal.
         
@@ -454,7 +522,138 @@ class ObjectTracker:
             del self.tracks[track_id]
         
         if merged_count > 0:
-            LOGGER.info("Merged %d tracks, %d tracks remaining", merged_count, len(self.tracks))
+            LOGGER.info("Merged %d tracks (same species), %d tracks remaining", merged_count, len(self.tracks))
+        
+        return merged_count
+    
+    def merge_hierarchical_tracks(self, max_frame_gap: int = 120, min_specific_detections: int = 2) -> int:
+        """Merge generic tracks into more specific compatible tracks.
+        
+        This is a second-pass merge that handles cases like:
+        - "animal" track getting absorbed into "canidae" track
+        - "mammalia_mammal" track absorbed into "canidae" track
+        
+        Only merges when:
+        1. Tracks don't overlap in time (not two animals at once)
+        2. Tracks are temporally adjacent (within max_frame_gap)
+        3. The specific track has enough detections to be reliable (min_specific_detections)
+        4. Species are hierarchically compatible (same animal type family)
+        
+        Args:
+            max_frame_gap: Maximum gap between tracks to consider merging
+            min_specific_detections: Minimum detections in specific track to be merge target
+        
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+        
+        # Build list of (track_id, species, specificity, category, track_info)
+        track_data = []
+        for track_id, track_info in self.tracks.items():
+            species, confidence, _ = track_info.get_best_species()
+            if species:
+                category, specificity = self._get_species_hierarchy(species)
+                track_data.append({
+                    'track_id': track_id,
+                    'species': species,
+                    'specificity': specificity,
+                    'category': category,
+                    'info': track_info,
+                    'detections': len(track_info.classifications),
+                })
+        
+        # Sort by specificity (most specific first) then by detection count
+        track_data.sort(key=lambda x: (-x['specificity'], -x['detections']))
+        
+        merged_count = 0
+        tracks_to_remove = set()
+        
+        # For each specific track, try to absorb nearby generic tracks
+        for specific in track_data:
+            if specific['track_id'] in tracks_to_remove:
+                continue
+            
+            # Skip if not specific enough or not enough detections
+            if specific['specificity'] < 2:
+                continue
+            if specific['detections'] < min_specific_detections:
+                continue
+            
+            specific_info = specific['info']
+            
+            # Look for generic tracks to absorb
+            for generic in track_data:
+                if generic['track_id'] in tracks_to_remove:
+                    continue
+                if generic['track_id'] == specific['track_id']:
+                    continue
+                
+                # Only absorb less specific tracks
+                if generic['specificity'] >= specific['specificity']:
+                    continue
+                
+                # Check species compatibility
+                if not self._species_compatible(specific['species'], generic['species']):
+                    LOGGER.debug("Skipping merge: %s and %s not compatible", 
+                                specific['species'], generic['species'])
+                    continue
+                
+                generic_info = generic['info']
+                
+                # Check for time overlap (would indicate two different animals)
+                overlaps = (
+                    specific_info.first_seen_frame <= generic_info.last_seen_frame and
+                    generic_info.first_seen_frame <= specific_info.last_seen_frame
+                )
+                
+                if overlaps:
+                    LOGGER.debug("Skipping merge: Track %d and %d overlap in time",
+                                specific['track_id'], generic['track_id'])
+                    continue
+                
+                # Check temporal proximity
+                if generic_info.first_seen_frame > specific_info.last_seen_frame:
+                    gap = generic_info.first_seen_frame - specific_info.last_seen_frame
+                else:
+                    gap = specific_info.first_seen_frame - generic_info.last_seen_frame
+                
+                if gap > max_frame_gap:
+                    LOGGER.debug("Skipping merge: Track %d and %d too far apart (gap=%d)",
+                                specific['track_id'], generic['track_id'], gap)
+                    continue
+                
+                # Merge generic into specific
+                LOGGER.info("Hierarchical merge: Track %d (%s, %d det) <- Track %d (%s, %d det), gap=%d",
+                           specific['track_id'], specific['species'], specific['detections'],
+                           generic['track_id'], generic['species'], generic['detections'], gap)
+                
+                # Copy all classifications from generic to specific
+                specific_info.classifications.extend(generic_info.classifications)
+                
+                # Update frame range
+                specific_info.first_seen_frame = min(specific_info.first_seen_frame, 
+                                                     generic_info.first_seen_frame)
+                specific_info.last_seen_frame = max(specific_info.last_seen_frame, 
+                                                    generic_info.last_seen_frame)
+                
+                # Update best frame if generic's is better
+                if generic_info.best_confidence > specific_info.best_confidence:
+                    specific_info.best_confidence = generic_info.best_confidence
+                    specific_info.best_bbox = generic_info.best_bbox
+                    specific_info.best_frame = generic_info.best_frame
+                
+                tracks_to_remove.add(generic['track_id'])
+                merged_count += 1
+        
+        # Remove merged tracks
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+        
+        if merged_count > 0:
+            LOGGER.info("Hierarchical merge: absorbed %d generic tracks, %d tracks remaining", 
+                       merged_count, len(self.tracks))
         
         return merged_count
     

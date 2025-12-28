@@ -123,6 +123,8 @@ class ClipPostProcessor:
             PostProcessResult with details of the processing
         """
         LOGGER.info("Post-processing clip: %s", clip_path)
+        LOGGER.info("Settings: confidence_threshold=%.2f, generic_confidence=%.2f, tracking=%s, sample_rate=%d",
+                   self.confidence_threshold, self.generic_confidence, self.tracking_enabled, self.sample_rate)
         
         if not clip_path.exists():
             return PostProcessResult(
@@ -394,7 +396,7 @@ class ClipPostProcessor:
         
         # If tracking was used and we have tracked objects, build results from tracks
         if tracker and tracker.active_track_count > 0:
-            # Merge fragmented tracks that are likely the same animal
+            # First pass: Merge fragmented tracks with the SAME species
             # This handles cases where ByteTrack loses a track due to movement
             # but later detections are clearly the same species
             merged_count = tracker.merge_similar_tracks(max_frame_gap=120)
@@ -405,6 +407,19 @@ class ClipPostProcessor:
                     species="",
                     confidence=0.0,
                     reason=f"Merged {merged_count} fragmented tracks with same species",
+                ))
+            
+            # Second pass: Merge GENERIC tracks into more SPECIFIC tracks
+            # E.g., "animal" track absorbed into "canidae" track if temporally adjacent
+            # This only merges hierarchically compatible species (animal->mammal->canidae)
+            hierarchical_merged = tracker.merge_hierarchical_tracks(max_frame_gap=120, min_specific_detections=2)
+            if hierarchical_merged > 0:
+                processing_log.append(ProcessingLogEntry(
+                    frame_idx=-1,
+                    event="hierarchical_merge",
+                    species="",
+                    confidence=0.0,
+                    reason=f"Absorbed {hierarchical_merged} generic tracks into specific species tracks",
                 ))
             
             tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(

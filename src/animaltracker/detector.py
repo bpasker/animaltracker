@@ -290,6 +290,17 @@ class SpeciesNetDetector(BaseDetector):
             species = pred.get("prediction", "unknown")
             score = pred.get("prediction_score", 0.0)
             
+            # Debug: Log raw SpeciesNet output to understand classifier results
+            classifier_output = pred.get("classifier_output", {})
+            top_k = classifier_output.get("top_k_prediction", []) if classifier_output else []
+            detections_info = pred.get("detections", [])
+            det_count = len(detections_info) if detections_info else 0
+            LOGGER.debug(
+                "SpeciesNet raw: prediction='%s' (%.2f), detections=%d, top_k=%s",
+                species, score, det_count, 
+                [(p.get("prediction", "?"), p.get("score", 0)) for p in top_k[:3]] if top_k else "none"
+            )
+            
             # Determine if this is a generic or specific classification
             species_clean = species.lower().strip(";").split(";")[-1].strip().replace(" ", "_")
             

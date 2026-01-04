@@ -2459,9 +2459,12 @@ class WebServer:
         except Exception as e:
             LOGGER.debug("journalctl failed: %s", e)
         
-        # Fallback: try reading from log files
-        if not logs and self.logs_root.exists():
-            source = 'logfile'
+        # Also read from log files and merge (not just fallback)
+        if self.logs_root.exists():
+            if source == 'journalctl':
+                source = 'journalctl+logfile'
+            else:
+                source = 'logfile'
             cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
             
             # Look for log files

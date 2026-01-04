@@ -74,6 +74,7 @@ class EBirdClient:
         self.enabled = enabled
         
         self._cache = EBirdCache()
+        self._cache_file: Optional[Path] = None
         
         if cache_dir:
             self._cache_file = cache_dir / "ebird_cache.json"

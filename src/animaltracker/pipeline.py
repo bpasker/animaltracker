@@ -507,7 +507,7 @@ class StreamWorker:
         
         # Capture detector reference for unified processor
         detector = self.detector
-        storage_root = self.storage.root_path
+        storage_root = self.storage.storage_root
         
         def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames):
             """Finalize event with optional post-clip species analysis."""

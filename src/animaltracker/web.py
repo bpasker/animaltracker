@@ -2965,6 +2965,15 @@ class WebServer:
                             <option value="warning">Warnings & Errors</option>
                             <option value="error">Errors Only</option>
                         </select>
+                        <select id="logType" onchange="loadLogs()">
+                            <option value="all">All Types</option>
+                            <option value="no-http">Hide HTTP Traffic</option>
+                            <option value="detection">Detections Only</option>
+                            <option value="tracking">Tracking Only</option>
+                            <option value="events">Events Only</option>
+                            <option value="clips">Clips Only</option>
+                            <option value="errors">Errors/Warnings</option>
+                        </select>
                         <select id="logMinutes" onchange="loadLogs()">
                             <option value="15">Last 15 min</option>
                             <option value="30" selected>Last 30 min</option>
@@ -3150,9 +3159,56 @@ class WebServer:
                     // Log viewer functions
                     let logsLoaded = false;
                     
+                    // Log type filter patterns
+                    const LOG_FILTERS = {
+                        'all': null,
+                        'no-http': {
+                            exclude: [/GET \//i, /POST \//i, /DELETE \//i, /PUT \//i, /HTTP\/\d/i, /\d{3} \d+ bytes/i, /aiohttp/i]
+                        },
+                        'detection': {
+                            include: [/detect/i, /species/i, /confidence/i, /infer/i, /YOLO/i, /SpeciesNet/i]
+                        },
+                        'tracking': {
+                            include: [/track/i, /ByteTrack/i, /lost_buffer/i, /merge/i]
+                        },
+                        'events': {
+                            include: [/event/i, /started tracking/i, /closed/i, /clip at/i]
+                        },
+                        'clips': {
+                            include: [/clip/i, /recording/i, /write_clip/i, /storage/i, /mp4/i]
+                        },
+                        'errors': {
+                            include: [/error/i, /warning/i, /failed/i, /exception/i, /traceback/i]
+                        }
+                    };
+                    
+                    function filterLog(log, filterType) {
+                        const filter = LOG_FILTERS[filterType];
+                        if (!filter) return true;
+                        
+                        const msg = log.message || '';
+                        
+                        if (filter.exclude) {
+                            for (const pattern of filter.exclude) {
+                                if (pattern.test(msg)) return false;
+                            }
+                            return true;
+                        }
+                        
+                        if (filter.include) {
+                            for (const pattern of filter.include) {
+                                if (pattern.test(msg)) return true;
+                            }
+                            return false;
+                        }
+                        
+                        return true;
+                    }
+                    
                     async function loadLogs() {
                         const camera = document.getElementById('logCamera').value;
                         const level = document.getElementById('logLevel').value;
+                        const logType = document.getElementById('logType').value;
                         const minutes = document.getElementById('logMinutes').value;
                         
                         const logContainer = document.getElementById('logContainer');
@@ -3170,16 +3226,20 @@ class WebServer:
                             const response = await fetch('/api/logs?' + params);
                             const data = await response.json();
                             
+                            // Apply client-side type filter
+                            const filteredLogs = data.logs.filter(log => filterLog(log, logType));
+                            
                             // Update info
                             let sourceText = data.source === 'journalctl' ? 'systemd journal' : 
                                             (data.source === 'logfile' ? 'log files' : 'no source');
-                            logInfo.textContent = `${data.count} entries from ${sourceText}`;
+                            let filterText = logType !== 'all' ? ` (filtered: ${filteredLogs.length}/${data.count})` : '';
+                            logInfo.textContent = `${filteredLogs.length} entries from ${sourceText}${filterText}`;
                             
                             // Render logs
-                            if (data.logs.length === 0) {
+                            if (filteredLogs.length === 0) {
                                 logContainer.innerHTML = '<div class="log-empty">No log entries found</div>';
                             } else {
-                                logContainer.innerHTML = data.logs.map(log => `
+                                logContainer.innerHTML = filteredLogs.map(log => `
                                     <div class="log-entry">
                                         <span class="log-time">${log.time}</span>
                                         ${log.camera ? `<span class="log-camera">${log.camera}</span>` : ''}

@@ -2393,32 +2393,82 @@ class WebServer:
     async def handle_get_logs(self, request):
         """Get recent logs from journalctl or log files."""
         import subprocess
+        import re as regex
         
         # Get query params
         camera_id = request.query.get('camera', None)
         minutes = int(request.query.get('minutes', 30))
         level = request.query.get('level', 'all')  # all, error, warning
+        log_type = request.query.get('type', 'all')  # all, no-http, detection, tracking, events, clips, errors
+        
+        # Server-side filter patterns (match client-side)
+        LOG_TYPE_FILTERS = {
+            'all': None,
+            'no-http': {
+                'exclude': [r'GET /', r'POST /', r'DELETE /', r'PUT /', r'HTTP/\d', r'\d{3} \d+ bytes', r'aiohttp']
+            },
+            'detection': {
+                'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet']
+            },
+            'tracking': {
+                'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge']
+            },
+            'events': {
+                'include': [r'event', r'started tracking', r'closed', r'clip at']
+            },
+            'clips': {
+                'include': [r'clip', r'recording', r'write_clip', r'storage', r'\.mp4']
+            },
+            'errors': {
+                'include': [r'error', r'warning', r'failed', r'exception', r'traceback']
+            }
+        }
+        
+        def matches_filter(message, filter_type):
+            """Check if message matches the filter criteria."""
+            filter_config = LOG_TYPE_FILTERS.get(filter_type)
+            if not filter_config:
+                return True
+            
+            if 'exclude' in filter_config:
+                for pattern in filter_config['exclude']:
+                    if regex.search(pattern, message, regex.IGNORECASE):
+                        return False
+                return True
+            
+            if 'include' in filter_config:
+                for pattern in filter_config['include']:
+                    if regex.search(pattern, message, regex.IGNORECASE):
+                        return True
+                return False
+            
+            return True
         
         logs = []
         source = 'none'
+        error_msg = None
+        skipped_count = 0
         
         # Try journalctl first (for systemd systems)
         try:
-            # Build service name pattern
-            if camera_id:
-                service = f"detector@{camera_id}"
-            else:
-                service = "detector@*"
-            
-            # Build journalctl command
+            # Build journalctl command - simpler approach without unit filtering
+            # to capture all system logs, then filter in Python
+            # Fetch more logs when filtering to ensure we get enough matches
+            fetch_limit = 2000 if log_type != 'all' else 500
             cmd = [
                 'journalctl',
-                '-u', service,
                 '--since', f'{minutes} minutes ago',
                 '--no-pager',
                 '-o', 'json',
-                '-n', '200',  # Limit entries
+                '-n', str(fetch_limit),
             ]
+            
+            # Add unit filter if specific camera requested
+            if camera_id:
+                cmd.extend(['-u', f'detector@{camera_id}.service'])
+            # Otherwise get all detector units using glob (works on Ubuntu 24.04)
+            else:
+                cmd.extend(['-u', 'detector@*.service'])
             
             # Add priority filter
             if level == 'error':
@@ -2426,7 +2476,11 @@ class WebServer:
             elif level == 'warning':
                 cmd.extend(['-p', 'warning'])
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            LOGGER.debug("Running journalctl: %s", ' '.join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            LOGGER.debug("journalctl returned: code=%d, stdout_len=%d, stderr=%s", 
+                        result.returncode, len(result.stdout), result.stderr[:200] if result.stderr else '')
             
             if result.returncode == 0 and result.stdout.strip():
                 source = 'journalctl'
@@ -2461,33 +2515,39 @@ class WebServer:
                             if 'detector@' in unit:
                                 cam = unit.replace('detector@', '').replace('.service', '')
                             
-                            logs.append({
-                                'time': time_str,
-                                'level': log_level,
-                                'camera': cam,
-                                'message': message,
-                            })
+                            # Apply server-side type filter
+                            if matches_filter(message, log_type):
+                                logs.append({
+                                    'time': time_str,
+                                    'level': log_level,
+                                    'camera': cam,
+                                    'message': message,
+                                })
+                            else:
+                                skipped_count += 1
                         except json.JSONDecodeError:
                             continue
+            elif result.returncode != 0:
+                error_msg = result.stderr[:200] if result.stderr else f'Exit code {result.returncode}'
+                LOGGER.warning("journalctl failed: %s", error_msg)
         except FileNotFoundError:
-            pass  # journalctl not available
+            error_msg = 'journalctl not found'
         except subprocess.TimeoutExpired:
-            pass
+            error_msg = 'journalctl timed out'
         except Exception as e:
+            error_msg = str(e)
             LOGGER.debug("journalctl failed: %s", e)
         
         # Also read from log files and merge (not just fallback)
-        if self.logs_root.exists():
-            if source == 'journalctl':
-                source = 'journalctl+logfile'
-            else:
-                source = 'logfile'
+        log_files_found = 0
+        if self.logs_root and self.logs_root.exists():
             cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
             
             # Look for log files
             log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
             for pattern in log_patterns:
                 for log_file in self.logs_root.glob(pattern):
+                    log_files_found += 1
                     try:
                         with open(log_file, 'r') as f:
                             # Read last 500 lines
@@ -2512,32 +2572,52 @@ class WebServer:
                                 
                                 # Try to extract timestamp
                                 time_str = '--:--:--'
-                                import re
-                                time_match = re.search(r'(\d{2}:\d{2}:\d{2})', line)
+                                time_match = regex.search(r'(\\d{2}:\\d{2}:\\d{2})', line)
                                 if time_match:
                                     time_str = time_match.group(1)
                                 
-                                logs.append({
-                                    'time': time_str,
-                                    'level': log_level,
-                                    'camera': '',
-                                    'message': line[:500],  # Truncate long lines
-                                })
+                                # Apply server-side type filter
+                                if matches_filter(line, log_type):
+                                    logs.append({
+                                        'time': time_str,
+                                        'level': log_level,
+                                        'camera': '',
+                                        'message': line[:500],  # Truncate long lines
+                                    })
+                                else:
+                                    skipped_count += 1
                     except Exception:
                         continue
+            
+            # Update source based on what we found
+            if log_files_found > 0:
+                if source == 'journalctl':
+                    source = 'journalctl+logfile'
+                else:
+                    source = 'logfile'
         
         # Sort by time descending and limit
         logs = logs[-200:]  # Keep last 200
         logs.reverse()  # Most recent first
         
-        return web.json_response({
+        # Determine final source description
+        if source == 'none' and len(logs) > 0:
+            source = 'unknown'  # We have logs but don't know where from
+        
+        response_data = {
             'source': source,
             'camera': camera_id,
             'minutes': minutes,
             'level': level,
+            'type': log_type,
             'count': len(logs),
+            'skipped': skipped_count,
             'logs': logs,
-        })
+        }
+        if error_msg and source in ('none', 'unknown'):
+            response_data['error'] = error_msg
+        
+        return web.json_response(response_data)
 
     async def handle_monitor_page(self, request):
         """Render the pipeline monitor page HTML."""
@@ -3220,26 +3300,29 @@ class WebServer:
                             const params = new URLSearchParams({
                                 minutes: minutes,
                                 level: level,
+                                type: logType,  // Pass filter type to server
                             });
                             if (camera) params.set('camera', camera);
                             
                             const response = await fetch('/api/logs?' + params);
                             const data = await response.json();
                             
-                            // Apply client-side type filter
-                            const filteredLogs = data.logs.filter(log => filterLog(log, logType));
+                            // Server already filtered, use logs directly
+                            const logs = data.logs;
                             
                             // Update info
                             let sourceText = data.source === 'journalctl' ? 'systemd journal' : 
-                                            (data.source === 'logfile' ? 'log files' : 'no source');
-                            let filterText = logType !== 'all' ? ` (filtered: ${filteredLogs.length}/${data.count})` : '';
-                            logInfo.textContent = `${filteredLogs.length} entries from ${sourceText}${filterText}`;
+                                            (data.source === 'journalctl+logfile' ? 'journal + logs' :
+                                            (data.source === 'logfile' ? 'log files' : 'no source'));
+                            let filterText = data.skipped > 0 ? ` (${data.skipped} filtered out)` : '';
+                            let errorText = data.error ? ` [${data.error}]` : '';
+                            logInfo.textContent = `${logs.length} entries from ${sourceText}${filterText}${errorText}`;
                             
                             // Render logs
-                            if (filteredLogs.length === 0) {
+                            if (logs.length === 0) {
                                 logContainer.innerHTML = '<div class="log-empty">No log entries found</div>';
                             } else {
-                                logContainer.innerHTML = filteredLogs.map(log => `
+                                logContainer.innerHTML = logs.map(log => `
                                     <div class="log-entry">
                                         <span class="log-time">${log.time}</span>
                                         ${log.camera ? `<span class="log-camera">${log.camera}</span>` : ''}

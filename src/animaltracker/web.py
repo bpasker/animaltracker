@@ -1722,6 +1722,23 @@ class WebServer:
                         box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
                     }}
                     
+                    /* Mobile: 2x2 grid for action buttons */
+                    @media (max-width: 480px) {{
+                        .action-buttons {{
+                            flex-wrap: wrap;
+                        }}
+                        .action-btn {{
+                            flex: 1 1 calc(50% - 6px);
+                            min-width: calc(50% - 6px);
+                            padding: 12px 8px;
+                            font-size: 0.85em;
+                        }}
+                        .action-btn svg {{
+                            width: 16px;
+                            height: 16px;
+                        }}
+                    }}
+                    
                     @media (min-width: 768px) {{
                         body {{ padding: 24px; max-width: 900px; margin: 0 auto; }}
                         .thumbnail-gallery {{ grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }}

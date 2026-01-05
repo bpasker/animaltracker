@@ -19,7 +19,7 @@ Requires-Dist: python-dotenv>=1.0
 Requires-Dist: supervision>=0.19
 Requires-Dist: psutil>=5.9
 Provides-Extra: gpu
-Requires-Dist: pynvml>=11.5; extra == "gpu"
+Requires-Dist: nvidia-ml-py>=12.560; extra == "gpu"
 Provides-Extra: speciesnet
 Requires-Dist: speciesnet>=1.0; extra == "speciesnet"
 Provides-Extra: dynamic

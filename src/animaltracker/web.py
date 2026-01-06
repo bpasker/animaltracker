@@ -465,11 +465,11 @@ class WebServer:
         
         # Debug: Log what we're looking for
         glob_pattern = f"{clip_stem}_thumb_*.jpg"
-        LOGGER.debug("Looking for thumbnails in %s with pattern: %s", clip_dir, glob_pattern)
+        LOGGER.info("Looking for thumbnails in %s with pattern: %s", clip_dir, glob_pattern)
         
         # Look for thumbnails matching this clip
         for thumb_file in clip_dir.glob(glob_pattern):
-            LOGGER.debug("Found thumbnail: %s", thumb_file)
+            LOGGER.info("Found thumbnail: %s", thumb_file)
             # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
             parts = thumb_file.stem.split("_thumb_")
             if len(parts) >= 2:
@@ -487,7 +487,7 @@ class WebServer:
                 'url': f"/clips/{rel_path}"
             })
         
-        LOGGER.debug("Total thumbnails found: %d", len(thumbnails))
+        LOGGER.info("Total thumbnails found for %s: %d", clip_stem, len(thumbnails))
         return thumbnails
 
     def _parse_species_from_filename(self, filename: str) -> str:

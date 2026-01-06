@@ -1229,6 +1229,10 @@ class ClipPostProcessor:
                     detection_num=track_idx + 1 if len(tracks_sorted) > 1 else None
                 )
                 
+                if annotated is None:
+                    LOGGER.error("Failed to annotate frame for track %d (%s)", track_id, best_species)
+                    continue
+                
                 # Save thumbnail
                 if cv2.imwrite(str(thumb_path), annotated):
                     saved.append(thumb_path)
@@ -1236,7 +1240,10 @@ class ClipPostProcessor:
                                 thumb_path, track_id, 
                                 track_info.first_seen_frame, track_info.last_seen_frame)
                 else:
-                    LOGGER.error("Failed to save track thumbnail: %s", thumb_path)
+                    LOGGER.error("Failed to save track thumbnail: %s (cv2.imwrite returned False, annotated shape: %s, dtype: %s)", 
+                                thumb_path, 
+                                annotated.shape if annotated is not None else 'None',
+                                annotated.dtype if annotated is not None else 'None')
                     
             except Exception as e:
                 LOGGER.error("Failed to save track thumbnail %s: %s (frame shape: %s, bbox: %s)", 
@@ -1346,6 +1353,18 @@ class ClipPostProcessor:
         detection_num: Optional[int] = None,
     ):
         """Annotate frame with bounding box and label."""
+        if frame is None:
+            LOGGER.error("_annotate_frame received None frame")
+            return None
+        
+        if not hasattr(frame, 'copy') or not hasattr(frame, 'shape'):
+            LOGGER.error("_annotate_frame received invalid frame type: %s", type(frame))
+            return None
+            
+        if len(frame.shape) < 2:
+            LOGGER.error("_annotate_frame received invalid frame shape: %s", frame.shape)
+            return None
+            
         annotated = frame.copy()
         
         if bbox:

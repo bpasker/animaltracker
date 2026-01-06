@@ -1823,36 +1823,36 @@ class WebServer:
                 <!-- Processing Settings Panel -->
                 <div class="settings-panel" id="settingsPanel">
                     <h3>⚙️ Processing Settings</h3>
-                    <p class="settings-description">These settings are used when you click "Reanalyze" below. Changes are applied per-run, not saved permanently.</p>
+                    <p class="settings-description">These settings are initialized from your global config. Changes are applied per-run, not saved permanently.</p>
                     
                     <div class="settings-grid">
                         <div class="setting-group">
                             <label for="sampleRate">Sample Rate</label>
-                            <input type="number" id="sampleRate" value="3" min="1" max="30">
+                            <input type="number" id="sampleRate" value="{clip_info['global_settings']['sample_rate']}" min="1" max="30">
                             <span class="setting-help">Analyze every Nth frame (lower = more thorough)</span>
                         </div>
                         
                         <div class="setting-group">
                             <label for="confidenceThreshold">Confidence Threshold</label>
-                            <input type="number" id="confidenceThreshold" value="0.30" min="0.1" max="1.0" step="0.05">
+                            <input type="number" id="confidenceThreshold" value="{clip_info['global_settings']['confidence_threshold']:.2f}" min="0.1" max="1.0" step="0.05">
                             <span class="setting-help">Min confidence for species detection (0.3 recommended)</span>
                         </div>
                         
                         <div class="setting-group">
                             <label for="genericConfidence">Generic Confidence</label>
-                            <input type="number" id="genericConfidence" value="0.50" min="0.1" max="1.0" step="0.05">
+                            <input type="number" id="genericConfidence" value="{clip_info['global_settings']['generic_confidence']:.2f}" min="0.1" max="1.0" step="0.05">
                             <span class="setting-help">Min confidence for generic categories (animal, bird)</span>
                         </div>
                         
                         <div class="setting-group">
                             <label for="mergeGap">Track Merge Gap</label>
-                            <input type="number" id="mergeGap" value="120" min="10" max="500">
+                            <input type="number" id="mergeGap" value="{clip_info['global_settings']['track_merge_gap']}" min="10" max="500">
                             <span class="setting-help">Max frame gap to merge same-species tracks</span>
                         </div>
                         
                         <div class="setting-group checkbox-group">
                             <label>
-                                <input type="checkbox" id="trackingEnabled" checked>
+                                <input type="checkbox" id="trackingEnabled" {"checked" if clip_info['global_settings']['tracking_enabled'] else ""}>
                                 Enable Object Tracking
                             </label>
                             <span class="setting-help">Track animals across frames for better accuracy</span>
@@ -1860,7 +1860,7 @@ class WebServer:
                         
                         <div class="setting-group checkbox-group">
                             <label>
-                                <input type="checkbox" id="spatialMerge" checked>
+                                <input type="checkbox" id="spatialMerge" {"checked" if clip_info['global_settings']['spatial_merge_enabled'] else ""}>
                                 Spatial Merge (Recommended)
                             </label>
                             <span class="setting-help">Merge tracks in same location - ignores species misclassifications</span>
@@ -1868,13 +1868,13 @@ class WebServer:
                         
                         <div class="setting-group">
                             <label for="spatialIoU">Spatial Overlap (IoU)</label>
-                            <input type="number" id="spatialIoU" value="0.30" min="0.1" max="0.9" step="0.05">
+                            <input type="number" id="spatialIoU" value="{clip_info['global_settings']['spatial_merge_iou']:.2f}" min="0.1" max="0.9" step="0.05">
                             <span class="setting-help">Min bounding box overlap to merge (0.3 = 30%)</span>
                         </div>
                         
                         <div class="setting-group checkbox-group">
                             <label>
-                                <input type="checkbox" id="hierarchicalMerge" checked>
+                                <input type="checkbox" id="hierarchicalMerge" {"checked" if clip_info['global_settings']['hierarchical_merge_enabled'] else ""}>
                                 Hierarchical Merging
                             </label>
                             <span class="setting-help">Merge "animal" tracks into specific species tracks</span>
@@ -1882,7 +1882,7 @@ class WebServer:
                         
                         <div class="setting-group checkbox-group">
                             <label>
-                                <input type="checkbox" id="singleAnimalMode">
+                                <input type="checkbox" id="singleAnimalMode" {"checked" if clip_info['global_settings']['single_animal_mode'] else ""}>
                                 Single Animal Mode
                             </label>
                             <span class="setting-help">Force merge ALL non-overlapping tracks into one</span>
@@ -2017,15 +2017,16 @@ class WebServer:
                     }}
                     
                     function resetSettings() {{
-                        document.getElementById('sampleRate').value = 3;
-                        document.getElementById('confidenceThreshold').value = 0.30;
-                        document.getElementById('genericConfidence').value = 0.50;
-                        document.getElementById('mergeGap').value = 120;
-                        document.getElementById('trackingEnabled').checked = true;
-                        document.getElementById('spatialMerge').checked = true;
-                        document.getElementById('spatialIoU').value = 0.30;
-                        document.getElementById('hierarchicalMerge').checked = true;
-                        document.getElementById('singleAnimalMode').checked = false;
+                        // Reset to global settings from config
+                        document.getElementById('sampleRate').value = {clip_info['global_settings']['sample_rate']};
+                        document.getElementById('confidenceThreshold').value = {clip_info['global_settings']['confidence_threshold']:.2f};
+                        document.getElementById('genericConfidence').value = {clip_info['global_settings']['generic_confidence']:.2f};
+                        document.getElementById('mergeGap').value = {clip_info['global_settings']['track_merge_gap']};
+                        document.getElementById('trackingEnabled').checked = {'true' if clip_info['global_settings']['tracking_enabled'] else 'false'};
+                        document.getElementById('spatialMerge').checked = {'true' if clip_info['global_settings']['spatial_merge_enabled'] else 'false'};
+                        document.getElementById('spatialIoU').value = {clip_info['global_settings']['spatial_merge_iou']:.2f};
+                        document.getElementById('hierarchicalMerge').checked = {'true' if clip_info['global_settings']['hierarchical_merge_enabled'] else 'false'};
+                        document.getElementById('singleAnimalMode').checked = {'true' if clip_info['global_settings']['single_animal_mode'] else 'false'};
                     }}
                     
                     // Processing log functions
@@ -2284,6 +2285,20 @@ class WebServer:
         parts = rel_path.split('/')
         camera = parts[0] if len(parts) > 1 else 'unknown'
         
+        # Get global processing settings from runtime config
+        clip_cfg = self.runtime.general.clip if self.runtime else None
+        global_settings = {
+            'sample_rate': getattr(clip_cfg, 'sample_rate', 3) if clip_cfg else 3,
+            'confidence_threshold': getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3,
+            'generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5,
+            'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True) if clip_cfg else True,
+            'track_merge_gap': getattr(clip_cfg, 'track_merge_gap', 120) if clip_cfg else 120,
+            'spatial_merge_enabled': getattr(clip_cfg, 'spatial_merge_enabled', True) if clip_cfg else True,
+            'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3) if clip_cfg else 0.3,
+            'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True) if clip_cfg else True,
+            'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False) if clip_cfg else False,
+        }
+        
         return {
             'path': rel_path,
             'filename': clip_path.name,
@@ -2294,6 +2309,7 @@ class WebServer:
             'size_mb': stat.st_size / (1024 * 1024),
             'thumbnails': thumbnails,
             'fps': video_fps,
+            'global_settings': global_settings,
         }
 
     async def handle_get_monitor_data(self, request):

@@ -1352,6 +1352,26 @@ class WebServer:
                         accent-color: #4CAF50;
                         flex-shrink: 0;
                     }
+                    .recording-thumb {
+                        width: 100px;
+                        height: 70px;
+                        border-radius: 8px;
+                        object-fit: cover;
+                        background: #1a1a1a;
+                        flex-shrink: 0;
+                    }
+                    .recording-thumb-placeholder {
+                        width: 100px;
+                        height: 70px;
+                        border-radius: 8px;
+                        background: #1a1a1a;
+                        flex-shrink: 0;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        color: #444;
+                        font-size: 1.8em;
+                    }
                     .recording-info { flex: 1; min-width: 0; }
                     .recording-species {
                         font-weight: 700;
@@ -1889,7 +1909,7 @@ class WebServer:
                     }
                 </style>
             </head>
-            <body class="view-month">
+            <body class="view-list">
                 <div class="nav">
                     <a href="/">Live View</a>
                     <a href="/recordings" class="active">Recordings</a>
@@ -2079,14 +2099,16 @@ class WebServer:
             escaped_path = clip['path'].replace("'", "\\'")
             url_encoded_path = clip['path'].replace('#', '%23')
             species_display = clip.get('species', 'Unknown')
-            thumbnail_count = len(clip.get('thumbnails', []))
-            thumbnail_badge = f'<span class="thumbnail-badge">📸 {thumbnail_count}</span>' if thumbnail_count > 0 else ''
+            thumbnails = clip.get('thumbnails', [])
+            thumbnail_url = f"/clips/{thumbnails[0]['url'].lstrip('/clips/')}" if thumbnails else ''
+            thumbnail_html = f'<img class="recording-thumb" src="{thumbnail_url}" alt="" loading="lazy" onerror="this.style.display=\'none\'">' if thumbnail_url else '<div class="recording-thumb-placeholder">🎬</div>'
             
             html += f"""
                         <div class="recording-card" data-date="{clip_date}" data-species="{species_display}" data-camera="{clip['camera']}" data-time="{clip['time'].isoformat()}" onclick="window.location.href='/recording/{url_encoded_path}'">
                             <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
+                            {thumbnail_html}
                             <div class="recording-info">
-                                <div class="recording-species">🐾 {species_display} {thumbnail_badge}</div>
+                                <div class="recording-species">🐾 {species_display}</div>
                                 <div class="recording-camera">{clip['camera']}</div>
                                 <div class="recording-time">{clip['time'].strftime('%b %d, %Y at %I:%M %p')}</div>
                                 <div class="recording-meta">{size_mb:.1f} MB</div>
@@ -2157,7 +2179,7 @@ class WebServer:
                     const CalendarApp = {{
                         // Application state
                         state: {{
-                            view: 'month',           // 'month' or 'list'
+                            view: 'list',            // 'month' or 'list'
                             year: {now.year},
                             month: {now.month},
                             calendarData: null,      // Full calendar data from API

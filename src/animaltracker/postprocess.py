@@ -59,6 +59,7 @@ class ProcessingSettings:
     
     # Output settings
     max_thumbnails: int = MAX_KEY_FRAMES_PER_SPECIES
+    thumbnail_cropped: bool = True  # Crop to detection area (True) or full frame with bbox (False)
     save_processing_log: bool = True
     
     def to_dict(self) -> Dict:
@@ -79,6 +80,7 @@ class ProcessingSettings:
             "min_specific_detections": self.min_specific_detections,
             "single_animal_mode": self.single_animal_mode,
             "max_thumbnails": self.max_thumbnails,
+            "thumbnail_cropped": self.thumbnail_cropped,
             "save_processing_log": self.save_processing_log,
         }
     
@@ -101,6 +103,7 @@ class ProcessingSettings:
             min_specific_detections=data.get("min_specific_detections", 2),
             single_animal_mode=data.get("single_animal_mode", False),
             max_thumbnails=data.get("max_thumbnails", MAX_KEY_FRAMES_PER_SPECIES),
+            thumbnail_cropped=data.get("thumbnail_cropped", True),
             save_processing_log=data.get("save_processing_log", True),
         )
 
@@ -206,6 +209,7 @@ class ClipPostProcessor:
         self.tracking_enabled = self.settings.tracking_enabled
         self.confidence_threshold = self.settings.confidence_threshold
         self.generic_confidence = self.settings.generic_confidence
+        self.thumbnail_cropped = self.settings.thumbnail_cropped
         
         # Terms to filter out
         self.invalid_terms = {
@@ -1133,14 +1137,17 @@ class ClipPostProcessor:
                 thumb_path = clip_path.parent / thumb_name
                 
                 try:
-                    # Draw bounding box on frame
-                    annotated = self._annotate_frame(
-                        frame, species, confidence, bbox, 
-                        idx + 1 if len(result.key_frames) > 1 else None
-                    )
+                    # Crop or annotate based on config
+                    if self.thumbnail_cropped:
+                        output_frame = self._crop_to_detection(frame, bbox)
+                    else:
+                        output_frame = self._annotate_frame(
+                            frame, species, confidence, bbox, 
+                            idx + 1 if len(result.key_frames) > 1 else None
+                        )
                     
                     # Save thumbnail
-                    if cv2.imwrite(str(thumb_path), annotated):
+                    if cv2.imwrite(str(thumb_path), output_frame):
                         saved.append(thumb_path)
                         LOGGER.debug("Saved thumbnail: %s", thumb_path)
                     else:
@@ -1223,27 +1230,30 @@ class ClipPostProcessor:
             thumb_path = clip_dir / thumb_name
             
             try:
-                # Draw bounding box with track info
-                annotated = self._annotate_frame(
-                    frame, best_species, conf, bbox,
-                    detection_num=track_idx + 1 if len(tracks_sorted) > 1 else None
-                )
+                # Crop or annotate based on config
+                if self.thumbnail_cropped:
+                    output_frame = self._crop_to_detection(frame, bbox)
+                else:
+                    output_frame = self._annotate_frame(
+                        frame, best_species, conf, bbox,
+                        detection_num=track_idx + 1 if len(tracks_sorted) > 1 else None
+                    )
                 
-                if annotated is None:
-                    LOGGER.error("Failed to annotate frame for track %d (%s)", track_id, best_species)
+                if output_frame is None:
+                    LOGGER.error("Failed to process frame for track %d (%s)", track_id, best_species)
                     continue
                 
                 # Save thumbnail
-                if cv2.imwrite(str(thumb_path), annotated):
+                if cv2.imwrite(str(thumb_path), output_frame):
                     saved.append(thumb_path)
                     LOGGER.debug("Saved track thumbnail: %s (track %d, frames %d-%d)",
                                 thumb_path, track_id, 
                                 track_info.first_seen_frame, track_info.last_seen_frame)
                 else:
-                    LOGGER.error("Failed to save track thumbnail: %s (cv2.imwrite returned False, annotated shape: %s, dtype: %s)", 
+                    LOGGER.error("Failed to save track thumbnail: %s (cv2.imwrite returned False, output shape: %s, dtype: %s)", 
                                 thumb_path, 
-                                annotated.shape if annotated is not None else 'None',
-                                annotated.dtype if annotated is not None else 'None')
+                                output_frame.shape if output_frame is not None else 'None',
+                                output_frame.dtype if output_frame is not None else 'None')
                     
             except Exception as e:
                 LOGGER.error("Failed to save track thumbnail %s: %s (frame shape: %s, bbox: %s)", 
@@ -1344,6 +1354,64 @@ class ClipPostProcessor:
         LOGGER.debug("Extracted %d sample frames for %s", len(saved), clip_path.name)
         return saved
     
+    def _crop_to_detection(
+        self,
+        frame,
+        bbox: Optional[List[float]],
+        padding_percent: float = 0.25,
+    ):
+        """Crop frame to detection bounding box with padding.
+        
+        Args:
+            frame: The video frame to crop
+            bbox: Bounding box [x1, y1, x2, y2] or None
+            padding_percent: How much padding to add around the detection (0.25 = 25%)
+            
+        Returns:
+            Cropped frame, or original frame if no valid bbox
+        """
+        if frame is None:
+            LOGGER.error("_crop_to_detection received None frame")
+            return None
+        
+        if not hasattr(frame, 'copy') or not hasattr(frame, 'shape'):
+            LOGGER.error("_crop_to_detection received invalid frame type: %s", type(frame))
+            return None
+            
+        if len(frame.shape) < 2:
+            LOGGER.error("_crop_to_detection received invalid frame shape: %s", frame.shape)
+            return None
+        
+        frame_height, frame_width = frame.shape[:2]
+        
+        if not bbox:
+            # No bbox, return full frame
+            return frame
+        
+        x1, y1, x2, y2 = [int(coord) for coord in bbox]
+        
+        # Calculate padding based on bbox size
+        bbox_width = x2 - x1
+        bbox_height = y2 - y1
+        pad_x = int(bbox_width * padding_percent)
+        pad_y = int(bbox_height * padding_percent)
+        
+        # Apply padding while staying within frame bounds
+        crop_x1 = max(0, x1 - pad_x)
+        crop_y1 = max(0, y1 - pad_y)
+        crop_x2 = min(frame_width, x2 + pad_x)
+        crop_y2 = min(frame_height, y2 + pad_y)
+        
+        # Ensure minimum crop size (at least 10x10 pixels)
+        if (crop_x2 - crop_x1) < 10 or (crop_y2 - crop_y1) < 10:
+            # Bbox too small, use full frame
+            return frame
+        
+        # Crop the frame to the detection area
+        cropped = frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+        
+        return cropped
+
     def _annotate_frame(
         self,
         frame,

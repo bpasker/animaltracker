@@ -19,6 +19,8 @@ class ClipSettings(BaseModel):
     post_seconds: float = Field(default=5.0, ge=0)
     format: str = "mp4"
     codec: str = "h264"
+    # Thumbnail settings
+    thumbnail_cropped: bool = Field(default=True, description="Crop thumbnails to detection area (True=zoomed, False=full frame with bbox)")
     # Post-clip analysis settings
     post_analysis: bool = Field(default=True, description="Run species re-analysis on saved clips for better identification")
     # Note: post_analysis_frames is auto-calculated as 1 frame per second of clip duration

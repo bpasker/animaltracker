@@ -7,6 +7,8 @@ general:
     post_seconds: 5
     format: mp4
     codec: h264
+    # Thumbnail settings
+    thumbnail_cropped: true      # true=zoomed to animal, false=full frame with bbox
     # Post-clip analysis: re-analyze frames after recording for better species ID
     post_analysis: true          # Enable post-clip species refinement
     # Frames to analyze are auto-calculated: ~1 per second of clip (min 5, max 60)

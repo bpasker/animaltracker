@@ -613,6 +613,7 @@ class StreamWorker:
                         hierarchical_merge_enabled=getattr(clip_cfg, 'hierarchical_merge_enabled', True),
                         hierarchical_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
                         single_animal_mode=getattr(clip_cfg, 'single_animal_mode', False),
+                        thumbnail_cropped=getattr(clip_cfg, 'thumbnail_cropped', True),
                     )
                     processor = ClipPostProcessor(
                         detector=detector,

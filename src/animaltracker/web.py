@@ -3904,6 +3904,7 @@ class WebServer:
             'min_specific_detections': 2,
             'lost_track_buffer': 120,
             'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False) if clip_cfg else False,
+            'thumbnail_cropped': getattr(clip_cfg, 'thumbnail_cropped', True) if clip_cfg else True,
         }
         
         # Apply overrides from request (allow any key that ProcessingSettings supports)

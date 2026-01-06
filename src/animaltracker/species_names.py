@@ -142,6 +142,10 @@ SPECIES_MAP = {
     "mammalia_rodentia_sciuridae_tamias_striatus": "Eastern Chipmunk",
     "mammalia_rodentia_sciuridae_tamias": "Chipmunk",
     
+    # Generic rodent (order level)
+    "mammalia_rodentia_rodent": "Rodent",
+    "mammalia_rodentia": "Rodent",
+    
     # Rabbits
     "mammalia_lagomorpha_leporidae": "Rabbit",
     "mammalia_lagomorpha_leporidae_sylvilagus_floridanus": "Eastern Cottontail",
@@ -202,6 +206,10 @@ PARTIAL_PATTERNS = [
     (r"sciuridae", "Squirrel"),
     (r"leporidae", "Rabbit"),
     (r"didelphidae", "Opossum"),
+    (r"rodentia", "Rodent"),
+    (r"carnivora", "Carnivore"),
+    (r"artiodactyla", "Hoofed Mammal"),
+    (r"lagomorpha", "Rabbit"),
 ]
 
 

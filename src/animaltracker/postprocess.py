@@ -1102,7 +1102,8 @@ class ClipPostProcessor:
                     thumb_name = f"{clip_stem}_thumb_{clean_species}_{idx}.jpg"
                 
                 thumb_path = clip_path.parent / thumb_name
-                LOGGER.debug("Attempting to save thumbnail: %s", thumb_path)
+                LOGGER.info("Attempting to save thumbnail: %s (frame shape: %s)", 
+                           thumb_path, annotated.shape if 'annotated' in dir() else 'not yet')
                 
                 try:
                     # Draw bounding box on frame
@@ -1110,26 +1111,46 @@ class ClipPostProcessor:
                         frame, species, confidence, bbox, 
                         idx + 1 if len(result.key_frames) > 1 else None
                     )
+                    LOGGER.info("Annotated frame created, shape: %s, dtype: %s", 
+                               annotated.shape, annotated.dtype)
                     
                     # Save thumbnail
-                    cv2.imwrite(str(thumb_path), annotated)
+                    LOGGER.info("Calling cv2.imwrite to: %s", thumb_path)
+                    write_result = cv2.imwrite(str(thumb_path), annotated)
+                    LOGGER.info("cv2.imwrite returned: %s", write_result)
                     
-                    # Force sync to disk (important for NFS mounts)
-                    if thumb_path.exists():
-                        import os
-                        # Open file and fsync to ensure it's written to NFS server
-                        with open(thumb_path, 'r+b') as f:
-                            os.fsync(f.fileno())
+                    # Check if file exists immediately after write
+                    exists_after_write = thumb_path.exists()
+                    LOGGER.info("File exists immediately after imwrite: %s", exists_after_write)
+                    
+                    if exists_after_write:
+                        size_before_sync = thumb_path.stat().st_size
+                        LOGGER.info("File size before fsync: %d bytes", size_before_sync)
                         
-                        saved.append(thumb_path)
-                        LOGGER.info("Saved thumbnail: %s (size: %d bytes)", 
-                                   thumb_path, thumb_path.stat().st_size)
+                        # Force sync to disk (important for NFS mounts)
+                        LOGGER.info("Opening file for fsync...")
+                        with open(thumb_path, 'r+b') as f:
+                            LOGGER.info("Calling os.fsync...")
+                            os.fsync(f.fileno())
+                            LOGGER.info("os.fsync completed")
+                        
+                        # Verify file still exists after fsync
+                        exists_after_sync = thumb_path.exists()
+                        LOGGER.info("File exists after fsync: %s", exists_after_sync)
+                        
+                        if exists_after_sync:
+                            size_after_sync = thumb_path.stat().st_size
+                            saved.append(thumb_path)
+                            LOGGER.info("Saved thumbnail: %s (size: %d bytes)", 
+                                       thumb_path, size_after_sync)
+                        else:
+                            LOGGER.error("File disappeared after fsync! Path: %s", thumb_path)
                     else:
-                        LOGGER.error("Failed to save thumbnail %s - file doesn't exist after imwrite", 
-                                    thumb_path)
+                        LOGGER.error("Failed to save thumbnail %s - file doesn't exist after imwrite (cv2 returned: %s)", 
+                                    thumb_path, write_result)
                     
                 except Exception as e:
-                    LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e)
+                    LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e, exc_info=True)
         
         LOGGER.info("Saved %d thumbnails for %s", len(saved), clip_path.name)
         return saved

@@ -6791,6 +6791,16 @@ class WebServer:
                                     </label>
                                     <div class="setting-description">Force merge ALL non-overlapping tracks into one (use when confident there's only one animal)</div>
                                 </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Cropped Thumbnails</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.thumbnail_cropped !== false ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'thumbnail_cropped', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Zoom thumbnails to detection area (off = full frame with bounding box)</div>
+                                </div>
                             </div>
                             
                             <div class="settings-card">
@@ -7342,6 +7352,7 @@ class WebServer:
                 'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3),
                 'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True),
                 'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False),
+                'thumbnail_cropped': getattr(clip_cfg, 'thumbnail_cropped', True),
             },
             'retention': {
                 'min_days': retention_cfg.min_days,

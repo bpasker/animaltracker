@@ -1076,26 +1076,10 @@ class ClipPostProcessor:
         clip_stem = clip_path.stem
         clip_dir = clip_path.parent
         
-        LOGGER.info("Saving thumbnails for clip: %s (stem=%s, parent=%s)", 
-                   clip_path, clip_stem, clip_dir)
-        
-        # Force NFS directory cache refresh before deleting old thumbnails
-        # This ensures we see all files that exist on the server
-        try:
-            dir_fd = os.open(str(clip_dir), os.O_RDONLY | os.O_DIRECTORY)
-            os.fsync(dir_fd)
-            os.close(dir_fd)
-            LOGGER.debug("Forced NFS directory sync before thumbnail cleanup")
-        except Exception as e:
-            LOGGER.debug("Could not sync directory before cleanup: %s", e)
-        
         # First, remove old thumbnails for this clip
-        old_thumbs = list(clip_dir.glob(f"{clip_stem}_thumb_*.jpg"))
-        LOGGER.info("Found %d old thumbnails to remove for %s", len(old_thumbs), clip_stem)
-        for old_thumb in old_thumbs:
+        for old_thumb in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
             try:
                 old_thumb.unlink()
-                LOGGER.info("Removed old thumbnail: %s", old_thumb)
             except Exception as e:
                 LOGGER.warning("Failed to remove old thumbnail %s: %s", old_thumb, e)
         
@@ -1115,8 +1099,6 @@ class ClipPostProcessor:
                     thumb_name = f"{clip_stem}_thumb_{clean_species}_{idx}.jpg"
                 
                 thumb_path = clip_path.parent / thumb_name
-                LOGGER.info("Attempting to save thumbnail: %s (frame shape: %s)", 
-                           thumb_path, annotated.shape if 'annotated' in dir() else 'not yet')
                 
                 try:
                     # Draw bounding box on frame
@@ -1124,48 +1106,18 @@ class ClipPostProcessor:
                         frame, species, confidence, bbox, 
                         idx + 1 if len(result.key_frames) > 1 else None
                     )
-                    LOGGER.info("Annotated frame created, shape: %s, dtype: %s", 
-                               annotated.shape, annotated.dtype)
                     
                     # Save thumbnail
-                    LOGGER.info("Calling cv2.imwrite to: %s", thumb_path)
-                    write_result = cv2.imwrite(str(thumb_path), annotated)
-                    LOGGER.info("cv2.imwrite returned: %s", write_result)
-                    
-                    # Check if file exists immediately after write
-                    exists_after_write = thumb_path.exists()
-                    LOGGER.info("File exists immediately after imwrite: %s", exists_after_write)
-                    
-                    if exists_after_write:
-                        size_before_sync = thumb_path.stat().st_size
-                        LOGGER.info("File size before fsync: %d bytes", size_before_sync)
-                        
-                        # Force sync to disk (important for NFS mounts)
-                        LOGGER.info("Opening file for fsync...")
-                        with open(thumb_path, 'r+b') as f:
-                            LOGGER.info("Calling os.fsync...")
-                            os.fsync(f.fileno())
-                            LOGGER.info("os.fsync completed")
-                        
-                        # Verify file still exists after fsync
-                        exists_after_sync = thumb_path.exists()
-                        LOGGER.info("File exists after fsync: %s", exists_after_sync)
-                        
-                        if exists_after_sync:
-                            size_after_sync = thumb_path.stat().st_size
-                            saved.append(thumb_path)
-                            LOGGER.info("Saved thumbnail: %s (size: %d bytes)", 
-                                       thumb_path, size_after_sync)
-                        else:
-                            LOGGER.error("File disappeared after fsync! Path: %s", thumb_path)
+                    if cv2.imwrite(str(thumb_path), annotated):
+                        saved.append(thumb_path)
+                        LOGGER.debug("Saved thumbnail: %s", thumb_path)
                     else:
-                        LOGGER.error("Failed to save thumbnail %s - file doesn't exist after imwrite (cv2 returned: %s)", 
-                                    thumb_path, write_result)
+                        LOGGER.error("Failed to save thumbnail: %s", thumb_path)
                     
                 except Exception as e:
-                    LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e, exc_info=True)
+                    LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e)
         
-        LOGGER.info("Saved %d thumbnails for %s", len(saved), clip_path.name)
+        LOGGER.debug("Saved %d thumbnails for %s", len(saved), clip_path.name)
         return saved
     
     def _extract_sample_frames(
@@ -1181,14 +1133,6 @@ class ClipPostProcessor:
         saved = []
         clip_stem = clip_path.stem
         clip_dir = clip_path.parent
-        
-        # Force NFS directory cache refresh before deleting old thumbnails
-        try:
-            dir_fd = os.open(str(clip_dir), os.O_RDONLY | os.O_DIRECTORY)
-            os.fsync(dir_fd)
-            os.close(dir_fd)
-        except Exception:
-            pass
         
         # First, remove old thumbnails for this clip
         for old_thumb in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
@@ -1251,19 +1195,11 @@ class ClipPostProcessor:
                     )
                     
                     # Save thumbnail
-                    cv2.imwrite(str(thumb_path), annotated)
-                    
-                    # Force sync to disk (important for NFS mounts)
-                    if thumb_path.exists():
-                        with open(thumb_path, 'r+b') as f:
-                            os.fsync(f.fileno())
-                        
+                    if cv2.imwrite(str(thumb_path), annotated):
                         saved.append(thumb_path)
-                        LOGGER.info("Saved sample frame thumbnail: %s (size: %d bytes)", 
-                                   thumb_path, thumb_path.stat().st_size)
+                        LOGGER.debug("Saved sample frame thumbnail: %s", thumb_path)
                     else:
-                        LOGGER.error("Failed to save sample thumbnail %s - file doesn't exist after imwrite", 
-                                    thumb_path)
+                        LOGGER.error("Failed to save sample thumbnail: %s", thumb_path)
                     
                 except Exception as e:
                     LOGGER.error("Failed to save sample thumbnail %s: %s", thumb_path, e)
@@ -1271,7 +1207,7 @@ class ClipPostProcessor:
         finally:
             cap.release()
         
-        LOGGER.info("Extracted %d sample frames for %s", len(saved), clip_path.name)
+        LOGGER.debug("Extracted %d sample frames for %s", len(saved), clip_path.name)
         return saved
     
     def _annotate_frame(

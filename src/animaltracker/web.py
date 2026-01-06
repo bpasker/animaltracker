@@ -458,33 +458,14 @@ class WebServer:
         
         Returns list of dicts with 'path' (relative to clips dir), 'species', 'url'
         """
-        import os
-        
         clips_dir = self.storage_root / 'clips'
         clip_stem = clip_path.stem
         clip_dir = clip_path.parent
         thumbnails = []
         
-        # Force NFS directory cache refresh by opening and syncing the directory
-        try:
-            dir_fd = os.open(str(clip_dir), os.O_RDONLY | os.O_DIRECTORY)
-            os.fsync(dir_fd)
-            os.close(dir_fd)
-            LOGGER.info("Forced NFS directory sync for: %s", clip_dir)
-        except Exception as e:
-            LOGGER.warning("Could not sync directory %s: %s", clip_dir, e)
-        
-        # Debug: Log what we're looking for
-        glob_pattern = f"{clip_stem}_thumb_*.jpg"
-        LOGGER.info("Looking for thumbnails in %s with pattern: %s", clip_dir, glob_pattern)
-        
-        # List all jpg files in directory to help debug
-        all_jpgs = list(clip_dir.glob("*.jpg"))
-        LOGGER.info("All JPG files in directory (%d total): %s", len(all_jpgs), [f.name for f in all_jpgs])
-        
         # Look for thumbnails matching this clip
+        glob_pattern = f"{clip_stem}_thumb_*.jpg"
         for thumb_file in clip_dir.glob(glob_pattern):
-            LOGGER.info("Found thumbnail: %s", thumb_file)
             # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
             parts = thumb_file.stem.split("_thumb_")
             if len(parts) >= 2:
@@ -502,7 +483,6 @@ class WebServer:
                 'url': f"/clips/{rel_path}"
             })
         
-        LOGGER.info("Total thumbnails found for %s: %d", clip_stem, len(thumbnails))
         return thumbnails
 
     def _parse_species_from_filename(self, filename: str) -> str:

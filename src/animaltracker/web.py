@@ -1151,24 +1151,30 @@ class WebServer:
         # Start with defaults from runtime config
         clip_cfg = self.runtime.general.clip if self.runtime else None
         default_settings = {
-            'sample_rate': 3,
+            'sample_rate': getattr(clip_cfg, 'sample_rate', 3) if clip_cfg else 3,
             'confidence_threshold': getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3,
             'generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5,
             'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True) if clip_cfg else True,
             'merge_enabled': True,
-            'same_species_merge_gap': 120,
-            'hierarchical_merge_enabled': True,
+            'same_species_merge_gap': getattr(clip_cfg, 'track_merge_gap', 120) if clip_cfg else 120,
+            'spatial_merge_enabled': getattr(clip_cfg, 'spatial_merge_enabled', True) if clip_cfg else True,
+            'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3) if clip_cfg else 0.3,
+            'spatial_merge_gap': 30,  # Default gap for spatial matching
+            'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True) if clip_cfg else True,
             'hierarchical_merge_gap': 120,
             'min_specific_detections': 2,
             'lost_track_buffer': 120,
+            'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False) if clip_cfg else False,
         }
         
-        # Apply overrides from request
+        # Apply overrides from request (allow any key that ProcessingSettings supports)
         for key, value in settings_override.items():
-            if key in default_settings:
-                default_settings[key] = value
+            default_settings[key] = value
         
         settings = ProcessingSettings.from_dict(default_settings)
+        
+        LOGGER.info("Reprocess settings: spatial_merge_iou=%.2f, spatial_merge_enabled=%s, tracking=%s",
+                   settings.spatial_merge_iou, settings.spatial_merge_enabled, settings.tracking_enabled)
         
         def do_reprocess():
             from .postprocess import ClipPostProcessor

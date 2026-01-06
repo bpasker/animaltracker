@@ -231,8 +231,8 @@ class ClipPostProcessor:
             PostProcessResult with details of the processing
         """
         LOGGER.info("Post-processing clip: %s", clip_path)
-        LOGGER.info("Settings: confidence_threshold=%.2f, generic_confidence=%.2f, tracking=%s, sample_rate=%d",
-                   self.confidence_threshold, self.generic_confidence, self.tracking_enabled, self.sample_rate)
+        LOGGER.info("Settings: confidence_threshold=%.2f, generic_confidence=%.2f, tracking=%s, sample_rate=%d, spatial_iou=%.2f",
+                   self.confidence_threshold, self.generic_confidence, self.tracking_enabled, self.sample_rate, self.settings.spatial_merge_iou)
         
         if not clip_path.exists():
             return PostProcessResult(

@@ -1193,6 +1193,7 @@ class ClipPostProcessor:
         for track_idx, (track_id, track_info) in enumerate(tracks_sorted):
             best_species_data = track_info.get_best_species()
             if not best_species_data or not best_species_data[0]:
+                LOGGER.debug("Track %d has no best species, skipping thumbnail", track_id)
                 continue
             
             best_species, best_conf, taxonomy = best_species_data
@@ -1203,9 +1204,15 @@ class ClipPostProcessor:
                 best_frame_data = track_info.get_best_frame()
             
             if not best_frame_data:
+                LOGGER.warning("Track %d (%s) has no frame data for thumbnail", track_id, best_species)
                 continue
             
             frame, conf, bbox = best_frame_data
+            
+            # Validate frame data
+            if frame is None:
+                LOGGER.warning("Track %d (%s) has None frame, skipping thumbnail", track_id, best_species)
+                continue
             
             # Clean species name for filename
             clean_species = best_species.replace(' ', '_').replace('/', '_').lower()
@@ -1217,10 +1224,9 @@ class ClipPostProcessor:
             
             try:
                 # Draw bounding box with track info
-                label_suffix = f" #{track_idx+1}" if len(tracks_sorted) > 1 else None
                 annotated = self._annotate_frame(
                     frame, best_species, conf, bbox,
-                    track_num=track_idx + 1 if len(tracks_sorted) > 1 else None
+                    detection_num=track_idx + 1 if len(tracks_sorted) > 1 else None
                 )
                 
                 # Save thumbnail
@@ -1233,7 +1239,10 @@ class ClipPostProcessor:
                     LOGGER.error("Failed to save track thumbnail: %s", thumb_path)
                     
             except Exception as e:
-                LOGGER.error("Failed to save track thumbnail %s: %s", thumb_path, e)
+                LOGGER.error("Failed to save track thumbnail %s: %s (frame shape: %s, bbox: %s)", 
+                            thumb_path, e, 
+                            frame.shape if frame is not None else 'None',
+                            bbox)
         
         LOGGER.debug("Saved %d track thumbnails for %s", len(saved), clip_path.name)
         return saved

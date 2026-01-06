@@ -24,7 +24,13 @@ class ClipSettings(BaseModel):
     # Note: post_analysis_frames is auto-calculated as 1 frame per second of clip duration
     post_analysis_confidence: float = Field(default=0.3, ge=0, le=1, description="Confidence threshold for post-analysis (lower catches more)")
     post_analysis_generic_confidence: float = Field(default=0.5, ge=0, le=1, description="Generic category threshold for post-analysis")
+    sample_rate: int = Field(default=3, ge=1, le=30, description="Analyze every Nth frame (lower = more thorough)")
     tracking_enabled: bool = Field(default=True, description="Enable object tracking to identify same animal across frames")
+    track_merge_gap: int = Field(default=120, ge=10, le=500, description="Max frame gap to merge same-species tracks")
+    spatial_merge_enabled: bool = Field(default=True, description="Merge tracks in same location (ignores species misclassifications)")
+    spatial_merge_iou: float = Field(default=0.3, ge=0.1, le=0.9, description="Min bounding box overlap to merge (0.3 = 30%)")
+    hierarchical_merge_enabled: bool = Field(default=True, description="Merge 'animal' tracks into specific species tracks")
+    single_animal_mode: bool = Field(default=False, description="Force merge ALL non-overlapping tracks into one")
     # Unified post-processing (new approach - analyze saved video file instead of in-memory frames)
     unified_post_processing: bool = Field(default=True, description="Use unified post-processor for consistent results (recommended)")
     post_analysis_frames: int = Field(default=0, ge=0, description="Number of frames for post-analysis (0=auto-calculate)")

@@ -544,7 +544,22 @@ class StreamWorker:
             if use_unified_processor:
                 try:
                     from .postprocess import ClipPostProcessor, ProcessingSettings
-                    settings = ProcessingSettings()  # Use defaults
+                    # Use settings from config
+                    clip_cfg = self.runtime.general.clip
+                    settings = ProcessingSettings(
+                        sample_rate=getattr(clip_cfg, 'sample_rate', 3),
+                        confidence_threshold=getattr(clip_cfg, 'post_analysis_confidence', 0.3),
+                        generic_confidence=getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
+                        tracking_enabled=getattr(clip_cfg, 'tracking_enabled', True),
+                        merge_enabled=True,
+                        same_species_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
+                        spatial_merge_enabled=getattr(clip_cfg, 'spatial_merge_enabled', True),
+                        spatial_merge_iou=getattr(clip_cfg, 'spatial_merge_iou', 0.3),
+                        spatial_merge_gap=30,
+                        hierarchical_merge_enabled=getattr(clip_cfg, 'hierarchical_merge_enabled', True),
+                        hierarchical_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
+                        single_animal_mode=getattr(clip_cfg, 'single_animal_mode', False),
+                    )
                     processor = ClipPostProcessor(
                         detector=detector,
                         storage_root=storage_root,

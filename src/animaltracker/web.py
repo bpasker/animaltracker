@@ -3931,6 +3931,14 @@ class WebServer:
                                 </div>
                                 
                                 <div class="setting-row">
+                                    <label class="setting-label">Sample Rate</label>
+                                    <input type="number" min="1" max="30" step="1"
+                                           value="${g.clip.sample_rate || 3}"
+                                           onchange="updateGlobalValue('clip', 'sample_rate', parseInt(this.value))">
+                                    <div class="setting-description">Analyze every Nth frame (lower = more thorough, slower)</div>
+                                </div>
+                                
+                                <div class="setting-row">
                                     <label class="setting-label">Object Tracking</label>
                                     <label class="toggle-switch">
                                         <input type="checkbox" ${g.clip.tracking_enabled ? 'checked' : ''}
@@ -3938,6 +3946,55 @@ class WebServer:
                                         <span class="toggle-slider"></span>
                                     </label>
                                     <div class="setting-description">Track same animal across frames for consistent species ID (uses ByteTrack)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Track Merge Gap</label>
+                                    <input type="number" min="10" max="500" step="10"
+                                           value="${g.clip.track_merge_gap || 120}"
+                                           onchange="updateGlobalValue('clip', 'track_merge_gap', parseInt(this.value))">
+                                    <div class="setting-description">Max frame gap to merge same-species tracks</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Spatial Merge</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.spatial_merge_enabled !== false ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'spatial_merge_enabled', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Merge tracks in same location (ignores species misclassifications)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Spatial Overlap (IoU)</label>
+                                    <div class="slider-container">
+                                        <input type="range" min="10" max="90" step="5" 
+                                               value="${Math.round((g.clip.spatial_merge_iou || 0.3) * 100)}"
+                                               oninput="updateGlobalSlider(this, 'clip', 'spatial_merge_iou')">
+                                        <span class="slider-value" id="spatial_merge_iou-value">${Math.round((g.clip.spatial_merge_iou || 0.3) * 100)}%</span>
+                                    </div>
+                                    <div class="setting-description">Min bounding box overlap to merge (30% recommended)</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Hierarchical Merging</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.hierarchical_merge_enabled !== false ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'hierarchical_merge_enabled', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Merge "animal" tracks into specific species tracks</div>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <label class="setting-label">Single Animal Mode</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.single_animal_mode ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'single_animal_mode', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Force merge ALL non-overlapping tracks into one (use when confident there's only one animal)</div>
                                 </div>
                             </div>
                             
@@ -4483,7 +4540,13 @@ class WebServer:
                 'post_analysis': getattr(clip_cfg, 'post_analysis', True),
                 'post_analysis_confidence': getattr(clip_cfg, 'post_analysis_confidence', 0.3),
                 'post_analysis_generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
+                'sample_rate': getattr(clip_cfg, 'sample_rate', 3),
                 'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True),
+                'track_merge_gap': getattr(clip_cfg, 'track_merge_gap', 120),
+                'spatial_merge_enabled': getattr(clip_cfg, 'spatial_merge_enabled', True),
+                'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3),
+                'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True),
+                'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False),
             },
             'retention': {
                 'min_days': retention_cfg.min_days,
@@ -4658,6 +4721,20 @@ class WebServer:
                     runtime.general.clip.post_analysis_confidence = float(clip['post_analysis_confidence'])
                 if 'post_analysis_generic_confidence' in clip:
                     runtime.general.clip.post_analysis_generic_confidence = float(clip['post_analysis_generic_confidence'])
+                if 'sample_rate' in clip:
+                    runtime.general.clip.sample_rate = int(clip['sample_rate'])
+                if 'tracking_enabled' in clip:
+                    runtime.general.clip.tracking_enabled = bool(clip['tracking_enabled'])
+                if 'track_merge_gap' in clip:
+                    runtime.general.clip.track_merge_gap = int(clip['track_merge_gap'])
+                if 'spatial_merge_enabled' in clip:
+                    runtime.general.clip.spatial_merge_enabled = bool(clip['spatial_merge_enabled'])
+                if 'spatial_merge_iou' in clip:
+                    runtime.general.clip.spatial_merge_iou = float(clip['spatial_merge_iou'])
+                if 'hierarchical_merge_enabled' in clip:
+                    runtime.general.clip.hierarchical_merge_enabled = bool(clip['hierarchical_merge_enabled'])
+                if 'single_animal_mode' in clip:
+                    runtime.general.clip.single_animal_mode = bool(clip['single_animal_mode'])
                 updated_global = True
             
             # Retention settings
@@ -4748,6 +4825,20 @@ class WebServer:
                     config['general']['clip']['post_analysis_confidence'] = clip['post_analysis_confidence']
                 if 'post_analysis_generic_confidence' in clip:
                     config['general']['clip']['post_analysis_generic_confidence'] = clip['post_analysis_generic_confidence']
+                if 'sample_rate' in clip:
+                    config['general']['clip']['sample_rate'] = clip['sample_rate']
+                if 'tracking_enabled' in clip:
+                    config['general']['clip']['tracking_enabled'] = clip['tracking_enabled']
+                if 'track_merge_gap' in clip:
+                    config['general']['clip']['track_merge_gap'] = clip['track_merge_gap']
+                if 'spatial_merge_enabled' in clip:
+                    config['general']['clip']['spatial_merge_enabled'] = clip['spatial_merge_enabled']
+                if 'spatial_merge_iou' in clip:
+                    config['general']['clip']['spatial_merge_iou'] = clip['spatial_merge_iou']
+                if 'hierarchical_merge_enabled' in clip:
+                    config['general']['clip']['hierarchical_merge_enabled'] = clip['hierarchical_merge_enabled']
+                if 'single_animal_mode' in clip:
+                    config['general']['clip']['single_animal_mode'] = clip['single_animal_mode']
             
             # Retention settings
             if 'retention' in global_data:

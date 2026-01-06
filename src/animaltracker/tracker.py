@@ -553,23 +553,26 @@ class ObjectTracker:
                     
                 other = self.tracks[other_id]
                 
-                # Check if tracks overlap in time (both visible at same frame)
-                overlaps = (
-                    primary.first_seen_frame <= other.last_seen_frame and
-                    other.first_seen_frame <= primary.last_seen_frame
-                )
+                # Check for ACTUAL detection frame overlap (not just range overlap)
+                # After spatial merges, ranges can overlap even though detections don't
+                primary_frames = {c.frame_idx for c in primary.classifications}
+                other_frames = {c.frame_idx for c in other.classifications}
+                actual_overlap = primary_frames & other_frames
                 
-                if overlaps:
-                    # These might be two different animals - don't merge
+                if actual_overlap:
+                    # These have detections at the same frames - might be two different animals
                     # Update primary to be the one with more detections
                     if len(other.classifications) > len(primary.classifications):
                         primary_track_id = other_id
                         primary = other
                     continue
                 
-                # Check if gap is small enough
-                gap = other.first_seen_frame - primary.last_seen_frame
-                if gap <= max_frame_gap:
+                # Check if gap is small enough (using actual detection frames)
+                primary_max = max(primary_frames) if primary_frames else primary.last_seen_frame
+                other_min = min(other_frames) if other_frames else other.first_seen_frame
+                gap = other_min - primary_max
+                
+                if gap <= max_frame_gap and gap >= 0:
                     # Merge other into primary
                     LOGGER.info("Merging Track %d into Track %d (same %s, gap=%d frames)",
                                other_id, primary_track_id, species, gap)
@@ -686,22 +689,27 @@ class ObjectTracker:
                 
                 generic_info = generic['info']
                 
-                # Check for time overlap (would indicate two different animals)
-                overlaps = (
-                    specific_info.first_seen_frame <= generic_info.last_seen_frame and
-                    generic_info.first_seen_frame <= specific_info.last_seen_frame
-                )
+                # Check for ACTUAL detection frame overlap (not just range overlap)
+                # After spatial merges, ranges can overlap even though detections don't
+                specific_frames = {c.frame_idx for c in specific_info.classifications}
+                generic_frames = {c.frame_idx for c in generic_info.classifications}
+                actual_overlap = specific_frames & generic_frames
                 
-                if overlaps:
-                    LOGGER.debug("Skipping merge: Track %d and %d overlap in time",
-                                specific['track_id'], generic['track_id'])
+                if actual_overlap:
+                    LOGGER.debug("Skipping merge: Track %d and %d have %d overlapping detection frames",
+                                specific['track_id'], generic['track_id'], len(actual_overlap))
                     continue
                 
-                # Check temporal proximity
-                if generic_info.first_seen_frame > specific_info.last_seen_frame:
-                    gap = generic_info.first_seen_frame - specific_info.last_seen_frame
+                # Check temporal proximity (using actual detection frames, not just ranges)
+                specific_max = max(specific_frames) if specific_frames else specific_info.last_seen_frame
+                specific_min = min(specific_frames) if specific_frames else specific_info.first_seen_frame
+                generic_max = max(generic_frames) if generic_frames else generic_info.last_seen_frame
+                generic_min = min(generic_frames) if generic_frames else generic_info.first_seen_frame
+                
+                if generic_min > specific_max:
+                    gap = generic_min - specific_max
                 else:
-                    gap = specific_info.first_seen_frame - generic_info.last_seen_frame
+                    gap = specific_min - generic_max
                 
                 if gap > max_frame_gap:
                     LOGGER.debug("Skipping merge: Track %d and %d too far apart (gap=%d)",

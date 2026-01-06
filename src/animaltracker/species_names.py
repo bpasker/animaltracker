@@ -124,6 +124,17 @@ SPECIES_MAP = {
     "mammalia_artiodactyla_cervidae_odocoileus_virginianus": "White-tailed Deer",
     "mammalia_artiodactyla_cervidae_odocoileus": "Deer",
     
+    # Bovids (cattle, goats, sheep, bison, antelopes)
+    "mammalia_artiodactyla_bovidae": "Bovid (Cattle/Goat/Sheep)",
+    "mammalia_artiodactyla_bovidae_bos_taurus": "Cattle",
+    "mammalia_artiodactyla_bovidae_bos": "Cattle",
+    "mammalia_artiodactyla_bovidae_capra": "Goat",
+    "mammalia_artiodactyla_bovidae_capra_hircus": "Domestic Goat",
+    "mammalia_artiodactyla_bovidae_ovis": "Sheep",
+    "mammalia_artiodactyla_bovidae_ovis_aries": "Domestic Sheep",
+    "mammalia_artiodactyla_bovidae_bison": "Bison",
+    "mammalia_artiodactyla_bovidae_bison_bison": "American Bison",
+    
     # Squirrels
     "mammalia_rodentia_sciuridae": "Squirrel",
     "mammalia_rodentia_sciuridae_sciurus_carolinensis": "Eastern Gray Squirrel",
@@ -187,6 +198,7 @@ PARTIAL_PATTERNS = [
     (r"canidae", "Dog/Canid"),
     (r"procyonidae", "Raccoon"),
     (r"cervidae", "Deer"),
+    (r"bovidae", "Bovid (Cattle/Goat/Sheep)"),
     (r"sciuridae", "Squirrel"),
     (r"leporidae", "Rabbit"),
     (r"didelphidae", "Opossum"),

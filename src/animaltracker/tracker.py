@@ -261,18 +261,23 @@ class ObjectTracker:
     def update(
         self, 
         detections: List[Detection], 
-        frame: Optional[np.ndarray] = None
+        frame: Optional[np.ndarray] = None,
+        frame_idx: Optional[int] = None
     ) -> Dict[int, Detection]:
         """Update tracker with new detections.
         
         Args:
             detections: List of detections from the detector
             frame: Current frame (optional, for storing best frames)
+            frame_idx: Actual video frame index (optional, defaults to internal counter)
             
         Returns:
             Dict mapping track_id -> Detection for this frame
         """
         self.frame_count += 1
+        
+        # Use provided frame_idx or fall back to internal counter
+        actual_frame_idx = frame_idx if frame_idx is not None else self.frame_count
         
         if not detections:
             return {}
@@ -320,7 +325,7 @@ class ObjectTracker:
             if track_id not in self.tracks:
                 self.tracks[track_id] = TrackInfo(
                     track_id=track_id,
-                    first_seen_frame=self.frame_count,
+                    first_seen_frame=actual_frame_idx,
                 )
             
             # Add classification to track
@@ -329,7 +334,7 @@ class ObjectTracker:
                 confidence=original_det.confidence,
                 taxonomy=original_det.taxonomy,
                 bbox=original_det.bbox,
-                frame_idx=self.frame_count,
+                frame_idx=actual_frame_idx,
                 frame=frame,
             )
             

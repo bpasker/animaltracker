@@ -470,8 +470,8 @@ class ClipPostProcessor:
                         filtered_count += 1
                     
                     if tracker and detections:
-                        # Update tracker with detections
-                        tracked = tracker.update(detections, frame)
+                        # Update tracker with detections, passing actual video frame index
+                        tracked = tracker.update(detections, frame, frame_idx=frame_idx)
                         all_frames_data.append((frame_idx, frame.copy(), detections))
                         
                         # Log tracking assignments

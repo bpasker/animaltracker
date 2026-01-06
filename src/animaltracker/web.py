@@ -2100,7 +2100,7 @@ class WebServer:
             url_encoded_path = clip['path'].replace('#', '%23')
             species_display = clip.get('species', 'Unknown')
             thumbnails = clip.get('thumbnails', [])
-            thumbnail_url = f"/clips/{thumbnails[0]['url'].lstrip('/clips/')}" if thumbnails else ''
+            thumbnail_url = thumbnails[0]['url'] if thumbnails else ''
             thumbnail_html = f'<img class="recording-thumb" src="{thumbnail_url}" alt="" loading="lazy" onerror="this.style.display=\'none\'">' if thumbnail_url else '<div class="recording-thumb-placeholder">🎬</div>'
             
             html += f"""
@@ -2835,7 +2835,7 @@ class WebServer:
                         // Render a single clip card for day panel
                         renderDayClipCard(clip, index) {{
                             const thumbUrl = clip.thumbnails && clip.thumbnails.length > 0 
-                                ? '/clips/' + clip.thumbnails[0].url.replace(/^\\/clips\\//, '')
+                                ? clip.thumbnails[0].url
                                 : null;
                             
                             const thumbHtml = thumbUrl 

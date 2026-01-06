@@ -840,6 +840,148 @@ class ObjectTracker:
         
         return merged_count
     
+    def merge_overlapping_same_location_tracks(self, iou_threshold: float = 0.3) -> int:
+        """Merge tracks that overlap in time but are spatially the same object.
+        
+        ByteTrack sometimes creates spurious parallel tracks when an object is temporarily
+        lost and re-detected. This merges tracks that:
+        1. Overlap in time (both active at same frames)
+        2. Have high spatial IoU during the overlap period
+        3. The smaller track gets absorbed into the larger one
+        
+        Args:
+            iou_threshold: Minimum IoU during overlap to consider same object
+            
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+        
+        # Build track data with frame->bbox mapping for overlap detection
+        track_data = []
+        for track_id, track_info in self.tracks.items():
+            frame_bboxes = {}
+            for c in track_info.classifications:
+                if c.bbox:
+                    frame_bboxes[c.frame_idx] = c.bbox
+            
+            if not frame_bboxes:
+                continue
+            
+            species, confidence, _ = track_info.get_best_species()
+            track_data.append({
+                'track_id': track_id,
+                'info': track_info,
+                'first_frame': track_info.first_seen_frame,
+                'last_frame': track_info.last_seen_frame,
+                'frame_bboxes': frame_bboxes,
+                'species': species,
+                'confidence': confidence,
+                'detections': len(track_info.classifications),
+            })
+        
+        if len(track_data) <= 1:
+            return 0
+        
+        # Sort by number of detections (merge smaller into larger)
+        track_data.sort(key=lambda x: x['detections'], reverse=True)
+        
+        merged_count = 0
+        tracks_to_remove = set()
+        
+        for i, larger in enumerate(track_data):
+            if larger['track_id'] in tracks_to_remove:
+                continue
+            
+            for j, smaller in enumerate(track_data[i+1:], i+1):
+                if smaller['track_id'] in tracks_to_remove:
+                    continue
+                
+                # Check for time overlap
+                overlaps_in_time = (
+                    larger['first_frame'] <= smaller['last_frame'] and
+                    smaller['first_frame'] <= larger['last_frame']
+                )
+                
+                if not overlaps_in_time:
+                    continue
+                
+                # Find frames where both tracks have detections and check IoU
+                overlap_ious = []
+                for frame, bbox1 in larger['frame_bboxes'].items():
+                    if frame in smaller['frame_bboxes']:
+                        bbox2 = smaller['frame_bboxes'][frame]
+                        iou = self._calculate_iou(bbox1, bbox2)
+                        overlap_ious.append(iou)
+                
+                # If they never have detections at the same frame, check adjacent frames
+                if not overlap_ious:
+                    # Look for frames within a small window
+                    for frame1, bbox1 in larger['frame_bboxes'].items():
+                        for frame2, bbox2 in smaller['frame_bboxes'].items():
+                            if abs(frame1 - frame2) <= 6:  # Within 6 frames
+                                iou = self._calculate_iou(bbox1, bbox2)
+                                if iou >= iou_threshold:
+                                    overlap_ious.append(iou)
+                                    break
+                        if overlap_ious:
+                            break
+                
+                if not overlap_ious:
+                    continue
+                
+                # Check if average IoU meets threshold
+                avg_iou = sum(overlap_ious) / len(overlap_ious)
+                if avg_iou >= iou_threshold:
+                    LOGGER.info(
+                        "Overlap merge: Track %d (%s, %d det) <- Track %d (%s, %d det), "
+                        "avg_iou=%.2f over %d shared frames",
+                        larger['track_id'], larger['species'], larger['detections'],
+                        smaller['track_id'], smaller['species'], smaller['detections'],
+                        avg_iou, len(overlap_ious)
+                    )
+                    
+                    larger_info = larger['info']
+                    smaller_info = smaller['info']
+                    
+                    # Merge smaller into larger
+                    larger_info.classifications.extend(smaller_info.classifications)
+                    larger_info.first_seen_frame = min(larger_info.first_seen_frame,
+                                                       smaller_info.first_seen_frame)
+                    larger_info.last_seen_frame = max(larger_info.last_seen_frame,
+                                                      smaller_info.last_seen_frame)
+                    
+                    if smaller_info.best_confidence > larger_info.best_confidence:
+                        larger_info.best_confidence = smaller_info.best_confidence
+                        larger_info.best_bbox = smaller_info.best_bbox
+                        larger_info.best_frame = smaller_info.best_frame
+                    
+                    for sp, frame_data in smaller_info.species_best_frames.items():
+                        if sp not in larger_info.species_best_frames:
+                            larger_info.species_best_frames[sp] = frame_data
+                        elif frame_data[1] > larger_info.species_best_frames[sp][1]:
+                            larger_info.species_best_frames[sp] = frame_data
+                    
+                    # Update larger's frame_bboxes for subsequent comparisons
+                    larger['frame_bboxes'].update(smaller['frame_bboxes'])
+                    larger['last_frame'] = larger_info.last_seen_frame
+                    larger['first_frame'] = larger_info.first_seen_frame
+                    larger['detections'] += smaller['detections']
+                    
+                    tracks_to_remove.add(smaller['track_id'])
+                    merged_count += 1
+        
+        # Remove merged tracks
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+        
+        if merged_count > 0:
+            LOGGER.info("Overlap merge: merged %d spurious parallel tracks, %d tracks remaining",
+                       merged_count, len(self.tracks))
+        
+        return merged_count
+
     def _calculate_iou(self, bbox1: List[float], bbox2: List[float]) -> float:
         """Calculate Intersection over Union between two bounding boxes.
         

@@ -431,10 +431,56 @@ class StreamWorker:
             
         self.event_state.update(filtered, ts, frame)
 
+    def _normalize_species(self, species: str) -> str:
+        """Normalize species name for comparison (lowercase, underscores)."""
+        return species.lower().replace(' ', '_').replace('-', '_').strip()
+
+    def _species_matches_exclude(self, detection_species: str, excludes: set) -> bool:
+        """Check if a detection species matches any exclude pattern.
+        
+        Supports:
+        - Exact match: "mammalia_rodentia_sciuridae" matches "mammalia_rodentia_sciuridae"
+        - Prefix match: "mammalia_rodentia_sciuridae_sciurus" matches "mammalia_rodentia_sciuridae"
+        - Common name match: "mammalia_rodentia_sciuridae" matches "squirrel"
+        """
+        from .species_names import get_common_name
+        
+        normalized = self._normalize_species(detection_species)
+        
+        for exclude in excludes:
+            exclude_norm = self._normalize_species(exclude)
+            
+            # Exact match
+            if normalized == exclude_norm:
+                return True
+            
+            # Detection starts with exclude (hierarchical match)
+            # e.g., "mammalia_rodentia_sciuridae_sciurus" starts with "mammalia_rodentia_sciuridae"
+            if normalized.startswith(exclude_norm + '_'):
+                return True
+            
+            # Exclude starts with detection (broader exclusion)
+            # e.g., excluding "mammalia_rodentia" should exclude "mammalia_rodentia_sciuridae"
+            if exclude_norm.startswith(normalized + '_'):
+                return True
+            
+            # Check if exclude is a substring (for family/order level matching)
+            # e.g., "sciuridae" in "mammalia_rodentia_sciuridae"
+            if exclude_norm in normalized:
+                return True
+        
+        # Also check common name match
+        common_name = get_common_name(detection_species).lower()
+        if common_name in excludes:
+            return True
+        
+        return False
+
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
-        includes = set(s.lower() for s in self.camera.include_species)
-        excludes = set(s.lower() for s in self.camera.exclude_species)
-        global_excludes = set(s.lower() for s in self.runtime.general.exclusion_list)
+        includes = set(self._normalize_species(s) for s in self.camera.include_species)
+        excludes = set(self._normalize_species(s) for s in self.camera.exclude_species)
+        global_excludes = set(self._normalize_species(s) for s in self.runtime.general.exclusion_list)
+        all_excludes = excludes | global_excludes
         
         # Get eBird filter mode if enabled
         ebird_mode = None
@@ -443,10 +489,18 @@ class StreamWorker:
         
         filtered: List[Detection] = []
         for det in detections:
-            label = det.species.lower()
-            if includes and label not in includes:
+            label = self._normalize_species(det.species)
+            
+            # Check includes (if specified, only allow listed species)
+            if includes and not any(
+                label == inc or label.startswith(inc + '_') or inc in label
+                for inc in includes
+            ):
                 continue
-            if label in excludes or label in global_excludes:
+            
+            # Check excludes (skip if matches any exclude pattern)
+            if all_excludes and self._species_matches_exclude(det.species, all_excludes):
+                LOGGER.debug("Excluding detection: %s (matches exclude list)", det.species)
                 continue
             
             # Apply eBird filtering for bird species

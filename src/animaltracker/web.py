@@ -1980,7 +1980,13 @@ class WebServer:
                                 <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
                             </button>
                         </div>
-                        <button class="today-btn" onclick="CalendarApp.goToToday()" title="Go to Today (T key)">Today</button>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <button class="filter-toggle-btn" id="filterToggleBtn" onclick="CalendarApp.toggleFilters()" title="Filters (F key)">
+                                <svg fill="currentColor" viewBox="0 0 24 24"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                                <span>Filters</span>
+                            </button>
+                            <button class="today-btn" onclick="CalendarApp.goToToday()" title="Go to Today (T key)">Today</button>
+                        </div>
                     </div>
                     
                     <!-- Picker Overlay (click outside to close) -->

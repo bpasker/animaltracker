@@ -365,43 +365,80 @@ class ObjectTracker:
         Returns:
             (category, specificity) where category is 'bird', 'mammal', 'animal', etc.
             and specificity is how specific the identification is (higher = more specific).
+            
+        Taxonomy levels (higher = more specific):
+            0 = "animal" (most generic)
+            1 = Class level: "mammal", "bird", "reptile"
+            2 = Order level: "rodent", "carnivora", "passeriformes"
+            3 = Family level: "sciuridae", "canidae", "felidae", "corvidae"
+            4+ = Genus/species level: specific species names
         """
         species_lower = species.lower().replace('-', '_').strip()
         
-        # Determine specificity (same logic as TrackInfo._calculate_specificity)
+        # Most generic
         if species_lower in {'animal', 'unknown'}:
-            specificity = 0
-            category = 'animal'
-        elif species_lower in {'bird', 'aves'}:
-            specificity = 1
-            category = 'bird'
-        elif species_lower in {'mammal', 'mammalia', 'mammalia_mammal'}:
-            specificity = 1
-            category = 'mammal'
-        elif species_lower in {'reptile', 'reptilia'}:
-            specificity = 1
-            category = 'reptile'
-        elif 'aves' in species_lower or 'bird' in species_lower:
-            specificity = 2 + species_lower.count('_')
-            category = 'bird'
-        elif 'mammalia' in species_lower or 'mammal' in species_lower:
-            specificity = 2 + species_lower.count('_')
-            category = 'mammal'
-        elif 'canidae' in species_lower or 'dog' in species_lower or 'coyote' in species_lower or 'fox' in species_lower:
-            specificity = 3 + species_lower.count('_')
-            category = 'mammal'
-        elif 'felidae' in species_lower or 'cat' in species_lower:
-            specificity = 3 + species_lower.count('_')
-            category = 'mammal'
-        elif 'carnivora' in species_lower or 'carnivore' in species_lower:
-            specificity = 2 + species_lower.count('_')
-            category = 'mammal'
-        else:
-            # Unknown - treat as generic animal
-            specificity = 1
-            category = 'animal'
+            return ('animal', 0)
         
-        return (category, specificity)
+        # Class level (specificity 1)
+        if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal', 
+                             'reptile', 'reptilia', 'amphibian', 'amphibia'}:
+            if 'mammal' in species_lower or species_lower == 'mammalia':
+                return ('mammal', 1)
+            elif species_lower in {'bird', 'aves'}:
+                return ('bird', 1)
+            elif species_lower in {'reptile', 'reptilia'}:
+                return ('reptile', 1)
+            return ('animal', 1)
+        
+        # Determine category from taxonomy string
+        category = 'animal'
+        if 'mammalia' in species_lower or 'mammal' in species_lower:
+            category = 'mammal'
+        elif 'aves' in species_lower or 'bird' in species_lower:
+            category = 'bird'
+        elif 'reptilia' in species_lower:
+            category = 'reptile'
+        
+        # Family level keywords (specificity 3) - FAMILIES are more specific than orders
+        family_keywords = {
+            # Mammal families
+            'sciuridae', 'canidae', 'felidae', 'cervidae', 'ursidae', 'mustelidae',
+            'procyonidae', 'leporidae', 'muridae', 'cricetidae', 'didelphidae',
+            # Bird families  
+            'corvidae', 'accipitridae', 'strigidae', 'anatidae', 'columbidae',
+            'picidae', 'trochilidae', 'turdidae', 'fringillidae', 'passeridae',
+        }
+        
+        # Order level keywords (specificity 2)
+        order_keywords = {
+            # Mammal orders
+            'rodent', 'rodentia', 'carnivora', 'carnivore', 'artiodactyla', 
+            'lagomorpha', 'chiroptera', 'didelphimorphia',
+            # Bird orders
+            'passeriformes', 'passerine', 'accipitriformes', 'strigiformes',
+            'anseriformes', 'columbiformes', 'piciformes', 'apodiformes',
+        }
+        
+        # Check for family-level match (specificity 3)
+        for family in family_keywords:
+            if family in species_lower:
+                # Add bonus for additional taxonomy depth
+                return (category, 3 + species_lower.count('_'))
+        
+        # Check for order-level match (specificity 2)
+        for order in order_keywords:
+            if order in species_lower:
+                return (category, 2 + max(0, species_lower.count('_') - 1))
+        
+        # Fallback: count underscores as proxy for taxonomy depth
+        underscore_count = species_lower.count('_')
+        if underscore_count >= 3:
+            # Likely genus_species or more specific
+            return (category, 4 + underscore_count)
+        elif underscore_count >= 1:
+            return (category, 2 + underscore_count)
+        
+        return (category, 1)
     
     def _species_compatible(self, species1: str, species2: str) -> bool:
         """Check if two species are compatible for merging.

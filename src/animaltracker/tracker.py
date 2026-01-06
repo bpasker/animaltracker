@@ -43,6 +43,8 @@ class TrackInfo:
     best_frame: Optional[np.ndarray] = None
     best_confidence: float = 0.0
     best_bbox: Optional[List[float]] = None
+    # Store best frame per species for better key frame selection after merging
+    species_best_frames: Dict[str, Tuple[np.ndarray, float, List[float]]] = field(default_factory=dict)
     
     def add_classification(
         self, 
@@ -63,12 +65,21 @@ class TrackInfo:
         ))
         self.last_seen_frame = frame_idx
         
-        # Keep the best frame (highest confidence)
+        # Keep the best frame overall (highest confidence)
         if confidence > self.best_confidence:
             self.best_confidence = confidence
             self.best_bbox = bbox
             if frame is not None:
                 self.best_frame = frame.copy()
+        
+        # Also track best frame per species (for key frame extraction)
+        if frame is not None:
+            if species not in self.species_best_frames:
+                self.species_best_frames[species] = (frame.copy(), confidence, bbox)
+            else:
+                existing_conf = self.species_best_frames[species][1]
+                if confidence > existing_conf:
+                    self.species_best_frames[species] = (frame.copy(), confidence, bbox)
     
     def get_best_species(self) -> Tuple[str, float, Optional[str]]:
         """Determine the best species based on accumulated classifications.
@@ -141,6 +152,29 @@ class TrackInfo:
         if self.best_frame is None:
             return None
         return (self.best_frame, self.best_confidence, self.best_bbox)
+    
+    def get_best_frame_for_species(self, target_species: str) -> Optional[Tuple[np.ndarray, float, List[float]]]:
+        """Get the best frame for a specific species in this track.
+        
+        After track merging, we may want the best frame specifically for the
+        selected species (e.g., bovidae), not the overall highest confidence
+        frame (which might be a generic "animal" detection).
+        
+        Args:
+            target_species: The species name to find the best frame for
+            
+        Returns:
+            (frame, confidence, bbox) tuple or None if no matching frame stored
+        """
+        # Check species_best_frames first (preferred)
+        if target_species in self.species_best_frames:
+            return self.species_best_frames[target_species]
+        
+        # Fall back to overall best frame if species not found
+        if self.best_frame is not None:
+            return (self.best_frame, self.best_confidence, self.best_bbox)
+        
+        return None
     
     def _calculate_specificity(self, species: str) -> int:
         """Calculate how specific a species name is.
@@ -548,6 +582,13 @@ class ObjectTracker:
                         primary.best_bbox = other.best_bbox
                         primary.best_frame = other.best_frame
                     
+                    # Merge species_best_frames (keep best confidence per species)
+                    for sp, frame_data in other.species_best_frames.items():
+                        if sp not in primary.species_best_frames:
+                            primary.species_best_frames[sp] = frame_data
+                        elif frame_data[1] > primary.species_best_frames[sp][1]:
+                            primary.species_best_frames[sp] = frame_data
+                    
                     tracks_to_remove.add(other_id)
                     merged_count += 1
                 else:
@@ -682,6 +723,13 @@ class ObjectTracker:
                     specific_info.best_bbox = generic_info.best_bbox
                     specific_info.best_frame = generic_info.best_frame
                 
+                # Merge species_best_frames (keep best confidence per species)
+                for sp, frame_data in generic_info.species_best_frames.items():
+                    if sp not in specific_info.species_best_frames:
+                        specific_info.species_best_frames[sp] = frame_data
+                    elif frame_data[1] > specific_info.species_best_frames[sp][1]:
+                        specific_info.species_best_frames[sp] = frame_data
+                
                 tracks_to_remove.add(generic['track_id'])
                 merged_count += 1
         
@@ -766,6 +814,13 @@ class ObjectTracker:
                                                 other_info.first_seen_frame)
             primary_info.last_seen_frame = max(primary_info.last_seen_frame, 
                                                other_info.last_seen_frame)
+            
+            # Merge species_best_frames (keep best confidence per species)
+            for sp, frame_data in other_info.species_best_frames.items():
+                if sp not in primary_info.species_best_frames:
+                    primary_info.species_best_frames[sp] = frame_data
+                elif frame_data[1] > primary_info.species_best_frames[sp][1]:
+                    primary_info.species_best_frames[sp] = frame_data
             
             tracks_to_remove.add(other['track_id'])
             merged_count += 1
@@ -928,6 +983,13 @@ class ObjectTracker:
                         earlier_info.best_confidence = later_info.best_confidence
                         earlier_info.best_bbox = later_info.best_bbox
                         earlier_info.best_frame = later_info.best_frame
+                    
+                    # Merge species_best_frames (keep best confidence per species)
+                    for sp, frame_data in later_info.species_best_frames.items():
+                        if sp not in earlier_info.species_best_frames:
+                            earlier_info.species_best_frames[sp] = frame_data
+                        elif frame_data[1] > earlier_info.species_best_frames[sp][1]:
+                            earlier_info.species_best_frames[sp] = frame_data
                     
                     # Update the earlier track's last_bbox for chaining
                     earlier['last_bbox'] = later['last_bbox']

@@ -745,7 +745,13 @@ class ClipPostProcessor:
             
             if best_species in species_results:
                 result = species_results[best_species]
-                best_frame_data = track_info.get_best_frame()
+                # Use get_best_frame_for_species to get a frame that matches the selected species
+                # This is important after track merging where the overall best frame might be
+                # from a different (more generic) classification like "animal"
+                best_frame_data = track_info.get_best_frame_for_species(best_species)
+                if not best_frame_data:
+                    # Fall back to overall best frame if no species-specific frame
+                    best_frame_data = track_info.get_best_frame()
                 if best_frame_data:
                     frame, conf, bbox = best_frame_data
                     self._update_key_frames(result, frame, conf, bbox)

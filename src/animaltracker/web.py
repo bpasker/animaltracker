@@ -458,10 +458,21 @@ class WebServer:
         
         Returns list of dicts with 'path' (relative to clips dir), 'species', 'url'
         """
+        import os
+        
         clips_dir = self.storage_root / 'clips'
         clip_stem = clip_path.stem
         clip_dir = clip_path.parent
         thumbnails = []
+        
+        # Force NFS directory cache refresh by opening and syncing the directory
+        try:
+            dir_fd = os.open(str(clip_dir), os.O_RDONLY | os.O_DIRECTORY)
+            os.fsync(dir_fd)
+            os.close(dir_fd)
+            LOGGER.info("Forced NFS directory sync for: %s", clip_dir)
+        except Exception as e:
+            LOGGER.warning("Could not sync directory %s: %s", clip_dir, e)
         
         # Debug: Log what we're looking for
         glob_pattern = f"{clip_stem}_thumb_*.jpg"
@@ -1133,8 +1144,18 @@ class WebServer:
         
         detector = next(iter(self.workers.values())).detector
         
-        # Track this reprocessing job
+        # Prevent duplicate processing - check if already in progress
         job_key = clip_path
+        if job_key in self.reprocessing_jobs:
+            existing = self.reprocessing_jobs[job_key]
+            LOGGER.warning("Duplicate reprocess request for %s, already started at %s", 
+                          clip_path, existing.get('started'))
+            return web.json_response({
+                'success': False,
+                'error': f"Processing already in progress (started {existing.get('started')})"
+            }, status=409)  # Conflict
+        
+        # Track this reprocessing job
         self.reprocessing_jobs[job_key] = {
             'started': datetime.now(tz=CENTRAL_TZ).isoformat(),
             'clip_name': full_path.stem,

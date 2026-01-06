@@ -4608,6 +4608,14 @@ class WebServer:
                             </label>
                             <span class="setting-help">Force merge ALL non-overlapping tracks into one</span>
                         </div>
+                        
+                        <div class="setting-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="thumbnailCropped" {"checked" if clip_info['global_settings']['thumbnail_cropped'] else ""}>
+                                Cropped Thumbnails
+                            </label>
+                            <span class="setting-help">Zoom thumbnails to detection area (off = full frame with bbox)</span>
+                        </div>
                     </div>
                     
                     <div class="settings-actions">
@@ -4689,6 +4697,7 @@ class WebServer:
                             tracking_enabled: document.getElementById('trackingEnabled').checked,
                             hierarchical_merge_enabled: document.getElementById('hierarchicalMerge').checked,
                             single_animal_mode: document.getElementById('singleAnimalMode').checked,
+                            thumbnail_cropped: document.getElementById('thumbnailCropped').checked,
                             merge_enabled: true
                         }};
                         
@@ -4748,6 +4757,7 @@ class WebServer:
                         document.getElementById('spatialIoU').value = {clip_info['global_settings']['spatial_merge_iou']:.2f};
                         document.getElementById('hierarchicalMerge').checked = {'true' if clip_info['global_settings']['hierarchical_merge_enabled'] else 'false'};
                         document.getElementById('singleAnimalMode').checked = {'true' if clip_info['global_settings']['single_animal_mode'] else 'false'};
+                        document.getElementById('thumbnailCropped').checked = {'true' if clip_info['global_settings']['thumbnail_cropped'] else 'false'};
                     }}
                     
                     // Processing log functions
@@ -5018,6 +5028,7 @@ class WebServer:
             'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3) if clip_cfg else 0.3,
             'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True) if clip_cfg else True,
             'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False) if clip_cfg else False,
+            'thumbnail_cropped': getattr(clip_cfg, 'thumbnail_cropped', True) if clip_cfg else True,
         }
         
         return {

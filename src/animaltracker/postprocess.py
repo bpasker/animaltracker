@@ -1074,15 +1074,28 @@ class ClipPostProcessor:
         """
         saved = []
         clip_stem = clip_path.stem
+        clip_dir = clip_path.parent
         
         LOGGER.info("Saving thumbnails for clip: %s (stem=%s, parent=%s)", 
-                   clip_path, clip_stem, clip_path.parent)
+                   clip_path, clip_stem, clip_dir)
+        
+        # Force NFS directory cache refresh before deleting old thumbnails
+        # This ensures we see all files that exist on the server
+        try:
+            dir_fd = os.open(str(clip_dir), os.O_RDONLY | os.O_DIRECTORY)
+            os.fsync(dir_fd)
+            os.close(dir_fd)
+            LOGGER.debug("Forced NFS directory sync before thumbnail cleanup")
+        except Exception as e:
+            LOGGER.debug("Could not sync directory before cleanup: %s", e)
         
         # First, remove old thumbnails for this clip
-        for old_thumb in clip_path.parent.glob(f"{clip_stem}_thumb_*.jpg"):
+        old_thumbs = list(clip_dir.glob(f"{clip_stem}_thumb_*.jpg"))
+        LOGGER.info("Found %d old thumbnails to remove for %s", len(old_thumbs), clip_stem)
+        for old_thumb in old_thumbs:
             try:
                 old_thumb.unlink()
-                LOGGER.debug("Removed old thumbnail: %s", old_thumb)
+                LOGGER.info("Removed old thumbnail: %s", old_thumb)
             except Exception as e:
                 LOGGER.warning("Failed to remove old thumbnail %s: %s", old_thumb, e)
         
@@ -1167,9 +1180,18 @@ class ClipPostProcessor:
         """
         saved = []
         clip_stem = clip_path.stem
+        clip_dir = clip_path.parent
+        
+        # Force NFS directory cache refresh before deleting old thumbnails
+        try:
+            dir_fd = os.open(str(clip_dir), os.O_RDONLY | os.O_DIRECTORY)
+            os.fsync(dir_fd)
+            os.close(dir_fd)
+        except Exception:
+            pass
         
         # First, remove old thumbnails for this clip
-        for old_thumb in clip_path.parent.glob(f"{clip_stem}_thumb_*.jpg"):
+        for old_thumb in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
             try:
                 old_thumb.unlink()
             except Exception as e:

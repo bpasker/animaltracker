@@ -87,6 +87,10 @@ class WebServer:
         self.app.router.add_get('/api/settings', self.handle_get_settings)
         self.app.router.add_post('/api/settings', self.handle_update_settings)
         
+        # Calendar API endpoints
+        self.app.router.add_get('/api/recordings/calendar', self.handle_calendar_api)
+        self.app.router.add_get('/api/recordings/day/{date}', self.handle_day_api)
+        
         # Serve clips directory statically
         clips_path = self.storage_root / 'clips'
         # Ensure it exists so static route doesn't fail on startup
@@ -554,6 +558,196 @@ class WebServer:
         
         return ', '.join(unique[:3])  # Limit to 3 species for display
 
+    def _build_calendar_data(self, clips: list) -> dict:
+        """
+        Group clips into hierarchical calendar structure.
+        
+        Returns dict with years -> months -> days structure plus filter options.
+        """
+        from collections import defaultdict
+        
+        # Nested defaultdict for year -> month -> day
+        years_data = defaultdict(lambda: {'total': 0, 'months': defaultdict(lambda: {'total': 0, 'days': {}})})
+        all_cameras = set()
+        all_species = set()
+        
+        for clip in clips:
+            clip_time = clip['time']
+            year = clip_time.year
+            month = clip_time.month
+            day = clip_time.day
+            camera = clip['camera']
+            species = clip.get('species', 'Unknown')
+            
+            all_cameras.add(camera)
+            # Handle comma-separated species
+            for sp in species.split(', '):
+                if sp and sp != 'Unknown':
+                    all_species.add(sp)
+            
+            # Increment totals
+            years_data[year]['total'] += 1
+            years_data[year]['months'][month]['total'] += 1
+            
+            # Initialize or update day data
+            day_key = day
+            if day_key not in years_data[year]['months'][month]['days']:
+                years_data[year]['months'][month]['days'][day_key] = {
+                    'count': 0,
+                    'species': set(),
+                    'cameras': set(),
+                    'first_clip_time': clip_time.strftime('%H:%M'),
+                    'last_clip_time': clip_time.strftime('%H:%M'),
+                    'clips': []  # Store clip refs for quick access
+                }
+            
+            day_data = years_data[year]['months'][month]['days'][day_key]
+            day_data['count'] += 1
+            day_data['cameras'].add(camera)
+            for sp in species.split(', '):
+                if sp and sp != 'Unknown':
+                    day_data['species'].add(sp)
+            
+            # Update time range
+            clip_time_str = clip_time.strftime('%H:%M')
+            if clip_time_str < day_data['first_clip_time']:
+                day_data['first_clip_time'] = clip_time_str
+            if clip_time_str > day_data['last_clip_time']:
+                day_data['last_clip_time'] = clip_time_str
+        
+        # Convert sets to lists and defaultdicts to regular dicts for JSON serialization
+        result_years = {}
+        for year, year_data in sorted(years_data.items(), reverse=True):
+            result_years[str(year)] = {
+                'total': year_data['total'],
+                'months': {}
+            }
+            for month, month_data in sorted(year_data['months'].items(), reverse=True):
+                result_years[str(year)]['months'][str(month)] = {
+                    'total': month_data['total'],
+                    'days': {}
+                }
+                for day, day_data in sorted(month_data['days'].items(), reverse=True):
+                    result_years[str(year)]['months'][str(month)]['days'][str(day)] = {
+                        'count': day_data['count'],
+                        'species': sorted(list(day_data['species'])),
+                        'cameras': sorted(list(day_data['cameras'])),
+                        'first_clip_time': day_data['first_clip_time'],
+                        'last_clip_time': day_data['last_clip_time']
+                    }
+        
+        return {
+            'years': result_years,
+            'filters': {
+                'cameras': sorted(list(all_cameras)),
+                'species': sorted(list(all_species))
+            }
+        }
+
+    def _get_clips_for_date(self, clips: list, date_str: str, camera: str = None, species: str = None) -> dict:
+        """
+        Filter clips for a specific date with optional filters.
+        
+        Args:
+            clips: Full list of clips from _scan_recordings
+            date_str: "YYYY-MM-DD" format
+            camera: Optional camera filter
+            species: Optional species filter
+        
+        Returns:
+            Dict with clips list and summary stats
+        """
+        from collections import defaultdict
+        
+        filtered = []
+        by_species = defaultdict(int)
+        by_camera = defaultdict(int)
+        by_hour = defaultdict(int)
+        
+        for clip in clips:
+            clip_date = clip['time'].strftime('%Y-%m-%d')
+            if clip_date != date_str:
+                continue
+            
+            # Apply camera filter
+            if camera and clip['camera'] != camera:
+                continue
+            
+            # Apply species filter
+            clip_species = clip.get('species', 'Unknown')
+            if species and species.lower() not in clip_species.lower():
+                continue
+            
+            # Build clip response object
+            clip_hour = clip['time'].hour
+            clip_data = {
+                'path': clip['path'],
+                'camera': clip['camera'],
+                'time': clip['time'].strftime('%H:%M:%S'),
+                'time_display': clip['time'].strftime('%I:%M %p'),
+                'hour': clip_hour,
+                'species': clip_species,
+                'size_mb': round(clip['size'] / (1024 * 1024), 2),
+                'filename': clip['filename'],
+                'thumbnails': [
+                    {'url': f"/clips/{t['path']}", 'species': t['species']}
+                    for t in clip.get('thumbnails', [])
+                ]
+            }
+            filtered.append(clip_data)
+            
+            # Update stats
+            by_camera[clip['camera']] += 1
+            by_hour[clip_hour] += 1
+            for sp in clip_species.split(', '):
+                if sp:
+                    by_species[sp] += 1
+        
+        # Sort by time
+        filtered.sort(key=lambda x: x['time'])
+        
+        # Find peak hour
+        peak_hour = max(by_hour.keys(), key=lambda h: by_hour[h]) if by_hour else None
+        
+        return {
+            'date': date_str,
+            'clips': filtered,
+            'summary': {
+                'total': len(filtered),
+                'by_species': dict(by_species),
+                'by_camera': dict(by_camera),
+                'by_hour': dict(by_hour),
+                'peak_hour': peak_hour
+            }
+        }
+
+    async def handle_calendar_api(self, request):
+        """GET /api/recordings/calendar - Returns full calendar structure as JSON"""
+        loop = asyncio.get_running_loop()
+        clips = await loop.run_in_executor(None, self._scan_recordings)
+        calendar_data = self._build_calendar_data(clips)
+        return web.json_response(calendar_data)
+
+    async def handle_day_api(self, request):
+        """GET /api/recordings/day/{date} - Returns clips for specific date"""
+        date_str = request.match_info.get('date')
+        
+        # Validate date format
+        try:
+            datetime.strptime(date_str, '%Y-%m-%d')
+        except ValueError:
+            return web.json_response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
+        
+        # Get optional filters from query params
+        camera = request.query.get('camera')
+        species = request.query.get('species')
+        
+        loop = asyncio.get_running_loop()
+        clips = await loop.run_in_executor(None, self._scan_recordings)
+        day_data = self._get_clips_for_date(clips, date_str, camera, species)
+        
+        return web.json_response(day_data)
+
     async def handle_recordings(self, request):
         loop = asyncio.get_running_loop()
         clips = await loop.run_in_executor(None, self._scan_recordings)
@@ -561,6 +755,9 @@ class WebServer:
         if not clips and not (self.storage_root / 'clips').exists():
              return web.Response(text="No recordings found (clips directory missing)", content_type='text/html')
 
+        # Get current date for default view
+        now = datetime.now(CENTRAL_TZ)
+        
         html = """
         <html>
             <head>
@@ -598,7 +795,305 @@ class WebServer:
                     .nav a:hover, .nav a.active { background: #4CAF50; }
                     h1 { font-size: 1.5em; margin: 0 0 16px 0; font-weight: 600; }
                     
-                    /* Card-based layout for recordings */
+                    /* Calendar Container */
+                    .calendar-container { background: #1a1a1a; border-radius: 12px; padding: 0; }
+                    .calendar-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+                    .calendar-nav { display: flex; align-items: center; gap: 12px; }
+                    .nav-btn { 
+                        background: #333; 
+                        border: none; 
+                        color: #fff; 
+                        width: 40px; 
+                        height: 40px; 
+                        border-radius: 8px; 
+                        cursor: pointer; 
+                        font-size: 1.2em;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        transition: background 0.2s;
+                    }
+                    .nav-btn:hover { background: #444; }
+                    .nav-btn:active { background: #555; }
+                    .current-month { font-size: 1.3em; font-weight: 600; margin: 0; min-width: 180px; text-align: center; }
+                    .today-btn {
+                        background: #333;
+                        border: none;
+                        color: #4CAF50;
+                        padding: 8px 16px;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 0.9em;
+                        font-weight: 500;
+                        transition: background 0.2s;
+                    }
+                    .today-btn:hover { background: #444; }
+
+                    /* View Tabs */
+                    .view-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+                    .view-tab { 
+                        background: #333; 
+                        border: none; 
+                        color: #aaa; 
+                        padding: 10px 20px; 
+                        border-radius: 8px; 
+                        cursor: pointer;
+                        font-size: 0.95em;
+                        font-weight: 500;
+                        transition: background 0.2s, color 0.2s;
+                    }
+                    .view-tab:hover { background: #444; color: #fff; }
+                    .view-tab.active { background: #4CAF50; color: white; }
+
+                    /* Calendar Grid */
+                    .calendar-grid { 
+                        display: grid; 
+                        grid-template-columns: repeat(7, 1fr); 
+                        gap: 4px;
+                        margin-bottom: 16px;
+                    }
+                    .calendar-weekday { 
+                        text-align: center; 
+                        padding: 12px 8px; 
+                        color: #888; 
+                        font-size: 0.85em; 
+                        font-weight: 600;
+                        text-transform: uppercase;
+                        letter-spacing: 0.5px;
+                    }
+                    .calendar-day { 
+                        min-height: 80px; 
+                        background: #2a2a2a; 
+                        border-radius: 8px; 
+                        padding: 8px; 
+                        cursor: pointer; 
+                        position: relative;
+                        transition: background 0.15s, transform 0.15s;
+                    }
+                    .calendar-day:hover { background: #333; }
+                    .calendar-day:active { transform: scale(0.98); }
+                    .calendar-day.today { border: 2px solid #4CAF50; }
+                    .calendar-day.selected { border: 2px solid #2196F3; background: #1a3a5a; }
+                    .calendar-day.selected.has-recordings { background: #1a4a3a; }
+                    .calendar-day.has-recordings { background: #1e3a1e; }
+                    .calendar-day.has-recordings:hover { background: #264a26; }
+                    .calendar-day.other-month { opacity: 0.4; }
+                    .calendar-day.other-month:hover { opacity: 0.6; }
+                    .day-number { 
+                        font-size: 0.95em; 
+                        font-weight: 600;
+                        color: #ccc;
+                    }
+                    .calendar-day.today .day-number { color: #4CAF50; }
+                    .calendar-day.selected .day-number { color: #2196F3; }
+                    .day-count { 
+                        position: absolute; 
+                        bottom: 6px; 
+                        right: 6px; 
+                        background: #4CAF50; 
+                        color: white; 
+                        font-size: 0.75em; 
+                        font-weight: 600;
+                        padding: 3px 10px; 
+                        border-radius: 12px;
+                    }
+                    .day-species {
+                        position: absolute;
+                        bottom: 6px;
+                        left: 6px;
+                        font-size: 0.7em;
+                        color: #888;
+                        max-width: 60%;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }
+                    .day-cameras {
+                        position: absolute;
+                        top: 6px;
+                        right: 6px;
+                        font-size: 0.7em;
+                        color: #666;
+                    }
+                    .day-time-range {
+                        font-size: 0.65em;
+                        color: #666;
+                        margin-top: 2px;
+                    }
+
+                    /* Month Summary Stats */
+                    .month-stats {
+                        display: flex;
+                        gap: 12px;
+                        margin-bottom: 16px;
+                        padding: 12px;
+                        background: #2a2a2a;
+                        border-radius: 8px;
+                        flex-wrap: wrap;
+                    }
+                    .month-stat {
+                        flex: 1;
+                        min-width: 80px;
+                        text-align: center;
+                        padding: 8px;
+                    }
+                    .month-stat-value {
+                        font-size: 1.4em;
+                        font-weight: 700;
+                        color: #4CAF50;
+                    }
+                    .month-stat-label {
+                        font-size: 0.75em;
+                        color: #888;
+                        text-transform: uppercase;
+                        letter-spacing: 0.5px;
+                        margin-top: 2px;
+                    }
+                    .month-stat.empty .month-stat-value {
+                        color: #555;
+                    }
+
+                    /* Year Navigation Mini */
+                    .year-nav {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        margin-left: 16px;
+                    }
+                    .year-btn {
+                        background: #333;
+                        border: none;
+                        color: #888;
+                        padding: 4px 8px;
+                        border-radius: 4px;
+                        cursor: pointer;
+                        font-size: 0.8em;
+                    }
+                    .year-btn:hover { background: #444; color: #fff; }
+
+                    /* Month/Year Picker */
+                    .month-picker {
+                        position: relative;
+                        display: inline-block;
+                    }
+                    .current-month {
+                        cursor: pointer;
+                        padding: 4px 8px;
+                        border-radius: 6px;
+                        transition: background 0.2s;
+                    }
+                    .current-month:hover {
+                        background: #333;
+                    }
+                    .picker-dropdown {
+                        position: absolute;
+                        top: 100%;
+                        left: 50%;
+                        transform: translateX(-50%);
+                        background: #2a2a2a;
+                        border-radius: 12px;
+                        padding: 16px;
+                        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                        z-index: 200;
+                        display: none;
+                        min-width: 280px;
+                    }
+                    .picker-dropdown.visible {
+                        display: block;
+                    }
+                    .picker-year-nav {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        margin-bottom: 12px;
+                        padding-bottom: 12px;
+                        border-bottom: 1px solid #444;
+                    }
+                    .picker-year {
+                        font-size: 1.1em;
+                        font-weight: 600;
+                        color: #fff;
+                    }
+                    .picker-year-btn {
+                        background: #333;
+                        border: none;
+                        color: #fff;
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 1em;
+                    }
+                    .picker-year-btn:hover { background: #444; }
+                    .picker-months {
+                        display: grid;
+                        grid-template-columns: repeat(3, 1fr);
+                        gap: 8px;
+                    }
+                    .picker-month {
+                        background: #333;
+                        border: none;
+                        color: #aaa;
+                        padding: 10px 8px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 0.85em;
+                        transition: background 0.15s, color 0.15s;
+                    }
+                    .picker-month:hover {
+                        background: #444;
+                        color: #fff;
+                    }
+                    .picker-month.current {
+                        background: #4CAF50;
+                        color: white;
+                    }
+                    .picker-month.selected {
+                        border: 2px solid #2196F3;
+                    }
+                    .picker-overlay {
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        bottom: 0;
+                        z-index: 199;
+                        display: none;
+                    }
+                    .picker-overlay.visible {
+                        display: block;
+                    }
+
+                    /* Day Panel (slide-in for day details) */
+                    .day-panel-container {
+                        position: fixed;
+                        top: 0;
+                        right: -100%;
+                        width: 100%;
+                        max-width: 450px;
+                        height: 100%;
+                        background: #1a1a1a;
+                        z-index: 500;
+                        transition: right 0.3s ease;
+                        overflow-y: auto;
+                        box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+                    }
+                    .day-panel-container.visible { right: 0; }
+                    .day-panel-overlay {
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        bottom: 0;
+                        background: rgba(0,0,0,0.5);
+                        z-index: 499;
+                        opacity: 0;
+                        visibility: hidden;
+                        transition: opacity 0.3s, visibility 0.3s;
+                    }
+                    .day-panel-overlay.visible { opacity: 1; visibility: visible; }
+                    
+                    /* Card-based layout for recordings (used in list view) */
                     .recordings-list { display: flex; flex-direction: column; gap: 12px; }
                     .recording-card {
                         background: #2a2a2a;
@@ -800,24 +1295,138 @@ class WebServer:
                     }
                     .empty-state svg { width: 64px; height: 64px; margin-bottom: 16px; opacity: 0.5; }
                     
+                    /* Loading spinner */
+                    .loading {
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 40px;
+                        color: #888;
+                    }
+                    .loading::after {
+                        content: '';
+                        width: 24px;
+                        height: 24px;
+                        border: 3px solid #333;
+                        border-top-color: #4CAF50;
+                        border-radius: 50%;
+                        animation: spin 0.8s linear infinite;
+                        margin-left: 12px;
+                    }
+                    @keyframes spin {
+                        to { transform: rotate(360deg); }
+                    }
+                    
+                    /* Hide elements based on view */
+                    .calendar-view-only { display: none; }
+                    .list-view-only { display: block; }
+                    body.view-month .calendar-view-only { display: block; }
+                    body.view-month .list-view-only { display: none; }
+                    
                     /* Desktop adjustments */
                     @media (min-width: 768px) {
-                        body { padding: 24px; max-width: 900px; margin: 0 auto; }
+                        body { padding: 24px; max-width: 1100px; margin: 0 auto; }
+                        .calendar-day { min-height: 90px; }
+                        .day-panel-container { max-width: 500px; }
                         .recordings-list { gap: 8px; }
                         .recording-card { padding: 14px 18px; }
                     }
+                    
+                    /* Mobile adjustments for calendar */
+                    @media (max-width: 480px) {
+                        .calendar-day { min-height: 60px; padding: 6px; }
+                        .day-number { font-size: 0.85em; }
+                        .day-count { font-size: 0.65em; padding: 2px 6px; }
+                        .day-species { display: none; }
+                        .current-month { font-size: 1.1em; min-width: 140px; }
+                        .nav-btn { width: 36px; height: 36px; }
+                    }
                 </style>
             </head>
-            <body>
+            <body class="view-month">
                 <div class="nav">
                     <a href="/">Live View</a>
                     <a href="/recordings" class="active">Recordings</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
-                <h1>Recordings</h1>
                 
-                <div class="recordings-list">
+                <div class="calendar-container">
+                    <!-- Calendar Header with Navigation -->
+                    <div class="calendar-header">
+                        <div class="calendar-nav">
+                            <button class="nav-btn" onclick="CalendarApp.prevMonth()" title="Previous Month (← key)">
+                                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+                            </button>
+                            <div class="month-picker">
+                                <h2 class="current-month" id="currentMonth" onclick="CalendarApp.togglePicker()" title="Click to jump to month">January 2026</h2>
+                                <div class="picker-dropdown" id="pickerDropdown">
+                                    <div class="picker-year-nav">
+                                        <button class="picker-year-btn" onclick="CalendarApp.pickerPrevYear()">‹</button>
+                                        <span class="picker-year" id="pickerYear">2026</span>
+                                        <button class="picker-year-btn" onclick="CalendarApp.pickerNextYear()">›</button>
+                                    </div>
+                                    <div class="picker-months" id="pickerMonths">
+                                        <!-- Months rendered by JS -->
+                                    </div>
+                                </div>
+                            </div>
+                            <button class="nav-btn" onclick="CalendarApp.nextMonth()" title="Next Month (→ key)">
+                                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+                            </button>
+                        </div>
+                        <button class="today-btn" onclick="CalendarApp.goToToday()" title="Go to Today (T key)">Today</button>
+                    </div>
+                    
+                    <!-- Picker Overlay (click outside to close) -->
+                    <div class="picker-overlay" id="pickerOverlay" onclick="CalendarApp.closePicker()"></div>
+                    
+                    <!-- View Tabs -->
+                    <div class="view-tabs">
+                        <button class="view-tab active" id="tabMonth" onclick="CalendarApp.setView('month')">📅 Month</button>
+                        <button class="view-tab" id="tabList" onclick="CalendarApp.setView('list')">📋 List</button>
+                    </div>
+                    
+                    <!-- Calendar Grid (Month View) -->
+                    <div class="calendar-view-only">
+                        <!-- Month Summary Stats -->
+                        <div class="month-stats" id="monthStats">
+                            <div class="month-stat">
+                                <div class="month-stat-value" id="statTotal">-</div>
+                                <div class="month-stat-label">Recordings</div>
+                            </div>
+                            <div class="month-stat">
+                                <div class="month-stat-value" id="statDays">-</div>
+                                <div class="month-stat-label">Active Days</div>
+                            </div>
+                            <div class="month-stat">
+                                <div class="month-stat-value" id="statTopSpecies">-</div>
+                                <div class="month-stat-label">Top Species</div>
+                            </div>
+                            <div class="month-stat">
+                                <div class="month-stat-value" id="statCameras">-</div>
+                                <div class="month-stat-label">Cameras</div>
+                            </div>
+                        </div>
+                        
+                        <div class="calendar-grid" id="calendarGrid">
+                            <!-- Weekday headers -->
+                            <div class="calendar-weekday">Sun</div>
+                            <div class="calendar-weekday">Mon</div>
+                            <div class="calendar-weekday">Tue</div>
+                            <div class="calendar-weekday">Wed</div>
+                            <div class="calendar-weekday">Thu</div>
+                            <div class="calendar-weekday">Fri</div>
+                            <div class="calendar-weekday">Sat</div>
+                            <!-- Day cells will be rendered by JavaScript -->
+                        </div>
+                        <div class="loading" id="calendarLoading">Loading calendar...</div>
+                    </div>
+                </div>
+                
+                <!-- List View (original recordings list) -->
+                <div class="list-view-only">
+                    <div class="recordings-list" id="recordingsList">
         """
         
         for clip in clips:
@@ -829,34 +1438,43 @@ class WebServer:
             thumbnail_badge = f'<span class="thumbnail-badge">📸 {thumbnail_count}</span>' if thumbnail_count > 0 else ''
             
             html += f"""
-                    <div class="recording-card" onclick="window.location.href='/recording/{url_encoded_path}'">
-                        <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
-                        <div class="recording-info">
-                            <div class="recording-species">🐾 {species_display} {thumbnail_badge}</div>
-                            <div class="recording-camera">{clip['camera']}</div>
-                            <div class="recording-time">{clip['time'].strftime('%b %d, %Y at %I:%M %p')}</div>
-                            <div class="recording-meta">{size_mb:.1f} MB</div>
+                        <div class="recording-card" onclick="window.location.href='/recording/{url_encoded_path}'">
+                            <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
+                            <div class="recording-info">
+                                <div class="recording-species">🐾 {species_display} {thumbnail_badge}</div>
+                                <div class="recording-camera">{clip['camera']}</div>
+                                <div class="recording-time">{clip['time'].strftime('%b %d, %Y at %I:%M %p')}</div>
+                                <div class="recording-meta">{size_mb:.1f} MB</div>
+                            </div>
+                            <div class="recording-actions">
+                                <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}');" title="Quick Play">
+                                    <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                </button>
+                                <button class="action-btn delete-btn" onclick="event.stopPropagation(); deleteClip('{escaped_path}');" title="Delete">
+                                    <svg fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                                </button>
+                            </div>
                         </div>
-                        <div class="recording-actions">
-                            <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}');" title="Quick Play">
-                                <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                            </button>
-                            <button class="action-btn delete-btn" onclick="event.stopPropagation(); deleteClip('{escaped_path}');" title="Delete">
-                                <svg fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-                            </button>
-                        </div>
-                    </div>
             """
         
         if not clips:
             html += """
-                    <div class="empty-state">
-                        <svg fill="currentColor" viewBox="0 0 24 24"><path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/></svg>
-                        <p>No recordings yet</p>
-                    </div>
+                        <div class="empty-state">
+                            <svg fill="currentColor" viewBox="0 0 24 24"><path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/></svg>
+                            <p>No recordings yet</p>
+                        </div>
             """
             
-        html += """
+        html += f"""
+                    </div>
+                </div>
+                
+                <!-- Day Panel Overlay -->
+                <div class="day-panel-overlay" id="dayPanelOverlay" onclick="CalendarApp.closeDayPanel()"></div>
+                
+                <!-- Day Panel (slide-in) -->
+                <div class="day-panel-container" id="dayPanelContainer">
+                    <!-- Content will be rendered by JavaScript -->
                 </div>
                 
                 <!-- Bulk Actions Bar -->
@@ -890,9 +1508,695 @@ class WebServer:
                 </div>
                 
                 <script>
+                    // CalendarApp - Placeholder for Phase 2B-2E JavaScript
+                    const CalendarApp = {{
+                        // Application state
+                        state: {{
+                            view: 'month',           // 'month' or 'list'
+                            year: {now.year},
+                            month: {now.month},
+                            calendarData: null,      // Full calendar data from API
+                            selectedDate: null,      // Currently selected date (YYYY-MM-DD)
+                            dayClips: null,          // Clips for selected day
+                            loading: {{
+                                calendar: false,
+                                dayClips: false
+                            }},
+                            filters: {{               // Placeholder for Phase 4
+                                cameras: [],
+                                species: [],
+                                dateRange: {{ start: null, end: null }}
+                            }}
+                        }},
+                        
+                        // Month names for display
+                        MONTHS: ['January', 'February', 'March', 'April', 'May', 'June', 
+                                 'July', 'August', 'September', 'October', 'November', 'December'],
+                        
+                        // Initialize the application
+                        async init() {{
+                            this.parseUrlParams();
+                            this.render();
+                            await this.loadCalendarData();
+                        }},
+                        
+                        // Parse URL parameters to restore state
+                        parseUrlParams() {{
+                            const params = new URLSearchParams(window.location.search);
+                            
+                            // View mode
+                            const view = params.get('view');
+                            if (view === 'month' || view === 'list') {{
+                                this.state.view = view;
+                            }}
+                            
+                            // Year (validate it's a reasonable year)
+                            const year = parseInt(params.get('year'));
+                            if (year && year >= 2000 && year <= 2100) {{
+                                this.state.year = year;
+                            }}
+                            
+                            // Month (validate 1-12)
+                            const month = parseInt(params.get('month'));
+                            if (month && month >= 1 && month <= 12) {{
+                                this.state.month = month;
+                            }}
+                            
+                            // Selected date
+                            const date = params.get('date');
+                            if (date && /^\d{{4}}-\d{{2}}-\d{{2}}$/.test(date)) {{
+                                this.state.selectedDate = date;
+                            }}
+                        }},
+                        
+                        // Update URL to reflect current state (for bookmarking/sharing)
+                        updateUrl() {{
+                            const url = new URL(window.location);
+                            url.searchParams.set('view', this.state.view);
+                            url.searchParams.set('year', this.state.year);
+                            url.searchParams.set('month', this.state.month);
+                            
+                            if (this.state.selectedDate) {{
+                                url.searchParams.set('date', this.state.selectedDate);
+                            }} else {{
+                                url.searchParams.delete('date');
+                            }}
+                            
+                            history.replaceState({{}}, '', url);
+                        }},
+                        
+                        // Main render function - orchestrates all UI updates
+                        render() {{
+                            this.updateMonthDisplay();
+                            this.applyView();
+                            
+                            if (this.state.view === 'month' && this.state.calendarData) {{
+                                this.renderMonthView();
+                            }}
+                        }},
+                        
+                        // Update the month/year display in the header
+                        updateMonthDisplay() {{
+                            const monthName = this.MONTHS[this.state.month - 1];
+                            document.getElementById('currentMonth').textContent = `${{monthName}} ${{this.state.year}}`;
+                        }},
+                        
+                        // Apply the current view mode (month/list)
+                        applyView() {{
+                            document.body.className = 'view-' + this.state.view;
+                            document.getElementById('tabMonth').classList.toggle('active', this.state.view === 'month');
+                            document.getElementById('tabList').classList.toggle('active', this.state.view === 'list');
+                        }},
+                        
+                        // Switch between month and list views
+                        setView(view) {{
+                            if (this.state.view === view) return;
+                            this.state.view = view;
+                            this.render();
+                            this.updateUrl();
+                        }},
+                        
+                        // Navigate to previous month
+                        prevMonth() {{
+                            if (this.state.month === 1) {{
+                                this.state.month = 12;
+                                this.state.year--;
+                            }} else {{
+                                this.state.month--;
+                            }}
+                            this.state.selectedDate = null;
+                            this.render();
+                            this.updateUrl();
+                        }},
+                        
+                        // Navigate to next month
+                        nextMonth() {{
+                            if (this.state.month === 12) {{
+                                this.state.month = 1;
+                                this.state.year++;
+                            }} else {{
+                                this.state.month++;
+                            }}
+                            this.state.selectedDate = null;
+                            this.render();
+                            this.updateUrl();
+                        }},
+                        
+                        // Jump to today's date
+                        goToToday() {{
+                            const now = new Date();
+                            this.state.year = now.getFullYear();
+                            this.state.month = now.getMonth() + 1;
+                            this.state.selectedDate = null;
+                            this.render();
+                            this.updateUrl();
+                        }},
+                        
+                        // Navigate to a specific year/month
+                        goToMonth(year, month) {{
+                            this.state.year = year;
+                            this.state.month = month;
+                            this.state.selectedDate = null;
+                            this.closePicker();
+                            this.render();
+                            this.updateUrl();
+                        }},
+                        
+                        // Month/Year Picker state
+                        pickerYear: {now.year},
+                        
+                        // Toggle the month picker dropdown
+                        togglePicker() {{
+                            const dropdown = document.getElementById('pickerDropdown');
+                            const overlay = document.getElementById('pickerOverlay');
+                            const isVisible = dropdown.classList.contains('visible');
+                            
+                            if (isVisible) {{
+                                this.closePicker();
+                            }} else {{
+                                // Initialize picker year to current view year
+                                this.pickerYear = this.state.year;
+                                this.renderPicker();
+                                dropdown.classList.add('visible');
+                                overlay.classList.add('visible');
+                            }}
+                        }},
+                        
+                        // Close the picker
+                        closePicker() {{
+                            document.getElementById('pickerDropdown').classList.remove('visible');
+                            document.getElementById('pickerOverlay').classList.remove('visible');
+                        }},
+                        
+                        // Navigate picker to previous year
+                        pickerPrevYear() {{
+                            this.pickerYear--;
+                            this.renderPicker();
+                        }},
+                        
+                        // Navigate picker to next year
+                        pickerNextYear() {{
+                            this.pickerYear++;
+                            this.renderPicker();
+                        }},
+                        
+                        // Render the picker months grid
+                        renderPicker() {{
+                            const yearEl = document.getElementById('pickerYear');
+                            const monthsEl = document.getElementById('pickerMonths');
+                            const now = new Date();
+                            
+                            yearEl.textContent = this.pickerYear;
+                            
+                            const monthsHtml = this.MONTHS.map((name, idx) => {{
+                                const monthNum = idx + 1;
+                                const isCurrent = this.pickerYear === now.getFullYear() && monthNum === now.getMonth() + 1;
+                                const isSelected = this.pickerYear === this.state.year && monthNum === this.state.month;
+                                
+                                // Check if this month has recordings
+                                const hasData = this.state.calendarData?.years?.[String(this.pickerYear)]?.months?.[String(monthNum)];
+                                
+                                let classes = 'picker-month';
+                                if (isCurrent) classes += ' current';
+                                if (isSelected) classes += ' selected';
+                                
+                                const countBadge = hasData?.total ? ` (${{hasData.total}})` : '';
+                                
+                                return `<button class="${{classes}}" onclick="CalendarApp.goToMonth(${{this.pickerYear}}, ${{monthNum}})">${{name.slice(0, 3)}}${{countBadge}}</button>`;
+                            }}).join('');
+                            
+                            monthsEl.innerHTML = monthsHtml;
+                        }},
+                        
+                        // Get available years from calendar data
+                        getAvailableYears() {{
+                            const years = Object.keys(this.state.calendarData?.years || {{}}).map(Number).sort((a, b) => b - a);
+                            return years.length > 0 ? years : [new Date().getFullYear()];
+                        }},
+
+                        // Load calendar data from API
+                        async loadCalendarData() {{
+                            const loadingEl = document.getElementById('calendarLoading');
+                            
+                            try {{
+                                this.state.loading.calendar = true;
+                                loadingEl.style.display = 'flex';
+                                loadingEl.textContent = 'Loading calendar...';
+                                
+                                const res = await fetch('/api/recordings/calendar');
+                                
+                                if (!res.ok) {{
+                                    throw new Error(`HTTP ${{res.status}}: ${{res.statusText}}`);
+                                }}
+                                
+                                this.state.calendarData = await res.json();
+                                loadingEl.style.display = 'none';
+                                
+                                // Render after data is loaded
+                                this.render();
+                                
+                            }} catch (e) {{
+                                console.error('Failed to load calendar data:', e);
+                                loadingEl.innerHTML = `
+                                    <span style="color: #f44336;">Failed to load calendar</span>
+                                    <button onclick="CalendarApp.loadCalendarData()" 
+                                            style="margin-left: 12px; padding: 6px 12px; background: #333; 
+                                                   border: none; color: #fff; border-radius: 4px; cursor: pointer;">
+                                        Retry
+                                    </button>
+                                `;
+                            }} finally {{
+                                this.state.loading.calendar = false;
+                            }}
+                        }},
+                        
+                        // Load clips for a specific day
+                        async loadDayClips(dateStr) {{
+                            try {{
+                                this.state.loading.dayClips = true;
+                                
+                                const res = await fetch(`/api/recordings/day/${{dateStr}}`);
+                                
+                                if (!res.ok) {{
+                                    throw new Error(`HTTP ${{res.status}}: ${{res.statusText}}`);
+                                }}
+                                
+                                const data = await res.json();
+                                this.state.dayClips = data;
+                                this.state.selectedDate = dateStr;
+                                
+                                return data;
+                                
+                            }} catch (e) {{
+                                console.error('Failed to load day clips:', e);
+                                this.state.dayClips = null;
+                                throw e;
+                            }} finally {{
+                                this.state.loading.dayClips = false;
+                            }}
+                        }},
+                        
+                        // Get summary stats for current view
+                        getStats() {{
+                            const data = this.state.calendarData;
+                            if (!data) return null;
+                            
+                            const yearData = data.years?.[String(this.state.year)];
+                            const monthData = yearData?.months?.[String(this.state.month)];
+                            
+                            return {{
+                                yearTotal: yearData?.total || 0,
+                                monthTotal: monthData?.total || 0,
+                                cameras: data.filters?.cameras || [],
+                                species: data.filters?.species || []
+                            }};
+                        }},
+                        
+                        // Format a date string for display
+                        formatDate(dateStr) {{
+                            const [year, month, day] = dateStr.split('-').map(Number);
+                            const date = new Date(year, month - 1, day);
+                            return date.toLocaleDateString('en-US', {{ 
+                                weekday: 'long', 
+                                year: 'numeric', 
+                                month: 'long', 
+                                day: 'numeric' 
+                            }});
+                        }},
+                        
+                        // Build a date string from current state + day
+                        buildDateStr(day) {{
+                            const month = String(this.state.month).padStart(2, '0');
+                            const dayStr = String(day).padStart(2, '0');
+                            return `${{this.state.year}}-${{month}}-${{dayStr}}`;
+                        }},
+                        
+                        // Render the month view calendar grid
+                        renderMonthView() {{
+                            const grid = document.getElementById('calendarGrid');
+                            const {{ year, month }} = this.state;
+                            
+                            // Update month stats
+                            this.updateMonthStats();
+                            
+                            // Clear existing day cells (keep weekday headers)
+                            const existingDays = grid.querySelectorAll('.calendar-day');
+                            existingDays.forEach(d => d.remove());
+                            
+                            // Calculate calendar layout
+                            const firstDay = new Date(year, month - 1, 1).getDay();  // 0=Sun, 6=Sat
+                            const daysInMonth = new Date(year, month, 0).getDate();
+                            const daysInPrevMonth = new Date(year, month - 1, 0).getDate();
+                            
+                            // Determine today for highlighting
+                            const today = new Date();
+                            const isCurrentMonth = today.getFullYear() === year && today.getMonth() + 1 === month;
+                            const todayDate = today.getDate();
+                            
+                            // Add previous month's trailing days (grayed out)
+                            for (let i = firstDay - 1; i >= 0; i--) {{
+                                const dayNum = daysInPrevMonth - i;
+                                const dayEl = this.createDayCell(dayNum, {{ isOtherMonth: true }});
+                                grid.appendChild(dayEl);
+                            }}
+                            
+                            // Add current month's days
+                            for (let day = 1; day <= daysInMonth; day++) {{
+                                const isToday = isCurrentMonth && day === todayDate;
+                                const dayData = this.getDayData(year, month, day);
+                                const isSelected = this.state.selectedDate === this.buildDateStr(day);
+                                
+                                const dayEl = this.createDayCell(day, {{
+                                    isToday,
+                                    isSelected,
+                                    dayData
+                                }});
+                                grid.appendChild(dayEl);
+                            }}
+                            
+                            // Add next month's leading days to complete the grid (6 rows max)
+                            const totalCells = firstDay + daysInMonth;
+                            const remainingCells = (7 - (totalCells % 7)) % 7;
+                            for (let i = 1; i <= remainingCells; i++) {{
+                                const dayEl = this.createDayCell(i, {{ isOtherMonth: true }});
+                                grid.appendChild(dayEl);
+                            }}
+                        }},
+                        
+                        // Update month summary statistics
+                        updateMonthStats() {{
+                            const {{ year, month }} = this.state;
+                            const yearData = this.state.calendarData?.years?.[String(year)];
+                            const monthData = yearData?.months?.[String(month)];
+                            
+                            // Calculate stats
+                            let totalClips = 0;
+                            let activeDays = 0;
+                            let speciesCount = {{}};
+                            let cameraSet = new Set();
+                            
+                            if (monthData?.days) {{
+                                Object.values(monthData.days).forEach(day => {{
+                                    if (day.count > 0) {{
+                                        totalClips += day.count;
+                                        activeDays++;
+                                        
+                                        // Count species
+                                        if (day.species) {{
+                                            day.species.forEach(s => {{
+                                                speciesCount[s] = (speciesCount[s] || 0) + 1;
+                                            }});
+                                        }}
+                                        
+                                        // Collect cameras
+                                        if (day.cameras) {{
+                                            day.cameras.forEach(c => cameraSet.add(c));
+                                        }}
+                                    }}
+                                }});
+                            }}
+                            
+                            // Find top species
+                            let topSpecies = '-';
+                            let maxCount = 0;
+                            Object.entries(speciesCount).forEach(([species, count]) => {{
+                                if (count > maxCount) {{
+                                    maxCount = count;
+                                    topSpecies = species;
+                                }}
+                            }});
+                            
+                            // Update DOM
+                            const setStatValue = (id, value, isEmpty = false) => {{
+                                const el = document.getElementById(id);
+                                if (el) {{
+                                    el.textContent = value;
+                                    el.parentElement.classList.toggle('empty', isEmpty);
+                                }}
+                            }};
+                            
+                            setStatValue('statTotal', totalClips || '-', totalClips === 0);
+                            setStatValue('statDays', activeDays || '-', activeDays === 0);
+                            setStatValue('statTopSpecies', topSpecies, topSpecies === '-');
+                            setStatValue('statCameras', cameraSet.size || '-', cameraSet.size === 0);
+                        }},
+                        
+                        // Create a single day cell element
+                        createDayCell(day, options = {{}}) {{
+                            const {{ isOtherMonth = false, isToday = false, isSelected = false, dayData = null }} = options;
+                            
+                            const div = document.createElement('div');
+                            div.className = 'calendar-day';
+                            
+                            // Apply state classes
+                            if (isOtherMonth) div.classList.add('other-month');
+                            if (isToday) div.classList.add('today');
+                            if (isSelected) div.classList.add('selected');
+                            if (dayData && dayData.count > 0) div.classList.add('has-recordings');
+                            
+                            // Build cell content
+                            let html = `<div class="day-number">${{day}}</div>`;
+                            
+                            if (dayData && dayData.count > 0) {{
+                                // Show camera count icon if multiple cameras
+                                if (dayData.cameras && dayData.cameras.length > 1) {{
+                                    html += `<div class="day-cameras">📹${{dayData.cameras.length}}</div>`;
+                                }}
+                                
+                                html += `<div class="day-count">${{dayData.count}}</div>`;
+                                
+                                // Show up to 2 species on larger screens
+                                if (dayData.species && dayData.species.length > 0) {{
+                                    const speciesText = dayData.species.slice(0, 2).join(', ');
+                                    html += `<div class="day-species">${{speciesText}}</div>`;
+                                }}
+                            }}
+                            
+                            div.innerHTML = html;
+                            
+                            // Add click handler for days with recordings (not other month)
+                            if (!isOtherMonth && dayData && dayData.count > 0) {{
+                                div.onclick = () => this.showDayPanel(day);
+                                div.style.cursor = 'pointer';
+                            }} else if (!isOtherMonth) {{
+                                // Days without recordings are not clickable
+                                div.style.cursor = 'default';
+                            }}
+                            
+                            return div;
+                        }},
+                        
+                        // Look up recording data for a specific day
+                        getDayData(year, month, day) {{
+                            const yearData = this.state.calendarData?.years?.[String(year)];
+                            const monthData = yearData?.months?.[String(month)];
+                            return monthData?.days?.[String(day)] || null;
+                        }},
+                        
+                        // Show the day detail panel
+                        async showDayPanel(day) {{
+                            const dateStr = this.buildDateStr(day);
+                            this.state.selectedDate = dateStr;
+                            
+                            // Update URL to include selected date
+                            this.updateUrl();
+                            
+                            // Re-render to show selection
+                            this.renderMonthView();
+                            
+                            // Show panel with loading state
+                            const overlay = document.getElementById('dayPanelOverlay');
+                            const container = document.getElementById('dayPanelContainer');
+                            
+                            overlay.classList.add('visible');
+                            container.classList.add('visible');
+                            
+                            // Show loading state in panel
+                            container.innerHTML = `
+                                <div style="padding: 20px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                        <h3 style="margin: 0; font-size: 1.1em;">${{this.formatDate(dateStr)}}</h3>
+                                        <button onclick="CalendarApp.closeDayPanel()" 
+                                                style="background: #333; border: none; color: #fff; width: 36px; height: 36px; 
+                                                       border-radius: 8px; cursor: pointer; font-size: 1.2em;">×</button>
+                                    </div>
+                                    <div class="loading">Loading clips...</div>
+                                </div>
+                            `;
+                            
+                            // Load clips for this day
+                            try {{
+                                const data = await this.loadDayClips(dateStr);
+                                this.renderDayPanel(dateStr, data);
+                            }} catch (e) {{
+                                container.innerHTML = `
+                                    <div style="padding: 20px;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                            <h3 style="margin: 0; font-size: 1.1em;">${{this.formatDate(dateStr)}}</h3>
+                                            <button onclick="CalendarApp.closeDayPanel()" 
+                                                    style="background: #333; border: none; color: #fff; width: 36px; height: 36px; 
+                                                           border-radius: 8px; cursor: pointer; font-size: 1.2em;">×</button>
+                                        </div>
+                                        <div style="color: #f44336; padding: 20px; text-align: center;">
+                                            Failed to load clips
+                                            <br><br>
+                                            <button onclick="CalendarApp.showDayPanel(${{day}})" 
+                                                    style="padding: 8px 16px; background: #333; border: none; color: #fff; 
+                                                           border-radius: 4px; cursor: pointer;">
+                                                Retry
+                                            </button>
+                                        </div>
+                                    </div>
+                                `;
+                            }}
+                        }},
+                        
+                        // Render the day panel content (placeholder for Phase 3)
+                        renderDayPanel(dateStr, data) {{
+                            const container = document.getElementById('dayPanelContainer');
+                            const clips = data.clips || [];
+                            
+                            // Basic render - will be enhanced in Phase 3
+                            let clipsHtml = '';
+                            if (clips.length === 0) {{
+                                clipsHtml = '<div style="color: #888; text-align: center; padding: 40px;">No clips for this day</div>';
+                            }} else {{
+                                clipsHtml = clips.map(clip => `
+                                    <div style="background: #2a2a2a; border-radius: 8px; padding: 12px; margin-bottom: 8px; 
+                                                cursor: pointer; display: flex; align-items: center; gap: 12px;"
+                                         onclick="window.location.href='/recording/${{clip.path.replace('#', '%23')}}'">
+                                        <div style="flex: 1;">
+                                            <div style="color: #4CAF50; font-weight: 600;">🐾 ${{clip.species || 'Unknown'}}</div>
+                                            <div style="color: #aaa; font-size: 0.9em;">${{clip.time}} • ${{clip.camera}}</div>
+                                            <div style="color: #666; font-size: 0.8em;">${{clip.size_mb?.toFixed(1) || '?'}} MB</div>
+                                        </div>
+                                        <button onclick="event.stopPropagation(); playVideo('/clips/${{clip.path}}', '${{clip.path.split('/').pop()}}', '${{clip.path.replace(/'/g, "\\\\'")}}')"
+                                                style="background: #4CAF50; border: none; color: white; width: 40px; height: 40px; 
+                                                       border-radius: 8px; cursor: pointer;">
+                                            ▶
+                                        </button>
+                                    </div>
+                                `).join('');
+                            }}
+                            
+                            container.innerHTML = `
+                                <div style="padding: 16px; height: 100%; display: flex; flex-direction: column;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                        <div>
+                                            <h3 style="margin: 0 0 4px 0; font-size: 1.1em;">${{this.formatDate(dateStr)}}</h3>
+                                            <div style="color: #888; font-size: 0.9em;">${{clips.length}} recording${{clips.length !== 1 ? 's' : ''}}</div>
+                                        </div>
+                                        <button onclick="CalendarApp.closeDayPanel()" 
+                                                style="background: #333; border: none; color: #fff; width: 36px; height: 36px; 
+                                                       border-radius: 8px; cursor: pointer; font-size: 1.2em;">×</button>
+                                    </div>
+                                    <div style="flex: 1; overflow-y: auto;">
+                                        ${{clipsHtml}}
+                                    </div>
+                                </div>
+                            `;
+                        }},
+                        
+                        // Close the day panel
+                        closeDayPanel() {{
+                            document.getElementById('dayPanelOverlay').classList.remove('visible');
+                            document.getElementById('dayPanelContainer').classList.remove('visible');
+                            
+                            // Clear selection
+                            this.state.selectedDate = null;
+                            this.state.dayClips = null;
+                            this.updateUrl();
+                            this.renderMonthView();
+                        }}
+                    }};
+                    
+                    // Initialize on page load
+                    document.addEventListener('DOMContentLoaded', () => {{
+                        CalendarApp.init();
+                        
+                        // Handle browser back/forward navigation
+                        window.addEventListener('popstate', (e) => {{
+                            CalendarApp.parseUrlParams();
+                            CalendarApp.render();
+                        }});
+                        
+                        // Set up keyboard navigation
+                        document.addEventListener('keydown', (e) => {{
+                            // Don't capture keys if focused on input
+                            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                            
+                            // Close picker on Escape
+                            if (e.key === 'Escape') {{
+                                CalendarApp.closePicker();
+                            }}
+                            
+                            // Don't capture if picker is open
+                            if (document.getElementById('pickerDropdown').classList.contains('visible')) return;
+                            
+                            // Only apply in month view
+                            if (CalendarApp.state.view !== 'month') return;
+                            
+                            // Don't capture if day panel is open
+                            if (document.getElementById('dayPanelContainer').classList.contains('visible')) return;
+                            
+                            switch (e.key) {{
+                                case 'ArrowLeft':
+                                    e.preventDefault();
+                                    CalendarApp.prevMonth();
+                                    break;
+                                case 'ArrowRight':
+                                    e.preventDefault();
+                                    CalendarApp.nextMonth();
+                                    break;
+                                case 't':
+                                case 'T':
+                                    e.preventDefault();
+                                    CalendarApp.goToToday();
+                                    break;
+                                case 'm':
+                                case 'M':
+                                    e.preventDefault();
+                                    CalendarApp.togglePicker();
+                                    break;
+                            }}
+                        }});
+                        
+                        // Set up touch swipe navigation for mobile
+                        let touchStartX = 0;
+                        let touchStartY = 0;
+                        const calendarContainer = document.querySelector('.calendar-container');
+                        
+                        if (calendarContainer) {{
+                            calendarContainer.addEventListener('touchstart', (e) => {{
+                                touchStartX = e.touches[0].clientX;
+                                touchStartY = e.touches[0].clientY;
+                            }}, {{ passive: true }});
+                            
+                            calendarContainer.addEventListener('touchend', (e) => {{
+                                if (CalendarApp.state.view !== 'month') return;
+                                
+                                const touchEndX = e.changedTouches[0].clientX;
+                                const touchEndY = e.changedTouches[0].clientY;
+                                
+                                const deltaX = touchEndX - touchStartX;
+                                const deltaY = touchEndY - touchStartY;
+                                
+                                // Only trigger if horizontal swipe is dominant and long enough
+                                if (Math.abs(deltaX) > 80 && Math.abs(deltaX) > Math.abs(deltaY) * 2) {{
+                                    if (deltaX > 0) {{
+                                        CalendarApp.prevMonth();
+                                    }} else {{
+                                        CalendarApp.nextMonth();
+                                    }}
+                                }}
+                            }}, {{ passive: true }});
+                        }}
+                    }});
+                    
+                    // Existing functions for video modal and bulk actions
                     let currentClipPath = null;
                     
-                    function playVideo(url, title, clipPath) {
+                    function playVideo(url, title, clipPath) {{
                         const modal = document.getElementById('videoModal');
                         const video = document.getElementById('modalVideo');
                         const titleEl = document.getElementById('modalTitle');
@@ -906,10 +2210,10 @@ class WebServer:
                         
                         modal.classList.add('active');
                         document.body.style.overflow = 'hidden';
-                        video.play().catch(() => {}); // Auto-play, ignore if blocked
-                    }
+                        video.play().catch(() => {{}}); // Auto-play, ignore if blocked
+                    }}
                     
-                    function closeModal() {
+                    function closeModal() {{
                         const modal = document.getElementById('videoModal');
                         const video = document.getElementById('modalVideo');
                         
@@ -918,84 +2222,87 @@ class WebServer:
                         modal.classList.remove('active');
                         document.body.style.overflow = '';
                         currentClipPath = null;
-                    }
+                    }}
                     
-                    function closeModalOnBackdrop(event) {
-                        if (event.target.id === 'videoModal') {
+                    function closeModalOnBackdrop(event) {{
+                        if (event.target.id === 'videoModal') {{
                             closeModal();
-                        }
-                    }
+                        }}
+                    }}
                     
                     // Close modal on escape key
-                    document.addEventListener('keydown', (e) => {
-                        if (e.key === 'Escape') closeModal();
-                    });
+                    document.addEventListener('keydown', (e) => {{
+                        if (e.key === 'Escape') {{
+                            closeModal();
+                            CalendarApp.closeDayPanel();
+                        }}
+                    }});
                     
-                    async function deleteCurrentClip() {
+                    async function deleteCurrentClip() {{
                         if (!currentClipPath) return;
                         await deleteClip(currentClipPath);
-                    }
+                    }}
                     
-                    async function deleteClip(path) {
+                    async function deleteClip(path) {{
                         if (!confirm('Are you sure you want to delete this clip?')) return;
-                        try {
-                            const response = await fetch('/recordings?path=' + encodeURIComponent(path), { method: 'DELETE' });
+                        try {{
+                            const response = await fetch('/recordings?path=' + encodeURIComponent(path), {{ method: 'DELETE' }});
                             const text = await response.text();
-                            if (response.ok) {
+                            if (response.ok) {{
                                 closeModal();
                                 location.reload();
-                            } else {
+                            }} else {{
                                 alert('Error: ' + text);
-                            }
-                        } catch (e) {
+                            }}
+                        }} catch (e) {{
                             alert('Error deleting clip: ' + e);
-                        }
-                    }
+                        }}
+                    }}
 
-                    function toggleAll(source) {
+                    function toggleAll(source) {{
                         const checkboxes = document.querySelectorAll('input[name="clip_select"]');
                         checkboxes.forEach(cb => cb.checked = source.checked);
                         updateBulkButton();
-                    }
+                    }}
 
-                    function updateBulkButton() {
+                    function updateBulkButton() {{
                         const checked = document.querySelectorAll('input[name="clip_select"]:checked');
                         const btn = document.getElementById('bulkDeleteBtn');
                         const bulkActions = document.getElementById('bulkActions');
                         const count = checked.length;
                         
                         btn.disabled = count === 0;
-                        btn.textContent = count > 0 ? `Delete (${count})` : 'Delete Selected';
+                        btn.textContent = count > 0 ? `Delete (${{count}})` : 'Delete Selected';
                         
                         // Show/hide bulk actions bar
-                        if (count > 0) {
+                        if (count > 0) {{
                             bulkActions.classList.add('visible');
-                        } else {
+                        }} else {{
                             bulkActions.classList.remove('visible');
-                        }
-                    }
+                        }}
+                    }}
 
-                    async function bulkDelete() {
+                    async function bulkDelete() {{
                         const checked = document.querySelectorAll('input[name="clip_select"]:checked');
                         if (checked.length === 0) return;
 
-                        if (!confirm(`Delete ${checked.length} clips?`)) return;
+                        if (!confirm(`Delete ${{checked.length}} clips?`)) return;
 
                         const paths = Array.from(checked).map(cb => cb.value);
                         
-                        try {
-                            const response = await fetch('/recordings/bulk_delete', {
+                        try {{
+                            const response = await fetch('/recordings/bulk_delete', {{
                                 method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ paths: paths })
-                            });
+                                headers: {{ 'Content-Type': 'application/json' }},
+                                body: JSON.stringify({{ paths: paths }})
+                            }});
                             
                             const result = await response.json();
                             location.reload();
-                        } catch (e) {
+                        }} catch (e) {{
                             alert('Error: ' + e);
-                        }
-                    }
+                        }}
+                    }}
                 </script>
             </body>
         </html>

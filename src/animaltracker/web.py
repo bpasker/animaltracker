@@ -1093,6 +1093,246 @@ class WebServer:
                     }
                     .day-panel-overlay.visible { opacity: 1; visibility: visible; }
                     
+                    /* Day Panel Content */
+                    .day-panel {
+                        height: 100%;
+                        display: flex;
+                        flex-direction: column;
+                    }
+                    .day-panel-header {
+                        padding: 16px;
+                        border-bottom: 1px solid #333;
+                        flex-shrink: 0;
+                    }
+                    .day-panel-header-row {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: flex-start;
+                    }
+                    .day-panel-title {
+                        margin: 0 0 4px 0;
+                        font-size: 1.15em;
+                        font-weight: 600;
+                    }
+                    .day-panel-subtitle {
+                        color: #888;
+                        font-size: 0.9em;
+                    }
+                    .day-panel-close {
+                        background: #333;
+                        border: none;
+                        color: #fff;
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 1.3em;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        transition: background 0.15s;
+                    }
+                    .day-panel-close:hover { background: #444; }
+                    
+                    .day-panel-summary {
+                        display: flex;
+                        gap: 16px;
+                        margin-top: 12px;
+                        flex-wrap: wrap;
+                    }
+                    .day-summary-stat {
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                        font-size: 0.85em;
+                        color: #aaa;
+                    }
+                    .day-summary-stat span { color: #4CAF50; font-weight: 600; }
+                    
+                    .day-panel-content {
+                        flex: 1;
+                        overflow-y: auto;
+                        padding: 16px;
+                    }
+                    
+                    /* Time Groups */
+                    .time-group {
+                        margin-bottom: 20px;
+                    }
+                    .time-group:last-child { margin-bottom: 0; }
+                    .time-group-header {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        padding: 8px 0;
+                        margin-bottom: 8px;
+                        border-bottom: 1px solid #333;
+                    }
+                    .time-group-title {
+                        font-weight: 600;
+                        font-size: 0.95em;
+                        color: #ccc;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                    }
+                    .time-group-count {
+                        background: #333;
+                        color: #888;
+                        padding: 2px 10px;
+                        border-radius: 12px;
+                        font-size: 0.8em;
+                    }
+                    
+                    /* Day Panel Clip Cards */
+                    .day-clip-card {
+                        background: #2a2a2a;
+                        border-radius: 10px;
+                        padding: 12px;
+                        margin-bottom: 8px;
+                        display: flex;
+                        align-items: flex-start;
+                        gap: 12px;
+                        cursor: pointer;
+                        transition: background 0.15s, transform 0.1s;
+                    }
+                    .day-clip-card:hover { background: #333; }
+                    .day-clip-card:active { transform: scale(0.99); }
+                    .day-clip-card:last-child { margin-bottom: 0; }
+                    
+                    .day-clip-checkbox {
+                        width: 20px;
+                        height: 20px;
+                        accent-color: #4CAF50;
+                        flex-shrink: 0;
+                        margin-top: 2px;
+                    }
+                    
+                    .day-clip-thumb {
+                        width: 80px;
+                        height: 60px;
+                        border-radius: 6px;
+                        object-fit: cover;
+                        background: #1a1a1a;
+                        flex-shrink: 0;
+                    }
+                    .day-clip-thumb-placeholder {
+                        width: 80px;
+                        height: 60px;
+                        border-radius: 6px;
+                        background: #1a1a1a;
+                        flex-shrink: 0;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        color: #444;
+                        font-size: 1.5em;
+                    }
+                    
+                    .day-clip-info {
+                        flex: 1;
+                        min-width: 0;
+                    }
+                    .day-clip-species {
+                        color: #4CAF50;
+                        font-weight: 600;
+                        font-size: 1em;
+                        margin-bottom: 4px;
+                    }
+                    .day-clip-meta {
+                        color: #888;
+                        font-size: 0.85em;
+                        margin-bottom: 2px;
+                    }
+                    .day-clip-size {
+                        color: #666;
+                        font-size: 0.8em;
+                    }
+                    
+                    .day-clip-actions {
+                        display: flex;
+                        gap: 6px;
+                        flex-shrink: 0;
+                    }
+                    .day-clip-btn {
+                        width: 36px;
+                        height: 36px;
+                        border: none;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        transition: background 0.15s, transform 0.1s;
+                    }
+                    .day-clip-btn:active { transform: scale(0.9); }
+                    .day-clip-btn.play {
+                        background: #4CAF50;
+                        color: white;
+                    }
+                    .day-clip-btn.play:hover { background: #45a049; }
+                    .day-clip-btn.delete {
+                        background: #333;
+                        color: #888;
+                    }
+                    .day-clip-btn.delete:hover { background: #f44336; color: white; }
+                    .day-clip-btn svg {
+                        width: 18px;
+                        height: 18px;
+                    }
+                    
+                    /* Day Panel Footer Actions */
+                    .day-panel-footer {
+                        padding: 12px 16px;
+                        border-top: 1px solid #333;
+                        background: #1a1a1a;
+                        flex-shrink: 0;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                    }
+                    .day-select-all {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        color: #aaa;
+                        font-size: 0.9em;
+                    }
+                    .day-select-all input {
+                        width: 18px;
+                        height: 18px;
+                        accent-color: #4CAF50;
+                    }
+                    .day-delete-btn {
+                        background: #333;
+                        border: none;
+                        color: #888;
+                        padding: 8px 16px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 0.9em;
+                        transition: background 0.15s, color 0.15s;
+                    }
+                    .day-delete-btn:hover:not(:disabled) { background: #f44336; color: white; }
+                    .day-delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+                    .day-delete-btn.has-selection {
+                        background: #f44336;
+                        color: white;
+                    }
+                    
+                    /* Empty state for day panel */
+                    .day-empty-state {
+                        text-align: center;
+                        padding: 40px 20px;
+                        color: #666;
+                    }
+                    .day-empty-state svg {
+                        width: 48px;
+                        height: 48px;
+                        margin-bottom: 12px;
+                        opacity: 0.5;
+                    }
+                    
                     /* Card-based layout for recordings (used in list view) */
                     .recordings-list { display: flex; flex-direction: column; gap: 12px; }
                     .recording-card {
@@ -1323,6 +1563,80 @@ class WebServer:
                     body.view-month .calendar-view-only { display: block; }
                     body.view-month .list-view-only { display: none; }
                     
+                    /* List View Header */
+                    .list-header {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        margin-bottom: 16px;
+                        flex-wrap: wrap;
+                        gap: 12px;
+                    }
+                    .list-summary {
+                        color: #888;
+                        font-size: 0.95em;
+                    }
+                    .list-summary strong {
+                        color: #4CAF50;
+                        font-weight: 600;
+                    }
+                    .list-controls {
+                        display: flex;
+                        gap: 8px;
+                        align-items: center;
+                    }
+                    .sort-select {
+                        background: #333;
+                        border: none;
+                        color: #fff;
+                        padding: 8px 12px;
+                        border-radius: 6px;
+                        font-size: 0.9em;
+                        cursor: pointer;
+                    }
+                    .sort-select:focus {
+                        outline: 2px solid #4CAF50;
+                    }
+                    .filter-btn {
+                        background: #333;
+                        border: none;
+                        color: #aaa;
+                        padding: 8px 12px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 0.9em;
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                    }
+                    .filter-btn:hover { background: #444; color: #fff; }
+                    .filter-btn.active { background: #4CAF50; color: #fff; }
+                    
+                    /* Date Group Headers in List View */
+                    .date-group-header {
+                        background: #222;
+                        padding: 10px 16px;
+                        border-radius: 8px;
+                        margin-top: 16px;
+                        margin-bottom: 8px;
+                        font-weight: 600;
+                        color: #aaa;
+                        font-size: 0.9em;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                    }
+                    .date-group-header:first-child {
+                        margin-top: 0;
+                    }
+                    .date-group-count {
+                        background: #333;
+                        padding: 2px 10px;
+                        border-radius: 12px;
+                        font-size: 0.85em;
+                        color: #888;
+                    }
+                    
                     /* Desktop adjustments */
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1100px; margin: 0 auto; }
@@ -1426,10 +1740,44 @@ class WebServer:
                 
                 <!-- List View (original recordings list) -->
                 <div class="list-view-only">
+                    <!-- List Header with Summary and Controls -->
+                    <div class="list-header">
+                        <div class="list-summary">
+                            <strong>{len(clips)}</strong> recording{'' if len(clips) == 1 else 's'} total
+                        </div>
+                        <div class="list-controls">
+                            <select class="sort-select" id="sortSelect" onchange="sortRecordings(this.value)">
+                                <option value="newest">Newest First</option>
+                                <option value="oldest">Oldest First</option>
+                                <option value="species">By Species</option>
+                                <option value="camera">By Camera</option>
+                            </select>
+                        </div>
+                    </div>
+                    
                     <div class="recordings-list" id="recordingsList">
         """
         
+        # Group clips by date for better organization
+        current_date = None
         for clip in clips:
+            clip_date = clip['time'].strftime('%Y-%m-%d')
+            clip_date_display = clip['time'].strftime('%A, %B %d, %Y')
+            
+            # Add date group header when date changes
+            if clip_date != current_date:
+                if current_date is not None:
+                    # Count clips for this date
+                    pass
+                current_date = clip_date
+                clips_on_date = sum(1 for c in clips if c['time'].strftime('%Y-%m-%d') == clip_date)
+                html += f"""
+                        <div class="date-group-header" data-date="{clip_date}">
+                            <span>📅 {clip_date_display}</span>
+                            <span class="date-group-count">{clips_on_date} clip{'' if clips_on_date == 1 else 's'}</span>
+                        </div>
+                """
+            
             size_mb = clip['size'] / (1024 * 1024)
             escaped_path = clip['path'].replace("'", "\\'")
             url_encoded_path = clip['path'].replace('#', '%23')
@@ -1438,7 +1786,7 @@ class WebServer:
             thumbnail_badge = f'<span class="thumbnail-badge">📸 {thumbnail_count}</span>' if thumbnail_count > 0 else ''
             
             html += f"""
-                        <div class="recording-card" onclick="window.location.href='/recording/{url_encoded_path}'">
+                        <div class="recording-card" data-date="{clip_date}" data-species="{species_display}" data-camera="{clip['camera']}" data-time="{clip['time'].isoformat()}" onclick="window.location.href='/recording/{url_encoded_path}'">
                             <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
                             <div class="recording-info">
                                 <div class="recording-species">🐾 {species_display} {thumbnail_badge}</div>
@@ -1569,6 +1917,9 @@ class WebServer:
                             }}
                         }},
                         
+                        // Track if this is initial load (to avoid pushing initial state)
+                        _initialLoad: true,
+                        
                         // Update URL to reflect current state (for bookmarking/sharing)
                         updateUrl() {{
                             const url = new URL(window.location);
@@ -1582,7 +1933,13 @@ class WebServer:
                                 url.searchParams.delete('date');
                             }}
                             
-                            history.replaceState({{}}, '', url);
+                            // Use pushState for navigation history, replaceState for initial load
+                            if (this._initialLoad) {{
+                                history.replaceState({{ year: this.state.year, month: this.state.month, view: this.state.view }}, '', url);
+                                this._initialLoad = false;
+                            }} else {{
+                                history.pushState({{ year: this.state.year, month: this.state.month, view: this.state.view }}, '', url);
+                            }}
                         }},
                         
                         // Main render function - orchestrates all UI updates
@@ -2051,50 +2408,345 @@ class WebServer:
                             }}
                         }},
                         
-                        // Render the day panel content (placeholder for Phase 3)
-                        renderDayPanel(dateStr, data) {{
-                            const container = document.getElementById('dayPanelContainer');
-                            const clips = data.clips || [];
+                        // Group clips by time of day
+                        groupByTimeOfDay(clips) {{
+                            const groups = {{
+                                night: {{ icon: '🌙', label: 'Night', range: '12 AM - 6 AM', clips: [] }},
+                                morning: {{ icon: '🌅', label: 'Morning', range: '6 AM - 12 PM', clips: [] }},
+                                afternoon: {{ icon: '☀️', label: 'Afternoon', range: '12 PM - 6 PM', clips: [] }},
+                                evening: {{ icon: '🌆', label: 'Evening', range: '6 PM - 12 AM', clips: [] }}
+                            }};
                             
-                            // Basic render - will be enhanced in Phase 3
-                            let clipsHtml = '';
-                            if (clips.length === 0) {{
-                                clipsHtml = '<div style="color: #888; text-align: center; padding: 40px;">No clips for this day</div>';
-                            }} else {{
-                                clipsHtml = clips.map(clip => `
-                                    <div style="background: #2a2a2a; border-radius: 8px; padding: 12px; margin-bottom: 8px; 
-                                                cursor: pointer; display: flex; align-items: center; gap: 12px;"
-                                         onclick="window.location.href='/recording/${{clip.path.replace('#', '%23')}}'">
-                                        <div style="flex: 1;">
-                                            <div style="color: #4CAF50; font-weight: 600;">🐾 ${{clip.species || 'Unknown'}}</div>
-                                            <div style="color: #aaa; font-size: 0.9em;">${{clip.time}} • ${{clip.camera}}</div>
-                                            <div style="color: #666; font-size: 0.8em;">${{clip.size_mb?.toFixed(1) || '?'}} MB</div>
-                                        </div>
-                                        <button onclick="event.stopPropagation(); playVideo('/clips/${{clip.path}}', '${{clip.path.split('/').pop()}}', '${{clip.path.replace(/'/g, "\\\\'")}}')"
-                                                style="background: #4CAF50; border: none; color: white; width: 40px; height: 40px; 
-                                                       border-radius: 8px; cursor: pointer;">
-                                            ▶
+                            clips.forEach(clip => {{
+                                // Parse hour from time string (e.g., "08:23:43" or "8:23 AM")
+                                let hour = 0;
+                                if (clip.time) {{
+                                    const match = clip.time.match(/^(\d{{1,2}})/);
+                                    if (match) {{
+                                        hour = parseInt(match[1], 10);
+                                        // Handle 12-hour format with PM
+                                        if (clip.time.toLowerCase().includes('pm') && hour !== 12) {{
+                                            hour += 12;
+                                        }} else if (clip.time.toLowerCase().includes('am') && hour === 12) {{
+                                            hour = 0;
+                                        }}
+                                    }}
+                                }}
+                                
+                                if (hour >= 0 && hour < 6) {{
+                                    groups.night.clips.push(clip);
+                                }} else if (hour >= 6 && hour < 12) {{
+                                    groups.morning.clips.push(clip);
+                                }} else if (hour >= 12 && hour < 18) {{
+                                    groups.afternoon.clips.push(clip);
+                                }} else {{
+                                    groups.evening.clips.push(clip);
+                                }}
+                            }});
+                            
+                            return groups;
+                        }},
+                        
+                        // Build summary stats for day
+                        buildDaySummary(clips, data) {{
+                            const summary = data.summary || {{}};
+                            const cameras = Object.keys(summary.by_camera || {{}});
+                            const species = Object.keys(summary.by_species || {{}});
+                            
+                            return {{
+                                total: clips.length,
+                                cameras: cameras.length > 0 ? cameras.join(', ') : 'Unknown',
+                                topSpecies: species.length > 0 ? species[0] : null,
+                                speciesCount: species.length
+                            }};
+                        }},
+                        
+                        // Render a single clip card for day panel
+                        renderDayClipCard(clip, index) {{
+                            const thumbUrl = clip.thumbnails && clip.thumbnails.length > 0 
+                                ? '/clips/' + clip.thumbnails[0].url.replace(/^\\/clips\\//, '')
+                                : null;
+                            
+                            const thumbHtml = thumbUrl 
+                                ? `<img class="day-clip-thumb" src="${{thumbUrl}}" alt="" loading="lazy" onerror="this.outerHTML='<div class=\\'day-clip-thumb-placeholder\\'>🎬</div>'">`
+                                : `<div class="day-clip-thumb-placeholder">🎬</div>`;
+                            
+                            const escapedPath = clip.path.replace(/'/g, "\\'");
+                            const urlPath = clip.path.replace(/#/g, '%23');
+                            const filename = clip.path.split('/').pop();
+                            
+                            return `
+                                <div class="day-clip-card" data-index="${{index}}" data-path="${{clip.path}}"
+                                     onclick="window.location.href='/recording/${{urlPath}}'">
+                                    <input type="checkbox" class="day-clip-checkbox" name="day_clip_select" value="${{clip.path}}"
+                                           onclick="event.stopPropagation(); CalendarApp.updateDaySelection();">
+                                    ${{thumbHtml}}
+                                    <div class="day-clip-info">
+                                        <div class="day-clip-species">🐾 ${{clip.species || 'Unknown'}}</div>
+                                        <div class="day-clip-meta">${{clip.time}} • ${{clip.camera}}</div>
+                                        <div class="day-clip-size">${{clip.size_mb?.toFixed(1) || '?'}} MB</div>
+                                    </div>
+                                    <div class="day-clip-actions">
+                                        <button class="day-clip-btn play" 
+                                                onclick="event.stopPropagation(); playVideo('/clips/${{clip.path}}', '${{filename}}', '${{escapedPath}}');"
+                                                title="Quick Play">
+                                            <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                                         </button>
-                                    </div>
-                                `).join('');
-                            }}
-                            
-                            container.innerHTML = `
-                                <div style="padding: 16px; height: 100%; display: flex; flex-direction: column;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                                        <div>
-                                            <h3 style="margin: 0 0 4px 0; font-size: 1.1em;">${{this.formatDate(dateStr)}}</h3>
-                                            <div style="color: #888; font-size: 0.9em;">${{clips.length}} recording${{clips.length !== 1 ? 's' : ''}}</div>
-                                        </div>
-                                        <button onclick="CalendarApp.closeDayPanel()" 
-                                                style="background: #333; border: none; color: #fff; width: 36px; height: 36px; 
-                                                       border-radius: 8px; cursor: pointer; font-size: 1.2em;">×</button>
-                                    </div>
-                                    <div style="flex: 1; overflow-y: auto;">
-                                        ${{clipsHtml}}
+                                        <button class="day-clip-btn delete"
+                                                onclick="event.stopPropagation(); CalendarApp.deleteDayClip('${{escapedPath}}');"
+                                                title="Delete">
+                                            <svg fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                                        </button>
                                     </div>
                                 </div>
                             `;
+                        }},
+                        
+                        // Render time group section
+                        renderTimeGroup(group, groupKey) {{
+                            if (group.clips.length === 0) return '';
+                            
+                            const clipsHtml = group.clips.map((clip, i) => this.renderDayClipCard(clip, i)).join('');
+                            
+                            return `
+                                <div class="time-group" data-group="${{groupKey}}">
+                                    <div class="time-group-header">
+                                        <div class="time-group-title">
+                                            ${{group.icon}} ${{group.label}}
+                                            <span style="color: #666; font-weight: normal; font-size: 0.85em;">(${{group.range}})</span>
+                                        </div>
+                                        <span class="time-group-count">${{group.clips.length}} clip${{group.clips.length !== 1 ? 's' : ''}}</span>
+                                    </div>
+                                    ${{clipsHtml}}
+                                </div>
+                            `;
+                        }},
+                        
+                        // Render the day panel content
+                        renderDayPanel(dateStr, data) {{
+                            const container = document.getElementById('dayPanelContainer');
+                            const clips = data.clips || [];
+                            this.state.dayClips = clips;
+                            
+                            // Build summary
+                            const summary = this.buildDaySummary(clips, data);
+                            
+                            // Empty state
+                            if (clips.length === 0) {{
+                                container.innerHTML = `
+                                    <div class="day-panel">
+                                        <div class="day-panel-header">
+                                            <div class="day-panel-header-row">
+                                                <div>
+                                                    <h3 class="day-panel-title">${{this.formatDate(dateStr)}}</h3>
+                                                    <div class="day-panel-subtitle">No recordings</div>
+                                                </div>
+                                                <button class="day-panel-close" onclick="CalendarApp.closeDayPanel()">×</button>
+                                            </div>
+                                        </div>
+                                        <div class="day-panel-content">
+                                            <div class="day-empty-state">
+                                                <svg fill="currentColor" viewBox="0 0 24 24"><path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/></svg>
+                                                <p>No recordings on this day</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                                return;
+                            }}
+                            
+                            // Group by time of day
+                            const groups = this.groupByTimeOfDay(clips);
+                            
+                            // Render time groups (in order: morning, afternoon, evening, night)
+                            const groupOrder = ['morning', 'afternoon', 'evening', 'night'];
+                            const groupsHtml = groupOrder.map(key => this.renderTimeGroup(groups[key], key)).join('');
+                            
+                            container.innerHTML = `
+                                <div class="day-panel">
+                                    <div class="day-panel-header">
+                                        <div class="day-panel-header-row">
+                                            <div>
+                                                <h3 class="day-panel-title">${{this.formatDate(dateStr)}}</h3>
+                                                <div class="day-panel-subtitle">${{clips.length}} recording${{clips.length !== 1 ? 's' : ''}}</div>
+                                            </div>
+                                            <button class="day-panel-close" onclick="CalendarApp.closeDayPanel()">×</button>
+                                        </div>
+                                        <div class="day-panel-summary">
+                                            <div class="day-summary-stat">📷 <span>${{summary.cameras}}</span></div>
+                                            ${{summary.topSpecies ? `<div class="day-summary-stat">🏆 <span>${{summary.topSpecies}}</span></div>` : ''}}
+                                        </div>
+                                    </div>
+                                    <div class="day-panel-content">
+                                        ${{groupsHtml}}
+                                    </div>
+                                    <div class="day-panel-footer">
+                                        <label class="day-select-all">
+                                            <input type="checkbox" id="daySelectAll" onclick="CalendarApp.toggleDaySelectAll(this)">
+                                            Select All
+                                        </label>
+                                        <button class="day-delete-btn" id="dayDeleteBtn" onclick="CalendarApp.bulkDeleteDayClips()" disabled>
+                                            Delete (0)
+                                        </button>
+                                    </div>
+                                </div>
+                            `;
+                        }},
+                        
+                        // Update selection count in day panel
+                        updateDaySelection() {{
+                            const checkboxes = document.querySelectorAll('input[name="day_clip_select"]');
+                            const checked = document.querySelectorAll('input[name="day_clip_select"]:checked');
+                            const count = checked.length;
+                            const total = checkboxes.length;
+                            
+                            const btn = document.getElementById('dayDeleteBtn');
+                            const selectAllCb = document.getElementById('daySelectAll');
+                            
+                            if (btn) {{
+                                btn.disabled = count === 0;
+                                btn.textContent = count > 0 ? `Delete (${{count}})` : 'Delete (0)';
+                                btn.classList.toggle('has-selection', count > 0);
+                            }}
+                            
+                            if (selectAllCb) {{
+                                selectAllCb.checked = count === total && total > 0;
+                                selectAllCb.indeterminate = count > 0 && count < total;
+                            }}
+                        }},
+                        
+                        // Toggle select all in day panel
+                        toggleDaySelectAll(source) {{
+                            const checkboxes = document.querySelectorAll('input[name="day_clip_select"]');
+                            checkboxes.forEach(cb => cb.checked = source.checked);
+                            this.updateDaySelection();
+                        }},
+                        
+                        // Delete a single clip from day panel
+                        async deleteDayClip(path) {{
+                            if (!confirm('Delete this clip?')) return;
+                            
+                            try {{
+                                const response = await fetch('/recordings?path=' + encodeURIComponent(path), {{ method: 'DELETE' }});
+                                if (response.ok) {{
+                                    // Refresh the calendar data and day panel
+                                    await this.loadCalendarData();
+                                    this.renderMonthView();
+                                    
+                                    // Reload day panel if still open
+                                    if (this.state.selectedDate) {{
+                                        const data = await this.loadDayClips(this.state.selectedDate);
+                                        this.renderDayPanel(this.state.selectedDate, data);
+                                    }}
+                                }} else {{
+                                    const text = await response.text();
+                                    alert('Error: ' + text);
+                                }}
+                            }} catch (e) {{
+                                alert('Error deleting clip: ' + e);
+                            }}
+                        }},
+                        
+                        // Bulk delete selected clips in day panel
+                        async bulkDeleteDayClips() {{
+                            const checked = document.querySelectorAll('input[name="day_clip_select"]:checked');
+                            if (checked.length === 0) return;
+                            
+                            if (!confirm(`Delete ${{checked.length}} clip${{checked.length !== 1 ? 's' : ''}}?`)) return;
+                            
+                            const paths = Array.from(checked).map(cb => cb.value);
+                            
+                            try {{
+                                const response = await fetch('/recordings/bulk_delete', {{
+                                    method: 'POST',
+                                    headers: {{ 'Content-Type': 'application/json' }},
+                                    body: JSON.stringify({{ paths: paths }})
+                                }});
+                                
+                                if (response.ok) {{
+                                    // Refresh the calendar data and day panel
+                                    await this.loadCalendarData();
+                                    this.renderMonthView();
+                                    
+                                    // Reload day panel
+                                    if (this.state.selectedDate) {{
+                                        const data = await this.loadDayClips(this.state.selectedDate);
+                                        this.renderDayPanel(this.state.selectedDate, data);
+                                    }}
+                                }} else {{
+                                    alert('Error deleting clips');
+                                }}
+                            }} catch (e) {{
+                                alert('Error: ' + e);
+                            }}
+                        }},
+                        
+                        // Navigate to next/previous day in day panel
+                        async navigateDay(offset) {{
+                            if (!this.state.selectedDate) return;
+                            
+                            // Parse current date
+                            const current = new Date(this.state.selectedDate + 'T12:00:00');
+                            current.setDate(current.getDate() + offset);
+                            
+                            const newYear = current.getFullYear();
+                            const newMonth = current.getMonth() + 1;
+                            const newDay = current.getDate();
+                            const newDateStr = `${{newYear}}-${{String(newMonth).padStart(2, '0')}}-${{String(newDay).padStart(2, '0')}}`;
+                            
+                            // Update month if needed
+                            if (newYear !== this.state.year || newMonth !== this.state.month) {{
+                                this.state.year = newYear;
+                                this.state.month = newMonth;
+                            }}
+                            
+                            // Load and show the new day
+                            this.state.selectedDate = newDateStr;
+                            this.updateUrl();
+                            this.renderMonthView();
+                            
+                            // Show loading state
+                            const container = document.getElementById('dayPanelContainer');
+                            container.innerHTML = `
+                                <div class="day-panel">
+                                    <div class="day-panel-header">
+                                        <div class="day-panel-header-row">
+                                            <div>
+                                                <h3 class="day-panel-title">${{this.formatDate(newDateStr)}}</h3>
+                                                <div class="day-panel-subtitle">Loading...</div>
+                                            </div>
+                                            <button class="day-panel-close" onclick="CalendarApp.closeDayPanel()">×</button>
+                                        </div>
+                                    </div>
+                                    <div class="day-panel-content">
+                                        <div class="loading">Loading clips...</div>
+                                    </div>
+                                </div>
+                            `;
+                            
+                            try {{
+                                const data = await this.loadDayClips(newDateStr);
+                                this.renderDayPanel(newDateStr, data);
+                            }} catch (e) {{
+                                container.innerHTML = `
+                                    <div class="day-panel">
+                                        <div class="day-panel-header">
+                                            <div class="day-panel-header-row">
+                                                <div>
+                                                    <h3 class="day-panel-title">${{this.formatDate(newDateStr)}}</h3>
+                                                    <div class="day-panel-subtitle">Error</div>
+                                                </div>
+                                                <button class="day-panel-close" onclick="CalendarApp.closeDayPanel()">×</button>
+                                            </div>
+                                        </div>
+                                        <div class="day-panel-content">
+                                            <div style="color: #f44336; text-align: center; padding: 40px;">
+                                                Failed to load clips
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }}
                         }},
                         
                         // Close the day panel
@@ -2133,11 +2785,28 @@ class WebServer:
                             // Don't capture if picker is open
                             if (document.getElementById('pickerDropdown').classList.contains('visible')) return;
                             
+                            // Handle day panel keyboard navigation
+                            const dayPanelOpen = document.getElementById('dayPanelContainer').classList.contains('visible');
+                            if (dayPanelOpen) {{
+                                switch (e.key) {{
+                                    case 'Escape':
+                                        e.preventDefault();
+                                        CalendarApp.closeDayPanel();
+                                        break;
+                                    case 'ArrowLeft':
+                                        e.preventDefault();
+                                        CalendarApp.navigateDay(-1);
+                                        break;
+                                    case 'ArrowRight':
+                                        e.preventDefault();
+                                        CalendarApp.navigateDay(1);
+                                        break;
+                                }}
+                                return;
+                            }}
+                            
                             // Only apply in month view
                             if (CalendarApp.state.view !== 'month') return;
-                            
-                            // Don't capture if day panel is open
-                            if (document.getElementById('dayPanelContainer').classList.contains('visible')) return;
                             
                             switch (e.key) {{
                                 case 'ArrowLeft':
@@ -2187,6 +2856,37 @@ class WebServer:
                                         CalendarApp.prevMonth();
                                     }} else {{
                                         CalendarApp.nextMonth();
+                                    }}
+                                }}
+                            }}, {{ passive: true }});
+                        }}
+                        
+                        // Set up touch swipe for day panel (left/right to navigate days)
+                        const dayPanelContainer = document.getElementById('dayPanelContainer');
+                        let dayPanelTouchStartX = 0;
+                        let dayPanelTouchStartY = 0;
+                        
+                        if (dayPanelContainer) {{
+                            dayPanelContainer.addEventListener('touchstart', (e) => {{
+                                dayPanelTouchStartX = e.touches[0].clientX;
+                                dayPanelTouchStartY = e.touches[0].clientY;
+                            }}, {{ passive: true }});
+                            
+                            dayPanelContainer.addEventListener('touchend', (e) => {{
+                                if (!CalendarApp.state.selectedDate) return;
+                                
+                                const touchEndX = e.changedTouches[0].clientX;
+                                const touchEndY = e.changedTouches[0].clientY;
+                                
+                                const deltaX = touchEndX - dayPanelTouchStartX;
+                                const deltaY = touchEndY - dayPanelTouchStartY;
+                                
+                                // Only trigger if horizontal swipe is dominant and long enough
+                                if (Math.abs(deltaX) > 80 && Math.abs(deltaX) > Math.abs(deltaY) * 2) {{
+                                    if (deltaX > 0) {{
+                                        CalendarApp.navigateDay(-1); // Swipe right = previous day
+                                    }} else {{
+                                        CalendarApp.navigateDay(1); // Swipe left = next day
                                     }}
                                 }}
                             }}, {{ passive: true }});
@@ -2301,6 +3001,58 @@ class WebServer:
                             location.reload();
                         }} catch (e) {{
                             alert('Error: ' + e);
+                        }}
+                    }}
+                    
+                    // List view sorting
+                    function sortRecordings(sortBy) {{
+                        const list = document.getElementById('recordingsList');
+                        const cards = Array.from(list.querySelectorAll('.recording-card'));
+                        const headers = list.querySelectorAll('.date-group-header');
+                        
+                        // Remove existing headers (we'll re-add them if needed)
+                        headers.forEach(h => h.remove());
+                        
+                        // Sort cards based on criteria
+                        cards.sort((a, b) => {{
+                            switch(sortBy) {{
+                                case 'newest':
+                                    return new Date(b.dataset.time) - new Date(a.dataset.time);
+                                case 'oldest':
+                                    return new Date(a.dataset.time) - new Date(b.dataset.time);
+                                case 'species':
+                                    return a.dataset.species.localeCompare(b.dataset.species);
+                                case 'camera':
+                                    return a.dataset.camera.localeCompare(b.dataset.camera);
+                                default:
+                                    return 0;
+                            }}
+                        }});
+                        
+                        // Re-append cards in sorted order
+                        cards.forEach(card => list.appendChild(card));
+                        
+                        // Re-add date group headers if sorting by date
+                        if (sortBy === 'newest' || sortBy === 'oldest') {{
+                            let currentDate = null;
+                            cards.forEach(card => {{
+                                const cardDate = card.dataset.date;
+                                if (cardDate !== currentDate) {{
+                                    currentDate = cardDate;
+                                    const dateObj = new Date(cardDate + 'T12:00:00');
+                                    const dateStr = dateObj.toLocaleDateString('en-US', {{ 
+                                        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
+                                    }});
+                                    const clipsOnDate = cards.filter(c => c.dataset.date === cardDate).length;
+                                    
+                                    const header = document.createElement('div');
+                                    header.className = 'date-group-header';
+                                    header.dataset.date = cardDate;
+                                    header.innerHTML = `<span>📅 ${{dateStr}}</span><span class="date-group-count">${{clipsOnDate}} clip${{clipsOnDate === 1 ? '' : 's'}}</span>`;
+                                    
+                                    card.parentNode.insertBefore(header, card);
+                                }}
+                            }});
                         }}
                     }}
                 </script>

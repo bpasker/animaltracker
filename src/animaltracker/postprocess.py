@@ -1359,6 +1359,7 @@ class ClipPostProcessor:
         frame,
         bbox: Optional[List[float]],
         padding_percent: float = 0.25,
+        min_size: int = 200,
     ):
         """Crop frame to detection bounding box with padding.
         
@@ -1366,6 +1367,7 @@ class ClipPostProcessor:
             frame: The video frame to crop
             bbox: Bounding box [x1, y1, x2, y2] or None
             padding_percent: How much padding to add around the detection (0.25 = 25%)
+            min_size: Minimum width/height of cropped area in pixels (expands if smaller)
             
         Returns:
             Cropped frame, or original frame if no valid bbox
@@ -1402,9 +1404,30 @@ class ClipPostProcessor:
         crop_x2 = min(frame_width, x2 + pad_x)
         crop_y2 = min(frame_height, y2 + pad_y)
         
-        # Ensure minimum crop size (at least 10x10 pixels)
+        # Calculate current crop size
+        crop_width = crop_x2 - crop_x1
+        crop_height = crop_y2 - crop_y1
+        
+        # Expand to minimum size if needed (centered on detection)
+        if crop_width < min_size:
+            extra = min_size - crop_width
+            crop_x1 = max(0, crop_x1 - extra // 2)
+            crop_x2 = min(frame_width, crop_x1 + min_size)
+            # Adjust x1 if x2 hit the boundary
+            if crop_x2 - crop_x1 < min_size:
+                crop_x1 = max(0, crop_x2 - min_size)
+        
+        if crop_height < min_size:
+            extra = min_size - crop_height
+            crop_y1 = max(0, crop_y1 - extra // 2)
+            crop_y2 = min(frame_height, crop_y1 + min_size)
+            # Adjust y1 if y2 hit the boundary
+            if crop_y2 - crop_y1 < min_size:
+                crop_y1 = max(0, crop_y2 - min_size)
+        
+        # Ensure we still have a valid crop area
         if (crop_x2 - crop_x1) < 10 or (crop_y2 - crop_y1) < 10:
-            # Bbox too small, use full frame
+            # Something went wrong, use full frame
             return frame
         
         # Crop the frame to the detection area

@@ -1114,7 +1114,13 @@ class ClipPostProcessor:
                     # Save thumbnail
                     cv2.imwrite(str(thumb_path), annotated)
                     
+                    # Force sync to disk (important for NFS mounts)
                     if thumb_path.exists():
+                        import os
+                        # Open file and fsync to ensure it's written to NFS server
+                        with open(thumb_path, 'r+b') as f:
+                            os.fsync(f.fileno())
+                        
                         saved.append(thumb_path)
                         LOGGER.info("Saved thumbnail: %s (size: %d bytes)", 
                                    thumb_path, thumb_path.stat().st_size)
@@ -1204,7 +1210,11 @@ class ClipPostProcessor:
                     # Save thumbnail
                     cv2.imwrite(str(thumb_path), annotated)
                     
+                    # Force sync to disk (important for NFS mounts)
                     if thumb_path.exists():
+                        with open(thumb_path, 'r+b') as f:
+                            os.fsync(f.fileno())
+                        
                         saved.append(thumb_path)
                         LOGGER.info("Saved sample frame thumbnail: %s (size: %d bytes)", 
                                    thumb_path, thumb_path.stat().st_size)

@@ -2034,7 +2034,7 @@ class WebServer:
                     <!-- List Header with Summary and Controls -->
                     <div class="list-header">
                         <div class="list-summary">
-                            <strong>{len(clips)}</strong> recording{'' if len(clips) == 1 else 's'} total
+                            <strong>""" + str(len(clips)) + """</strong> recording""" + ('' if len(clips) == 1 else 's') + """ total
                         </div>
                         <div class="list-controls">
                             <select class="sort-select" id="sortSelect" onchange="sortRecordings(this.value)">

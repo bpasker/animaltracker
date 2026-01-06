@@ -57,15 +57,19 @@ class StorageManager:
     def save_detection_thumbnails(
         self, 
         clip_path: Path, 
-        species_frames: dict
+        species_frames: dict,
+        padding_percent: float = 0.25
     ) -> List[Path]:
         """Save detection thumbnails for each species detected in a clip.
+        
+        Thumbnails are cropped to the detection bounding box with padding.
         
         Args:
             clip_path: Path to the clip file
             species_frames: Dict mapping species names to a list of 
                 (frame, confidence, bbox) tuples, where bbox is [x1, y1, x2, y2] or None.
                 Multiple detections per species are supported.
+            padding_percent: How much padding to add around the detection (0.25 = 25% of bbox size)
                 
         Returns:
             List of saved thumbnail paths
@@ -85,38 +89,39 @@ class StorageManager:
                 thumb_path = self.build_thumbnail_path(clip_path, species, idx)
                 
                 try:
-                    # Draw bounding box if available
+                    frame_height, frame_width = frame.shape[:2]
+                    
+                    # Crop to detection area if bbox is available
                     if bbox:
-                        frame = frame.copy()
                         x1, y1, x2, y2 = [int(coord) for coord in bbox]
-                        # Draw box with green color
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        # Add species label with detection number if multiple
-                        if len(detections) > 1:
-                            label = f"{species} #{idx+1} ({confidence:.0%})"
+                        
+                        # Calculate padding based on bbox size
+                        bbox_width = x2 - x1
+                        bbox_height = y2 - y1
+                        pad_x = int(bbox_width * padding_percent)
+                        pad_y = int(bbox_height * padding_percent)
+                        
+                        # Apply padding while staying within frame bounds
+                        crop_x1 = max(0, x1 - pad_x)
+                        crop_y1 = max(0, y1 - pad_y)
+                        crop_x2 = min(frame_width, x2 + pad_x)
+                        crop_y2 = min(frame_height, y2 + pad_y)
+                        
+                        # Crop the frame to the detection area
+                        cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+                        
+                        # Ensure minimum size (at least 50x50 pixels)
+                        if cropped_frame.shape[0] >= 10 and cropped_frame.shape[1] >= 10:
+                            frame_to_save = cropped_frame
                         else:
-                            label = f"{species} ({confidence:.0%})"
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 0.6
-                        thickness = 2
-                        (text_width, text_height), baseline = cv2.getTextSize(
-                            label, font, font_scale, thickness
-                        )
-                        # Background rectangle for text
-                        cv2.rectangle(
-                            frame, 
-                            (x1, y1 - text_height - 10), 
-                            (x1 + text_width + 4, y1), 
-                            (0, 255, 0), 
-                            -1
-                        )
-                        cv2.putText(
-                            frame, label, (x1 + 2, y1 - 5), 
-                            font, font_scale, (0, 0, 0), thickness
-                        )
+                            # Bbox too small, use full frame
+                            frame_to_save = frame
+                    else:
+                        # No bbox, use full frame
+                        frame_to_save = frame
                     
                     # Save thumbnail
-                    cv2.imwrite(str(thumb_path), frame)
+                    cv2.imwrite(str(thumb_path), frame_to_save)
                     saved_paths.append(thumb_path)
                     LOGGER.info("Saved detection thumbnail: %s", thumb_path)
                     

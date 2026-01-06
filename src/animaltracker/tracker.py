@@ -179,14 +179,15 @@ class TrackInfo:
     def _calculate_specificity(self, species: str) -> int:
         """Calculate how specific a species name is.
         
-        Hierarchy (higher = more specific):
+        Taxonomy levels (higher = more specific):
         - 0: "animal" (most generic)
-        - 1: "bird", "mammal", "reptile" (class-level)
-        - 2: "hawk", "owl", "songbird" (order/family level)
-        - 3+: "red-tailed_hawk", "barred_owl" (species level)
+        - 1: Class level: "mammal", "bird", "reptile"
+        - 2: Order level: "rodent", "carnivora", "passeriformes"
+        - 3: Family level: "sciuridae", "canidae", "felidae", "corvidae"
+        - 4+: Genus/species level: specific species names
         
-        This ensures "bird" always beats "animal", and specific species
-        always beat generic class labels.
+        This ensures family-level IDs (sciuridae) beat order-level (rodent),
+        which beats class-level (mammal), which beats generic (animal).
         """
         species_lower = species.lower().replace('-', '_').strip()
         
@@ -194,30 +195,54 @@ class TrackInfo:
         if species_lower in {'animal', 'unknown'}:
             return 0
         
-        # Class level - we know what type of animal
-        class_level = {'bird', 'mammal', 'aves', 'mammalia', 'reptile', 'reptilia', 
-                       'amphibian', 'amphibia', 'fish'}
-        if species_lower in class_level:
+        # Class level (specificity 1)
+        if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal',
+                             'reptile', 'reptilia', 'amphibian', 'amphibia'}:
             return 1
         
-        # Order/family level - more specific groupings
-        order_level = {'hawk', 'owl', 'eagle', 'falcon', 'duck', 'goose', 'songbird',
-                       'sparrow', 'finch', 'warbler', 'woodpecker', 'heron', 'gull',
-                       'crow', 'jay', 'dove', 'pigeon', 'hummingbird',
-                       'deer', 'bear', 'cat', 'dog', 'fox', 'coyote', 'wolf',
-                       'rabbit', 'squirrel', 'mouse', 'rat', 'raccoon', 'skunk',
-                       'rodent', 'carnivore', 'ungulate'}
-        if species_lower in order_level:
-            return 2
+        # Family level keywords (specificity 3) - FAMILIES are more specific than orders
+        family_keywords = {
+            # Mammal families
+            'sciuridae', 'canidae', 'felidae', 'cervidae', 'ursidae', 'mustelidae',
+            'procyonidae', 'leporidae', 'muridae', 'cricetidae', 'didelphidae',
+            'myocastoridae', 'castoridae', 'mephitidae',
+            # Bird families  
+            'corvidae', 'accipitridae', 'strigidae', 'anatidae', 'columbidae',
+            'picidae', 'trochilidae', 'turdidae', 'fringillidae', 'passeridae',
+            'paridae', 'sittidae', 'certhiidae', 'tyrannidae', 'vireonidae',
+        }
         
-        # Species level - has underscore suggesting binomial or compound name
-        words = species_lower.split('_')
-        if len(words) >= 2:
-            # Binomial names (genus_species) or compound common names
-            return 3 + len(words)  # More parts = more specific
+        # Order level keywords (specificity 2)
+        order_keywords = {
+            # Mammal orders
+            'rodent', 'rodentia', 'carnivora', 'carnivore', 'carnivorous', 
+            'artiodactyla', 'lagomorpha', 'chiroptera', 'didelphimorphia',
+            # Bird orders
+            'passeriformes', 'passerine', 'accipitriformes', 'strigiformes',
+            'anseriformes', 'columbiformes', 'piciformes', 'apodiformes',
+        }
         
-        # Single word that's not in our known categories - likely a common name
-        return 2
+        # Check for family-level match (specificity 3)
+        for family in family_keywords:
+            if family in species_lower:
+                # Add bonus for additional taxonomy depth (e.g., genus_species)
+                underscore_count = species_lower.count('_')
+                return 3 + max(0, underscore_count - 2)  # Base 3 + extra depth
+        
+        # Check for order-level match (specificity 2)
+        for order in order_keywords:
+            if order in species_lower:
+                underscore_count = species_lower.count('_')
+                return 2 + max(0, underscore_count - 2)  # Base 2 + extra depth
+        
+        # Fallback: count underscores as proxy for taxonomy depth
+        underscore_count = species_lower.count('_')
+        if underscore_count >= 3:
+            return 4 + underscore_count  # Likely genus_species or more specific
+        elif underscore_count >= 1:
+            return 2 + underscore_count
+        
+        return 1  # Single unknown word
 
 
 class ObjectTracker:

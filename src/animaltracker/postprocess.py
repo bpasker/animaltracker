@@ -272,10 +272,11 @@ class ClipPostProcessor:
         processing_log: List[ProcessingLogEntry] = []
         tracking_summary: Optional[Dict] = None
         video_metadata: Dict = {}
+        tracker = None
         
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata = \
+            species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker = \
                 self._analyze_video(cap, total_frames)
             frames_analyzed = (total_frames + self.sample_rate - 1) // self.sample_rate
             
@@ -305,7 +306,12 @@ class ClipPostProcessor:
         # Regenerate thumbnails with best detection frames
         thumbnails_saved = []
         if regenerate_thumbnails:
-            if species_results:
+            if tracker and tracker.active_track_count > 0:
+                # Use per-track thumbnails when tracking is enabled
+                # This ensures each track gets its own thumbnail with correct time range
+                thumbnails_saved = self._save_track_thumbnails(working_path, tracker, video_metadata.get('fps', 15.0))
+            elif species_results:
+                # Fallback to species-based thumbnails when tracking is disabled
                 thumbnails_saved = self._save_thumbnails(working_path, species_results)
             else:
                 # No valid detections - extract sample frames from video as fallback
@@ -377,14 +383,14 @@ class ClipPostProcessor:
         self, 
         cap: cv2.VideoCapture, 
         total_frames: int
-    ) -> Tuple[Dict[str, SpeciesResult], int, int, List[ProcessingLogEntry], Optional[Dict], Dict]:
+    ) -> Tuple[Dict[str, SpeciesResult], int, int, List[ProcessingLogEntry], Optional[Dict], Dict, Optional['ObjectTracker']]:
         """Analyze video frames and collect species detections.
         
         Uses object tracking (if enabled) to consolidate classifications for 
         the same animal across frames, producing one species per tracked object.
         
         Returns:
-            (species_results dict, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata)
+            (species_results dict, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker)
         """
         # Get video FPS and calculate sample rate
         fps = cap.get(cv2.CAP_PROP_FPS) or 15.0
@@ -606,10 +612,10 @@ class ClipPostProcessor:
             if tracked_results:
                 LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
                            raw_detection_count, len(tracked_results))
-                return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata
+                return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker
         
         # Fallback to non-tracked results
-        return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata
+        return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
     
     def _build_tracked_species_results(
         self,
@@ -1146,6 +1152,92 @@ class ClipPostProcessor:
         LOGGER.debug("Saved %d thumbnails for %s", len(saved), clip_path.name)
         return saved
     
+    def _save_track_thumbnails(
+        self,
+        clip_path: Path,
+        tracker: 'ObjectTracker',
+        fps: float = 15.0,
+    ) -> List[Path]:
+        """Save one thumbnail per track with track-specific naming.
+        
+        This ensures each tracked animal gets its own thumbnail, even if
+        multiple tracks have the same species. The thumbnail filename includes
+        the track index to keep them unique.
+        
+        Args:
+            clip_path: Path to the video clip
+            tracker: Object tracker with track data
+            fps: Video FPS for time calculations
+            
+        Returns:
+            List of saved thumbnail paths
+        """
+        saved = []
+        clip_stem = clip_path.stem
+        clip_dir = clip_path.parent
+        
+        # First, remove old thumbnails for this clip
+        for old_thumb in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
+            try:
+                old_thumb.unlink()
+            except Exception as e:
+                LOGGER.warning("Failed to remove old thumbnail %s: %s", old_thumb, e)
+        
+        # Get all tracks sorted by first_seen_frame for consistent ordering
+        tracks_sorted = sorted(
+            tracker.tracks.items(),
+            key=lambda x: x[1].first_seen_frame
+        )
+        
+        # Save one thumbnail per track
+        for track_idx, (track_id, track_info) in enumerate(tracks_sorted):
+            best_species_data = track_info.get_best_species()
+            if not best_species_data or not best_species_data[0]:
+                continue
+            
+            best_species, best_conf, taxonomy = best_species_data
+            
+            # Get the best frame for this species
+            best_frame_data = track_info.get_best_frame_for_species(best_species)
+            if not best_frame_data:
+                best_frame_data = track_info.get_best_frame()
+            
+            if not best_frame_data:
+                continue
+            
+            frame, conf, bbox = best_frame_data
+            
+            # Clean species name for filename
+            clean_species = best_species.replace(' ', '_').replace('/', '_').lower()
+            
+            # Include track index in filename to keep tracks separate
+            # Format: clipname_thumb_species_t0.jpg, clipname_thumb_species_t1.jpg
+            thumb_name = f"{clip_stem}_thumb_{clean_species}_t{track_idx}.jpg"
+            thumb_path = clip_dir / thumb_name
+            
+            try:
+                # Draw bounding box with track info
+                label_suffix = f" #{track_idx+1}" if len(tracks_sorted) > 1 else None
+                annotated = self._annotate_frame(
+                    frame, best_species, conf, bbox,
+                    track_num=track_idx + 1 if len(tracks_sorted) > 1 else None
+                )
+                
+                # Save thumbnail
+                if cv2.imwrite(str(thumb_path), annotated):
+                    saved.append(thumb_path)
+                    LOGGER.debug("Saved track thumbnail: %s (track %d, frames %d-%d)",
+                                thumb_path, track_id, 
+                                track_info.first_seen_frame, track_info.last_seen_frame)
+                else:
+                    LOGGER.error("Failed to save track thumbnail: %s", thumb_path)
+                    
+            except Exception as e:
+                LOGGER.error("Failed to save track thumbnail %s: %s", thumb_path, e)
+        
+        LOGGER.debug("Saved %d track thumbnails for %s", len(saved), clip_path.name)
+        return saved
+
     def _extract_sample_frames(
         self,
         clip_path: Path,

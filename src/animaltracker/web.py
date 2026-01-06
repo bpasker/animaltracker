@@ -456,7 +456,8 @@ class WebServer:
     def _get_thumbnails_for_clip(self, clip_path: Path) -> list:
         """Get all thumbnails associated with a clip file.
         
-        Returns list of dicts with 'path' (relative to clips dir), 'species', 'url'
+        Returns list of dicts with 'path' (relative to clips dir), 'species', 'url', 
+        and optionally 'track_index' for per-track thumbnails.
         """
         clips_dir = self.storage_root / 'clips'
         clip_stem = clip_path.stem
@@ -467,21 +468,39 @@ class WebServer:
         glob_pattern = f"{clip_stem}_thumb_*.jpg"
         for thumb_file in clip_dir.glob(glob_pattern):
             # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
+            # or: {timestamp}_{species}_thumb_{specific_species}_t{track_idx}.jpg (new format)
             parts = thumb_file.stem.split("_thumb_")
+            track_index = None
+            
             if len(parts) >= 2:
                 raw_species = parts[-1]
-                # Remove trailing index numbers (e.g., "bird_1" -> "bird")
-                raw_species = re.sub(r'_\d+$', '', raw_species)
+                
+                # Check for track index suffix (e.g., "corvidae_t0" or "corvidae_t1")
+                track_match = re.match(r'^(.+?)_t(\d+)$', raw_species)
+                if track_match:
+                    raw_species = track_match.group(1)
+                    track_index = int(track_match.group(2))
+                else:
+                    # Remove trailing legacy index numbers (e.g., "bird_1" -> "bird")
+                    raw_species = re.sub(r'_\d+$', '', raw_species)
+                    
                 species = get_common_name(raw_species)
             else:
                 species = "Unknown"
             
             rel_path = thumb_file.relative_to(clips_dir)
-            thumbnails.append({
+            thumb_data = {
                 'path': str(rel_path),
                 'species': species,
                 'url': f"/clips/{rel_path}"
-            })
+            }
+            if track_index is not None:
+                thumb_data['track_index'] = track_index
+                
+            thumbnails.append(thumb_data)
+        
+        # Sort by track_index if present, to maintain consistent order
+        thumbnails.sort(key=lambda x: (x.get('track_index', 999), x['path']))
         
         return thumbnails
 
@@ -2197,11 +2216,20 @@ class WebServer:
                 if log_data.get('video', {}).get('fps'):
                     video_fps = log_data['video']['fps']
                 
-                # Build track info keyed by species
-                # Combine multiple tracks of the same species into one time range
+                # Build track info - now keyed by track INDEX (order) not species
+                # This preserves individual track timing even for same-species tracks
                 tracking_summary = log_data.get('tracking_summary', {})
+                tracks_by_index = {}  # Index -> track data
+                tracks_by_species = {}  # Fallback for old-format thumbnails
+                
                 if tracking_summary and tracking_summary.get('tracks'):
-                    for track in tracking_summary['tracks']:
+                    # Sort tracks by first_frame to match thumbnail generation order
+                    sorted_tracks = sorted(
+                        tracking_summary['tracks'],
+                        key=lambda t: t.get('first_frame', 0)
+                    )
+                    
+                    for track_idx, track in enumerate(sorted_tracks):
                         species_name = track.get('best_species', '')
                         if species_name:
                             # Convert frames to timestamps
@@ -2212,37 +2240,45 @@ class WebServer:
                             
                             common_name = get_common_name(species_name)
                             
-                            if common_name in track_info:
-                                # Merge with existing: expand time range
-                                existing = track_info[common_name]
-                                existing['start_time'] = min(existing['start_time'], start_sec)
-                                existing['end_time'] = max(existing['end_time'], end_sec)
-                                existing['duration'] = existing['end_time'] - existing['start_time']
-                                # Keep highest confidence
-                                if track.get('best_confidence', 0) > existing['confidence']:
-                                    existing['confidence'] = track.get('best_confidence', 0)
-                                    existing['track_id'] = track.get('track_id')
-                            else:
-                                track_info[common_name] = {
-                                    'track_id': track.get('track_id'),
-                                    'start_time': start_sec,
-                                    'end_time': end_sec,
-                                    'duration': end_sec - start_sec,
-                                    'confidence': track.get('best_confidence', 0),
-                                }
+                            # Store by track index for new-format thumbnails
+                            tracks_by_index[track_idx] = {
+                                'track_id': track.get('track_id'),
+                                'start_time': start_sec,
+                                'end_time': end_sec,
+                                'duration': end_sec - start_sec,
+                                'confidence': track.get('best_confidence', 0),
+                                'species': common_name,
+                            }
+                            
+                            # Also store by species for old-format thumbnail fallback
+                            # But DON'T merge - keep the first one (highest confidence usually)
+                            if common_name not in tracks_by_species:
+                                tracks_by_species[common_name] = tracks_by_index[track_idx]
+                                
             except Exception as e:
                 LOGGER.warning("Failed to load processing log: %s", e)
         
         # Enrich thumbnails with track timing
         for thumb in thumbnails:
-            thumb_species = thumb.get('species', '')
-            if thumb_species in track_info:
-                ti = track_info[thumb_species]
+            # First try to match by track_index (new format thumbnails)
+            track_idx = thumb.get('track_index')
+            if track_idx is not None and track_idx in tracks_by_index:
+                ti = tracks_by_index[track_idx]
                 thumb['start_time'] = ti['start_time']
                 thumb['end_time'] = ti['end_time']
                 thumb['duration'] = ti['duration']
                 thumb['track_id'] = ti['track_id']
                 thumb['confidence'] = ti['confidence']
+            else:
+                # Fallback: match by species name (old format thumbnails)
+                thumb_species = thumb.get('species', '')
+                if thumb_species in tracks_by_species:
+                    ti = tracks_by_species[thumb_species]
+                    thumb['start_time'] = ti['start_time']
+                    thumb['end_time'] = ti['end_time']
+                    thumb['duration'] = ti['duration']
+                    thumb['track_id'] = ti['track_id']
+                    thumb['confidence'] = ti['confidence']
         
         # Determine camera from path
         parts = rel_path.split('/')

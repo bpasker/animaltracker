@@ -129,7 +129,7 @@ class StorageManager:
         """Get all thumbnails associated with a clip.
         
         Returns:
-            List of dicts with 'path', 'species', 'rel_path' for each thumbnail
+            List of dicts with 'path', 'species', 'rel_path', and optional 'track_index' for each thumbnail
         """
         thumbnails = []
         clip_stem = clip_path.stem
@@ -140,27 +140,45 @@ class StorageManager:
             # Extract species from filename
             # Format: {timestamp}_{original_species}_thumb_{specific_species}.jpg
             # or: {timestamp}_{original_species}_thumb_{specific_species}_{index}.jpg
+            # or: {timestamp}_{original_species}_thumb_{specific_species}_t{track_index}.jpg (new format)
             parts = thumb_file.stem.split("_thumb_")
             if len(parts) >= 2:
                 species_part = parts[-1]
-                # Check if there's an index suffix (e.g., "cardinal_1" or "cardinal_2")
-                match = re.match(r'^(.+?)(?:_(\d+))?$', species_part)
-                if match:
-                    species_name = match.group(1)
-                    detection_num = match.group(2)
+                track_index = None
+                
+                # Check for track index suffix (e.g., "corvidae_t0" or "corvidae_t1")
+                track_match = re.match(r'^(.+?)_t(\d+)$', species_part)
+                if track_match:
+                    species_name = track_match.group(1)
+                    track_index = int(track_match.group(2))
                     species = get_common_name(species_name)
-                    if detection_num:
-                        species = f"{species} #{int(detection_num) + 1}"
                 else:
-                    species = get_common_name(species_part)
+                    # Check if there's a legacy index suffix (e.g., "cardinal_1" or "cardinal_2")
+                    match = re.match(r'^(.+?)(?:_(\d+))?$', species_part)
+                    if match:
+                        species_name = match.group(1)
+                        detection_num = match.group(2)
+                        species = get_common_name(species_name)
+                        if detection_num:
+                            species = f"{species} #{int(detection_num) + 1}"
+                    else:
+                        species = get_common_name(species_part)
             else:
                 species = "Unknown"
+                track_index = None
             
-            thumbnails.append({
+            thumb_data = {
                 'path': thumb_file,
                 'species': species,
                 'rel_path': thumb_file.relative_to(self.storage_root / "clips")
-            })
+            }
+            if track_index is not None:
+                thumb_data['track_index'] = track_index
+                
+            thumbnails.append(thumb_data)
+        
+        # Sort by track_index if present, to maintain consistent order
+        thumbnails.sort(key=lambda x: (x.get('track_index', 999), str(x['path'])))
         
         return thumbnails
 

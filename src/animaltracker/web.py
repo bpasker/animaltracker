@@ -1637,11 +1637,241 @@ class WebServer:
                         color: #888;
                     }
                     
+                    /* Filters Sidebar */
+                    .filters-sidebar {
+                        position: fixed;
+                        top: 0;
+                        left: -100%;
+                        width: 100%;
+                        max-width: 320px;
+                        height: 100%;
+                        background: #1a1a1a;
+                        z-index: 600;
+                        transition: left 0.3s ease;
+                        display: flex;
+                        flex-direction: column;
+                        box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+                    }
+                    .filters-sidebar.visible { left: 0; }
+                    .filters-overlay {
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        bottom: 0;
+                        background: rgba(0,0,0,0.5);
+                        z-index: 599;
+                        opacity: 0;
+                        visibility: hidden;
+                        transition: opacity 0.3s, visibility 0.3s;
+                    }
+                    .filters-overlay.visible { opacity: 1; visibility: visible; }
+                    
+                    .filters-header {
+                        padding: 16px;
+                        border-bottom: 1px solid #333;
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        flex-shrink: 0;
+                    }
+                    .filters-title {
+                        font-size: 1.1em;
+                        font-weight: 600;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                    }
+                    .filters-close {
+                        background: #333;
+                        border: none;
+                        color: #fff;
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 1.3em;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    .filters-close:hover { background: #444; }
+                    
+                    .filters-content {
+                        flex: 1;
+                        overflow-y: auto;
+                        padding: 16px;
+                    }
+                    
+                    .filter-section {
+                        margin-bottom: 24px;
+                    }
+                    .filter-section:last-child { margin-bottom: 0; }
+                    .filter-section-title {
+                        font-size: 0.85em;
+                        font-weight: 600;
+                        color: #888;
+                        text-transform: uppercase;
+                        letter-spacing: 0.5px;
+                        margin-bottom: 12px;
+                    }
+                    
+                    /* Quick Select Buttons */
+                    .quick-filters {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr;
+                        gap: 8px;
+                    }
+                    .quick-filter-btn {
+                        background: #2a2a2a;
+                        border: none;
+                        color: #aaa;
+                        padding: 10px 12px;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 0.9em;
+                        transition: background 0.15s, color 0.15s;
+                    }
+                    .quick-filter-btn:hover { background: #333; color: #fff; }
+                    .quick-filter-btn.active { background: #4CAF50; color: white; }
+                    
+                    /* Date Range */
+                    .date-range-inputs {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 10px;
+                    }
+                    .date-input-group {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                    }
+                    .date-input-label {
+                        color: #888;
+                        font-size: 0.9em;
+                        width: 45px;
+                    }
+                    .date-input {
+                        flex: 1;
+                        background: #2a2a2a;
+                        border: 1px solid #333;
+                        color: #fff;
+                        padding: 10px 12px;
+                        border-radius: 8px;
+                        font-size: 0.9em;
+                    }
+                    .date-input:focus {
+                        outline: none;
+                        border-color: #4CAF50;
+                    }
+                    
+                    /* Filter Checkbox List */
+                    .filter-list {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 6px;
+                        max-height: 200px;
+                        overflow-y: auto;
+                    }
+                    .filter-item {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        padding: 8px 10px;
+                        background: #2a2a2a;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        transition: background 0.15s;
+                    }
+                    .filter-item:hover { background: #333; }
+                    .filter-item input[type="checkbox"] {
+                        width: 18px;
+                        height: 18px;
+                        accent-color: #4CAF50;
+                        flex-shrink: 0;
+                    }
+                    .filter-item-label {
+                        flex: 1;
+                        font-size: 0.95em;
+                        color: #ddd;
+                    }
+                    .filter-item-count {
+                        color: #666;
+                        font-size: 0.85em;
+                        background: #1a1a1a;
+                        padding: 2px 8px;
+                        border-radius: 10px;
+                    }
+                    
+                    /* Active filter indicator */
+                    .filter-active-badge {
+                        background: #4CAF50;
+                        color: white;
+                        font-size: 0.75em;
+                        padding: 2px 8px;
+                        border-radius: 10px;
+                        margin-left: 8px;
+                    }
+                    
+                    /* Filters Footer */
+                    .filters-footer {
+                        padding: 16px;
+                        border-top: 1px solid #333;
+                        display: flex;
+                        gap: 10px;
+                        flex-shrink: 0;
+                    }
+                    .filter-btn {
+                        flex: 1;
+                        padding: 12px;
+                        border: none;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 0.95em;
+                        font-weight: 500;
+                        transition: background 0.15s;
+                    }
+                    .filter-btn.clear {
+                        background: #333;
+                        color: #aaa;
+                    }
+                    .filter-btn.clear:hover { background: #444; color: #fff; }
+                    .filter-btn.apply {
+                        background: #4CAF50;
+                        color: white;
+                    }
+                    .filter-btn.apply:hover { background: #45a049; }
+                    
+                    /* Filter Toggle Button in Header */
+                    .filter-toggle-btn {
+                        background: #333;
+                        border: none;
+                        color: #aaa;
+                        padding: 8px 14px;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 0.9em;
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                        transition: background 0.15s, color 0.15s;
+                    }
+                    .filter-toggle-btn:hover { background: #444; color: #fff; }
+                    .filter-toggle-btn.has-filters {
+                        background: #4CAF50;
+                        color: white;
+                    }
+                    .filter-toggle-btn svg {
+                        width: 16px;
+                        height: 16px;
+                    }
+                    
                     /* Desktop adjustments */
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1100px; margin: 0 auto; }
                         .calendar-day { min-height: 90px; }
                         .day-panel-container { max-width: 500px; }
+                        .filters-sidebar { max-width: 350px; }
                         .recordings-list { gap: 8px; }
                         .recording-card { padding: 14px 18px; }
                     }
@@ -1654,6 +1884,8 @@ class WebServer:
                         .day-species { display: none; }
                         .current-month { font-size: 1.1em; min-width: 140px; }
                         .nav-btn { width: 36px; height: 36px; }
+                        .filter-toggle-btn span { display: none; }
+                        .filter-toggle-btn { padding: 8px 10px; }
                     }
                 </style>
             </head>
@@ -1663,6 +1895,65 @@ class WebServer:
                     <a href="/recordings" class="active">Recordings</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
+                </div>
+                
+                <!-- Filters Sidebar -->
+                <div class="filters-overlay" id="filtersOverlay" onclick="CalendarApp.closeFilters()"></div>
+                <div class="filters-sidebar" id="filtersSidebar">
+                    <div class="filters-header">
+                        <div class="filters-title">
+                            <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+                            Filters
+                        </div>
+                        <button class="filters-close" onclick="CalendarApp.closeFilters()">×</button>
+                    </div>
+                    <div class="filters-content">
+                        <!-- Quick Select -->
+                        <div class="filter-section">
+                            <div class="filter-section-title">Quick Select</div>
+                            <div class="quick-filters">
+                                <button class="quick-filter-btn" onclick="CalendarApp.quickFilter('today')">Today</button>
+                                <button class="quick-filter-btn" onclick="CalendarApp.quickFilter('week')">This Week</button>
+                                <button class="quick-filter-btn" onclick="CalendarApp.quickFilter('month')">This Month</button>
+                                <button class="quick-filter-btn" onclick="CalendarApp.quickFilter('all')">All Time</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Date Range -->
+                        <div class="filter-section">
+                            <div class="filter-section-title">Date Range</div>
+                            <div class="date-range-inputs">
+                                <div class="date-input-group">
+                                    <label class="date-input-label">From:</label>
+                                    <input type="date" class="date-input" id="filterDateFrom" onchange="CalendarApp.updateFilterPreview()">
+                                </div>
+                                <div class="date-input-group">
+                                    <label class="date-input-label">To:</label>
+                                    <input type="date" class="date-input" id="filterDateTo" onchange="CalendarApp.updateFilterPreview()">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Cameras -->
+                        <div class="filter-section">
+                            <div class="filter-section-title">Cameras</div>
+                            <div class="filter-list" id="filterCamerasList">
+                                <!-- Populated by JavaScript -->
+                            </div>
+                        </div>
+                        
+                        <!-- Species -->
+                        <div class="filter-section">
+                            <div class="filter-section-title">Species</div>
+                            <div class="filter-list" id="filterSpeciesList">
+                                <!-- Populated by JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                    <div class="filters-footer">
+                        <button class="filter-btn clear" onclick="CalendarApp.clearFilters()">Clear All</button>
+                        <button class="filter-btn apply" onclick="CalendarApp.applyFilters()">Apply</button>
+                    </div>
                 </div>
                 
                 <div class="calendar-container">
@@ -1915,6 +2206,27 @@ class WebServer:
                             if (date && /^\d{{4}}-\d{{2}}-\d{{2}}$/.test(date)) {{
                                 this.state.selectedDate = date;
                             }}
+                            
+                            // Filters - cameras
+                            const cameras = params.get('cameras');
+                            if (cameras) {{
+                                this.state.filters.cameras = cameras.split(',').filter(c => c);
+                            }}
+                            
+                            // Filters - species
+                            const species = params.get('species');
+                            if (species) {{
+                                this.state.filters.species = species.split(',').filter(s => s);
+                            }}
+                            
+                            // Filters - date range
+                            const dateFrom = params.get('from');
+                            const dateTo = params.get('to');
+                            if (dateFrom) this.state.filters.dateRange.start = dateFrom;
+                            if (dateTo) this.state.filters.dateRange.end = dateTo;
+                            
+                            // Update filter button state
+                            setTimeout(() => this.updateFilterButtonState(), 0);
                         }},
                         
                         // Track if this is initial load (to avoid pushing initial state)
@@ -1931,6 +2243,31 @@ class WebServer:
                                 url.searchParams.set('date', this.state.selectedDate);
                             }} else {{
                                 url.searchParams.delete('date');
+                            }}
+                            
+                            // Filter params
+                            if (this.state.filters.cameras.length > 0) {{
+                                url.searchParams.set('cameras', this.state.filters.cameras.join(','));
+                            }} else {{
+                                url.searchParams.delete('cameras');
+                            }}
+                            
+                            if (this.state.filters.species.length > 0) {{
+                                url.searchParams.set('species', this.state.filters.species.join(','));
+                            }} else {{
+                                url.searchParams.delete('species');
+                            }}
+                            
+                            if (this.state.filters.dateRange.start) {{
+                                url.searchParams.set('from', this.state.filters.dateRange.start);
+                            }} else {{
+                                url.searchParams.delete('from');
+                            }}
+                            
+                            if (this.state.filters.dateRange.end) {{
+                                url.searchParams.set('to', this.state.filters.dateRange.end);
+                            }} else {{
+                                url.searchParams.delete('to');
                             }}
                             
                             // Use pushState for navigation history, replaceState for initial load
@@ -2305,16 +2642,22 @@ class WebServer:
                             const div = document.createElement('div');
                             div.className = 'calendar-day';
                             
+                            // Check if this day passes filters
+                            const dateStr = isOtherMonth ? null : this.buildDateStr(day);
+                            const passesFilters = !isOtherMonth && dayData && 
+                                                  this.dayPassesFilters(dayData) && 
+                                                  this.dateInRange(dateStr);
+                            
                             // Apply state classes
                             if (isOtherMonth) div.classList.add('other-month');
                             if (isToday) div.classList.add('today');
                             if (isSelected) div.classList.add('selected');
-                            if (dayData && dayData.count > 0) div.classList.add('has-recordings');
+                            if (dayData && dayData.count > 0 && passesFilters) div.classList.add('has-recordings');
                             
                             // Build cell content
                             let html = `<div class="day-number">${{day}}</div>`;
                             
-                            if (dayData && dayData.count > 0) {{
+                            if (dayData && dayData.count > 0 && passesFilters) {{
                                 // Show camera count icon if multiple cameras
                                 if (dayData.cameras && dayData.cameras.length > 1) {{
                                     html += `<div class="day-cameras">📹${{dayData.cameras.length}}</div>`;
@@ -2331,12 +2674,12 @@ class WebServer:
                             
                             div.innerHTML = html;
                             
-                            // Add click handler for days with recordings (not other month)
-                            if (!isOtherMonth && dayData && dayData.count > 0) {{
+                            // Add click handler for days with recordings that pass filters (not other month)
+                            if (!isOtherMonth && dayData && dayData.count > 0 && passesFilters) {{
                                 div.onclick = () => this.showDayPanel(day);
                                 div.style.cursor = 'pointer';
                             }} else if (!isOtherMonth) {{
-                                // Days without recordings are not clickable
+                                // Days without recordings or filtered out are not clickable
                                 div.style.cursor = 'default';
                             }}
                             
@@ -2749,6 +3092,287 @@ class WebServer:
                             }}
                         }},
                         
+                        // ============== FILTERS (Phase 4) ==============
+                        
+                        // Toggle filters sidebar
+                        toggleFilters() {{
+                            const sidebar = document.getElementById('filtersSidebar');
+                            const overlay = document.getElementById('filtersOverlay');
+                            const isVisible = sidebar.classList.contains('visible');
+                            
+                            if (isVisible) {{
+                                this.closeFilters();
+                            }} else {{
+                                this.openFilters();
+                            }}
+                        }},
+                        
+                        // Open filters sidebar
+                        openFilters() {{
+                            const sidebar = document.getElementById('filtersSidebar');
+                            const overlay = document.getElementById('filtersOverlay');
+                            
+                            // Populate filter lists from calendar data
+                            this.populateFilterLists();
+                            
+                            sidebar.classList.add('visible');
+                            overlay.classList.add('visible');
+                        }},
+                        
+                        // Close filters sidebar
+                        closeFilters() {{
+                            const sidebar = document.getElementById('filtersSidebar');
+                            const overlay = document.getElementById('filtersOverlay');
+                            
+                            sidebar.classList.remove('visible');
+                            overlay.classList.remove('visible');
+                        }},
+                        
+                        // Populate camera and species filter lists from calendar data
+                        populateFilterLists() {{
+                            const data = this.state.calendarData;
+                            if (!data) return;
+                            
+                            const cameras = data.filters?.cameras || [];
+                            const species = data.filters?.species || [];
+                            
+                            // Count clips per camera and species
+                            const cameraCounts = {{}};
+                            const speciesCounts = {{}};
+                            
+                            // Iterate through all days to count
+                            Object.values(data.years || {{}}).forEach(yearData => {{
+                                Object.values(yearData.months || {{}}).forEach(monthData => {{
+                                    Object.values(monthData.days || {{}}).forEach(dayData => {{
+                                        // Count by camera
+                                        (dayData.cameras || []).forEach(cam => {{
+                                            cameraCounts[cam] = (cameraCounts[cam] || 0) + (dayData.count || 0) / (dayData.cameras?.length || 1);
+                                        }});
+                                        // Count by species
+                                        (dayData.species || []).forEach(sp => {{
+                                            speciesCounts[sp] = (speciesCounts[sp] || 0) + (dayData.count || 0) / (dayData.species?.length || 1);
+                                        }});
+                                    }});
+                                }});
+                            }});
+                            
+                            // Render camera list
+                            const cameraList = document.getElementById('filterCamerasList');
+                            if (cameraList) {{
+                                cameraList.innerHTML = cameras.map(cam => `
+                                    <label class="filter-item">
+                                        <input type="checkbox" name="filter_camera" value="${{cam}}"
+                                               ${{this.state.filters.cameras.includes(cam) ? 'checked' : ''}}
+                                               onchange="CalendarApp.updateFilterPreview()">
+                                        <span class="filter-item-label">${{cam}}</span>
+                                        <span class="filter-item-count">${{Math.round(cameraCounts[cam] || 0)}}</span>
+                                    </label>
+                                `).join('') || '<div style="color: #666; font-size: 0.9em;">No cameras found</div>';
+                            }}
+                            
+                            // Render species list
+                            const speciesList = document.getElementById('filterSpeciesList');
+                            if (speciesList) {{
+                                speciesList.innerHTML = species.map(sp => `
+                                    <label class="filter-item">
+                                        <input type="checkbox" name="filter_species" value="${{sp}}"
+                                               ${{this.state.filters.species.includes(sp) ? 'checked' : ''}}
+                                               onchange="CalendarApp.updateFilterPreview()">
+                                        <span class="filter-item-label">${{sp}}</span>
+                                        <span class="filter-item-count">${{Math.round(speciesCounts[sp] || 0)}}</span>
+                                    </label>
+                                `).join('') || '<div style="color: #666; font-size: 0.9em;">No species found</div>';
+                            }}
+                            
+                            // Set date inputs
+                            const dateFrom = document.getElementById('filterDateFrom');
+                            const dateTo = document.getElementById('filterDateTo');
+                            if (dateFrom) dateFrom.value = this.state.filters.dateRange.start || '';
+                            if (dateTo) dateTo.value = this.state.filters.dateRange.end || '';
+                        }},
+                        
+                        // Update filter preview (called when checkboxes change)
+                        updateFilterPreview() {{
+                            // Could add a preview count here if desired
+                        }},
+                        
+                        // Quick filter buttons
+                        quickFilter(type) {{
+                            const now = new Date();
+                            const today = this.formatDateStr(now.getFullYear(), now.getMonth() + 1, now.getDate());
+                            
+                            // Clear existing date range
+                            let start = null;
+                            let end = null;
+                            
+                            switch (type) {{
+                                case 'today':
+                                    start = today;
+                                    end = today;
+                                    break;
+                                case 'week':
+                                    // Start of week (Sunday)
+                                    const weekStart = new Date(now);
+                                    weekStart.setDate(now.getDate() - now.getDay());
+                                    start = this.formatDateStr(weekStart.getFullYear(), weekStart.getMonth() + 1, weekStart.getDate());
+                                    end = today;
+                                    break;
+                                case 'month':
+                                    start = this.formatDateStr(now.getFullYear(), now.getMonth() + 1, 1);
+                                    end = today;
+                                    break;
+                                case 'all':
+                                    start = null;
+                                    end = null;
+                                    break;
+                            }}
+                            
+                            // Update date inputs
+                            const dateFrom = document.getElementById('filterDateFrom');
+                            const dateTo = document.getElementById('filterDateTo');
+                            if (dateFrom) dateFrom.value = start || '';
+                            if (dateTo) dateTo.value = end || '';
+                            
+                            // Highlight active quick filter button
+                            document.querySelectorAll('.quick-filter-btn').forEach(btn => btn.classList.remove('active'));
+                            event.target.classList.add('active');
+                        }},
+                        
+                        // Format date as YYYY-MM-DD
+                        formatDateStr(year, month, day) {{
+                            return `${{year}}-${{String(month).padStart(2, '0')}}-${{String(day).padStart(2, '0')}}`;
+                        }},
+                        
+                        // Clear all filters
+                        clearFilters() {{
+                            this.state.filters = {{
+                                cameras: [],
+                                species: [],
+                                dateRange: {{ start: null, end: null }}
+                            }};
+                            
+                            // Clear checkboxes
+                            document.querySelectorAll('input[name="filter_camera"]').forEach(cb => cb.checked = false);
+                            document.querySelectorAll('input[name="filter_species"]').forEach(cb => cb.checked = false);
+                            
+                            // Clear date inputs
+                            const dateFrom = document.getElementById('filterDateFrom');
+                            const dateTo = document.getElementById('filterDateTo');
+                            if (dateFrom) dateFrom.value = '';
+                            if (dateTo) dateTo.value = '';
+                            
+                            // Clear quick filter highlights
+                            document.querySelectorAll('.quick-filter-btn').forEach(btn => btn.classList.remove('active'));
+                            
+                            // Update button state
+                            this.updateFilterButtonState();
+                            
+                            // Re-render
+                            this.render();
+                            this.closeFilters();
+                        }},
+                        
+                        // Apply filters
+                        applyFilters() {{
+                            // Collect selected cameras
+                            const cameras = Array.from(document.querySelectorAll('input[name="filter_camera"]:checked'))
+                                .map(cb => cb.value);
+                            
+                            // Collect selected species
+                            const species = Array.from(document.querySelectorAll('input[name="filter_species"]:checked'))
+                                .map(cb => cb.value);
+                            
+                            // Get date range
+                            const dateFrom = document.getElementById('filterDateFrom')?.value || null;
+                            const dateTo = document.getElementById('filterDateTo')?.value || null;
+                            
+                            // Update state
+                            this.state.filters = {{
+                                cameras: cameras,
+                                species: species,
+                                dateRange: {{ start: dateFrom, end: dateTo }}
+                            }};
+                            
+                            // Update URL with filters
+                            this.updateUrl();
+                            
+                            // Update button state
+                            this.updateFilterButtonState();
+                            
+                            // Re-render calendar with filters
+                            this.render();
+                            
+                            // Close sidebar
+                            this.closeFilters();
+                        }},
+                        
+                        // Update the filter button to show active state
+                        updateFilterButtonState() {{
+                            const btn = document.getElementById('filterToggleBtn');
+                            if (!btn) return;
+                            
+                            const hasFilters = this.hasActiveFilters();
+                            btn.classList.toggle('has-filters', hasFilters);
+                            
+                            const count = this.getActiveFilterCount();
+                            const span = btn.querySelector('span');
+                            if (span) {{
+                                span.textContent = hasFilters ? `Filters (${{count}})` : 'Filters';
+                            }}
+                        }},
+                        
+                        // Check if any filters are active
+                        hasActiveFilters() {{
+                            const f = this.state.filters;
+                            return f.cameras.length > 0 || 
+                                   f.species.length > 0 || 
+                                   f.dateRange.start || 
+                                   f.dateRange.end;
+                        }},
+                        
+                        // Get count of active filters
+                        getActiveFilterCount() {{
+                            const f = this.state.filters;
+                            let count = f.cameras.length + f.species.length;
+                            if (f.dateRange.start || f.dateRange.end) count++;
+                            return count;
+                        }},
+                        
+                        // Check if a day passes the current filters
+                        dayPassesFilters(dayData) {{
+                            if (!dayData) return false;
+                            const f = this.state.filters;
+                            
+                            // Camera filter
+                            if (f.cameras.length > 0) {{
+                                const dayCameras = dayData.cameras || [];
+                                if (!f.cameras.some(c => dayCameras.includes(c))) {{
+                                    return false;
+                                }}
+                            }}
+                            
+                            // Species filter
+                            if (f.species.length > 0) {{
+                                const daySpecies = dayData.species || [];
+                                if (!f.species.some(s => daySpecies.includes(s))) {{
+                                    return false;
+                                }}
+                            }}
+                            
+                            return true;
+                        }},
+                        
+                        // Check if a date is within the date range filter
+                        dateInRange(dateStr) {{
+                            const f = this.state.filters;
+                            if (!f.dateRange.start && !f.dateRange.end) return true;
+                            
+                            if (f.dateRange.start && dateStr < f.dateRange.start) return false;
+                            if (f.dateRange.end && dateStr > f.dateRange.end) return false;
+                            
+                            return true;
+                        }},
+                        
                         // Close the day panel
                         closeDayPanel() {{
                             document.getElementById('dayPanelOverlay').classList.remove('visible');
@@ -2777,13 +3401,17 @@ class WebServer:
                             // Don't capture keys if focused on input
                             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
                             
-                            // Close picker on Escape
+                            // Close picker and filters on Escape
                             if (e.key === 'Escape') {{
                                 CalendarApp.closePicker();
+                                CalendarApp.closeFilters();
                             }}
                             
                             // Don't capture if picker is open
                             if (document.getElementById('pickerDropdown').classList.contains('visible')) return;
+                            
+                            // Don't capture if filters sidebar is open
+                            if (document.getElementById('filtersSidebar').classList.contains('visible')) return;
                             
                             // Handle day panel keyboard navigation
                             const dayPanelOpen = document.getElementById('dayPanelContainer').classList.contains('visible');
@@ -2826,6 +3454,11 @@ class WebServer:
                                 case 'M':
                                     e.preventDefault();
                                     CalendarApp.togglePicker();
+                                    break;
+                                case 'f':
+                                case 'F':
+                                    e.preventDefault();
+                                    CalendarApp.toggleFilters();
                                     break;
                             }}
                         }});

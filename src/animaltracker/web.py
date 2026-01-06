@@ -467,6 +467,10 @@ class WebServer:
         glob_pattern = f"{clip_stem}_thumb_*.jpg"
         LOGGER.info("Looking for thumbnails in %s with pattern: %s", clip_dir, glob_pattern)
         
+        # List all jpg files in directory to help debug
+        all_jpgs = list(clip_dir.glob("*.jpg"))
+        LOGGER.info("All JPG files in directory (%d total): %s", len(all_jpgs), [f.name for f in all_jpgs])
+        
         # Look for thumbnails matching this clip
         for thumb_file in clip_dir.glob(glob_pattern):
             LOGGER.info("Found thumbnail: %s", thumb_file)

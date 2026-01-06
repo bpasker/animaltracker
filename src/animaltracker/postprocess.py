@@ -526,7 +526,7 @@ class ClipPostProcessor:
                         reason=f"Merged {spatial_merged} tracks based on spatial continuity (IoU≥{self.settings.spatial_merge_iou}, gap≤{self.settings.spatial_merge_gap})",
                     ))
                 
-                # NEW: Merge spurious parallel tracks (overlapping in time but same location)
+                # Merge spurious parallel tracks (overlapping in time but same location)
                 # ByteTrack sometimes creates duplicate tracks when briefly losing an object
                 overlap_merged = tracker.merge_overlapping_same_location_tracks(
                     iou_threshold=self.settings.spatial_merge_iou
@@ -538,6 +538,18 @@ class ClipPostProcessor:
                         species="",
                         confidence=0.0,
                         reason=f"Merged {overlap_merged} spurious parallel tracks (same location, overlapping time)",
+                    ))
+                
+                # Merge tracks that fill gaps in larger tracks' detection timelines
+                # If a smaller track exists entirely within a gap of a larger track, merge them
+                gap_merged = tracker.merge_gap_filling_tracks()
+                if gap_merged > 0:
+                    processing_log.append(ProcessingLogEntry(
+                        frame_idx=-1,
+                        event="gap_fill_merge",
+                        species="",
+                        confidence=0.0,
+                        reason=f"Merged {gap_merged} tracks that filled detection gaps in larger tracks",
                     ))
             
             # Second pass: Merge fragmented tracks with the SAME species

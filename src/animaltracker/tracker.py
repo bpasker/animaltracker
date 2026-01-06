@@ -982,6 +982,139 @@ class ObjectTracker:
         
         return merged_count
 
+    def merge_gap_filling_tracks(self) -> int:
+        """Merge tracks that fill gaps in larger tracks' detection timelines.
+        
+        If Track A has detections at frames [100-200, 300-400] (with a gap 200-300)
+        and Track B exists entirely within that gap (e.g., frames 220-280),
+        Track B likely represents the same animal that was briefly lost and re-detected
+        with a new track ID.
+        
+        This is more aggressive than spatial merge - it doesn't require IoU match,
+        just that the smaller track is temporally "sandwiched" by the larger track.
+        
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+        
+        # Build track data with detection frame sets
+        track_data = []
+        for track_id, track_info in self.tracks.items():
+            detection_frames = set()
+            for c in track_info.classifications:
+                detection_frames.add(c.frame_idx)
+            
+            if not detection_frames:
+                continue
+            
+            species, confidence, _ = track_info.get_best_species()
+            track_data.append({
+                'track_id': track_id,
+                'info': track_info,
+                'first_frame': track_info.first_seen_frame,
+                'last_frame': track_info.last_seen_frame,
+                'detection_frames': detection_frames,
+                'species': species,
+                'confidence': confidence,
+                'detections': len(track_info.classifications),
+            })
+        
+        if len(track_data) <= 1:
+            return 0
+        
+        # Sort by number of detections (merge smaller into larger)
+        track_data.sort(key=lambda x: x['detections'], reverse=True)
+        
+        merged_count = 0
+        tracks_to_remove = set()
+        
+        for i, larger in enumerate(track_data):
+            if larger['track_id'] in tracks_to_remove:
+                continue
+            
+            # Find gaps in the larger track's detections
+            larger_frames = sorted(larger['detection_frames'])
+            if len(larger_frames) < 2:
+                continue
+            
+            # Build list of gaps (start_frame, end_frame)
+            gaps = []
+            for j in range(len(larger_frames) - 1):
+                gap_start = larger_frames[j]
+                gap_end = larger_frames[j + 1]
+                gap_size = gap_end - gap_start
+                if gap_size > 6:  # Only consider gaps larger than typical frame skip
+                    gaps.append((gap_start, gap_end))
+            
+            if not gaps:
+                continue
+            
+            for smaller in track_data[i+1:]:
+                if smaller['track_id'] in tracks_to_remove:
+                    continue
+                
+                # Check if smaller track is entirely within one of larger's gaps
+                smaller_first = smaller['first_frame']
+                smaller_last = smaller['last_frame']
+                
+                for gap_start, gap_end in gaps:
+                    # Smaller track must be entirely within the gap
+                    # (with some tolerance - within 3 frames of gap boundaries)
+                    if (smaller_first >= gap_start - 3 and 
+                        smaller_last <= gap_end + 3 and
+                        smaller_first > gap_start and
+                        smaller_last < gap_end):
+                        
+                        LOGGER.info(
+                            "Gap-fill merge: Track %d (%s, %d det, frames %d-%d) <- "
+                            "Track %d (%s, %d det, frames %d-%d) fills gap %d-%d",
+                            larger['track_id'], larger['species'], larger['detections'],
+                            larger['first_frame'], larger['last_frame'],
+                            smaller['track_id'], smaller['species'], smaller['detections'],
+                            smaller_first, smaller_last,
+                            gap_start, gap_end
+                        )
+                        
+                        larger_info = larger['info']
+                        smaller_info = smaller['info']
+                        
+                        # Merge smaller into larger
+                        larger_info.classifications.extend(smaller_info.classifications)
+                        larger_info.first_seen_frame = min(larger_info.first_seen_frame,
+                                                           smaller_info.first_seen_frame)
+                        larger_info.last_seen_frame = max(larger_info.last_seen_frame,
+                                                          smaller_info.last_seen_frame)
+                        
+                        if smaller_info.best_confidence > larger_info.best_confidence:
+                            larger_info.best_confidence = smaller_info.best_confidence
+                            larger_info.best_bbox = smaller_info.best_bbox
+                            larger_info.best_frame = smaller_info.best_frame
+                        
+                        for sp, frame_data in smaller_info.species_best_frames.items():
+                            if sp not in larger_info.species_best_frames:
+                                larger_info.species_best_frames[sp] = frame_data
+                            elif frame_data[1] > larger_info.species_best_frames[sp][1]:
+                                larger_info.species_best_frames[sp] = frame_data
+                        
+                        # Update larger's detection_frames for subsequent gap detection
+                        larger['detection_frames'].update(smaller['detection_frames'])
+                        
+                        tracks_to_remove.add(smaller['track_id'])
+                        merged_count += 1
+                        break  # Move to next smaller track
+        
+        # Remove merged tracks
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+        
+        if merged_count > 0:
+            LOGGER.info("Gap-fill merge: absorbed %d tracks that filled detection gaps, %d tracks remaining",
+                       merged_count, len(self.tracks))
+        
+        return merged_count
+
     def _calculate_iou(self, bbox1: List[float], bbox2: List[float]) -> float:
         """Calculate Intersection over Union between two bounding boxes.
         

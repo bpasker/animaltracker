@@ -120,6 +120,8 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
+                        width: 100%;
+                        box-sizing: border-box;
                     }
                     .nav a { 
                         color: #fff;
@@ -307,8 +309,8 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/" class="active">Live</a>
                     <a href="/recordings">Recordings</a>
+                    <a href="/" class="active">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -781,6 +783,8 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
+                        width: 100%;
+                        box-sizing: border-box;
                     }
                     .nav a { 
                         color: #fff;
@@ -1958,8 +1962,8 @@ class WebServer:
             </head>
             <body class="view-list">
                 <div class="nav">
-                    <a href="/">Live</a>
                     <a href="/recordings" class="active">Recordings</a>
+                    <a href="/">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -4188,6 +4192,8 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
+                        width: 100%;
+                        box-sizing: border-box;
                     }}
                     .nav a {{ 
                         color: #fff;
@@ -4589,8 +4595,8 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/">Live</a>
                     <a href="/recordings" class="active">Recordings</a>
+                    <a href="/">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -5530,6 +5536,8 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
+                        width: 100%;
+                        box-sizing: border-box;
                     }
                     .nav a { 
                         color: #fff;
@@ -5839,8 +5847,8 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/">Live</a>
                     <a href="/recordings">Recordings</a>
+                    <a href="/">Live</a>
                     <a href="/monitor" class="active">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -6282,6 +6290,8 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
+                        width: 100%;
+                        box-sizing: border-box;
                     }
                     .nav a { 
                         color: #fff;
@@ -6629,8 +6639,8 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/">Live</a>
                     <a href="/recordings">Recordings</a>
+                    <a href="/">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings" class="active">Settings</a>
                 </div>

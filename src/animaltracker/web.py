@@ -120,7 +120,10 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
-                        width: 100%;
+                        width: 100vw;
+                        margin-left: calc(-50vw + 50%);
+                        padding-left: 16px;
+                        padding-right: 16px;
                         box-sizing: border-box;
                     }
                     .nav a { 
@@ -783,7 +786,10 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
-                        width: 100%;
+                        width: 100vw;
+                        margin-left: calc(-50vw + 50%);
+                        padding-left: 16px;
+                        padding-right: 16px;
                         box-sizing: border-box;
                     }
                     .nav a { 
@@ -4192,7 +4198,10 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
-                        width: 100%;
+                        width: 100vw;
+                        margin-left: calc(-50vw + 50%);
+                        padding-left: 16px;
+                        padding-right: 16px;
                         box-sizing: border-box;
                     }}
                     .nav a {{ 
@@ -5536,7 +5545,10 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
-                        width: 100%;
+                        width: 100vw;
+                        margin-left: calc(-50vw + 50%);
+                        padding-left: 16px;
+                        padding-right: 16px;
                         box-sizing: border-box;
                     }
                     .nav a { 
@@ -6290,7 +6302,10 @@ class WebServer:
                         margin-bottom: 20px; 
                         padding-bottom: 16px; 
                         border-bottom: 1px solid #333;
-                        width: 100%;
+                        width: 100vw;
+                        margin-left: calc(-50vw + 50%);
+                        padding-left: 16px;
+                        padding-right: 16px;
                         box-sizing: border-box;
                     }
                     .nav a { 

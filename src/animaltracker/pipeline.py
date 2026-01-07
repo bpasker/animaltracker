@@ -563,6 +563,15 @@ class StreamWorker:
         detector = self.detector
         storage_root = self.storage.storage_root
         
+        # Capture exclusion lists for post-processing check
+        # (species may be reclassified by post-processor to an excluded species)
+        camera_excludes = set(self._normalize_species(s) for s in self.camera.exclude_species)
+        global_excludes = set(self._normalize_species(s) for s in self.runtime.general.exclusion_list)
+        all_excludes = camera_excludes | global_excludes
+        
+        # Capture reference to exclusion check method
+        species_matches_exclude = self._species_matches_exclude
+        
         def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames):
             """Finalize event with optional post-clip species analysis."""
             final_species = ctx_base['species']
@@ -637,7 +646,33 @@ class StreamWorker:
                 except Exception as e:
                     LOGGER.error("Unified post-processing failed: %s", e)
             
-            # Step 6: Send notification with refined info
+            # Step 6: Check if final species is excluded (post-processing may have reclassified)
+            # If excluded, delete the clip and skip notification
+            if all_excludes and species_matches_exclude(final_species, all_excludes):
+                LOGGER.info(
+                    "Post-processing identified excluded species '%s' for %s - deleting clip and skipping notification",
+                    final_species, camera_id
+                )
+                # Delete the clip file and any associated thumbnails
+                try:
+                    if clip_path.exists():
+                        clip_path.unlink()
+                        LOGGER.debug("Deleted excluded clip: %s", clip_path)
+                    # Delete associated thumbnails (same base name with _thumb*.jpg pattern)
+                    thumb_pattern = clip_path.stem + "_thumb*.jpg"
+                    for thumb_file in clip_path.parent.glob(thumb_pattern):
+                        thumb_file.unlink()
+                        LOGGER.debug("Deleted thumbnail: %s", thumb_file)
+                    # Delete processing log if it exists
+                    log_file = clip_path.with_suffix('.log.json')
+                    if log_file.exists():
+                        log_file.unlink()
+                        LOGGER.debug("Deleted log file: %s", log_file)
+                except Exception as e:
+                    LOGGER.warning("Failed to clean up excluded clip files: %s", e)
+                return  # Skip notification for excluded species
+            
+            # Step 7: Send notification with refined info
             ctx = NotificationContext(
                 species=final_species,
                 confidence=final_confidence,

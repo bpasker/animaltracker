@@ -2024,8 +2024,14 @@ class WebServer:
                 </div>
                 
                 <div class="calendar-container">
-                    <!-- Calendar Header with Navigation -->
-                    <div class="calendar-header">
+                    <!-- View Tabs -->
+                    <div class="view-tabs">
+                        <button class="view-tab active" id="tabList" onclick="CalendarApp.setView('list')">📋 List</button>
+                        <button class="view-tab" id="tabMonth" onclick="CalendarApp.setView('month')">📅 Month</button>
+                    </div>
+                    
+                    <!-- Calendar Header with Navigation (Month view only) -->
+                    <div class="calendar-header calendar-view-only">
                         <div class="calendar-nav">
                             <button class="nav-btn" onclick="CalendarApp.prevMonth()" title="Previous Month (← key)">
                                 <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
@@ -2056,17 +2062,11 @@ class WebServer:
                         </div>
                     </div>
                     
-                    <!-- Picker Overlay (click outside to close) -->
-                    <div class="picker-overlay" id="pickerOverlay" onclick="CalendarApp.closePicker()"></div>
-                    
-                    <!-- View Tabs -->
-                    <div class="view-tabs">
-                        <button class="view-tab active" id="tabMonth" onclick="CalendarApp.setView('month')">📅 Month</button>
-                        <button class="view-tab" id="tabList" onclick="CalendarApp.setView('list')">📋 List</button>
-                    </div>
-                    
                     <!-- Calendar Grid (Month View) -->
                     <div class="calendar-view-only">
+                        <!-- Picker Overlay (click outside to close) -->
+                        <div class="picker-overlay" id="pickerOverlay" onclick="CalendarApp.closePicker()"></div>
+                        
                         <!-- Month Summary Stats -->
                         <div class="month-stats" id="monthStats">
                             <div class="month-stat">

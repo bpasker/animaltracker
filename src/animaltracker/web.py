@@ -1958,7 +1958,7 @@ class WebServer:
             </head>
             <body class="view-list">
                 <div class="nav">
-                    <a href="/">Live View</a>
+                    <a href="/">Live</a>
                     <a href="/recordings" class="active">Recordings</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>

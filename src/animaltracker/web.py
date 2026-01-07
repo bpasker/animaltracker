@@ -307,7 +307,7 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/" class="active">Live View</a>
+                    <a href="/" class="active">Live</a>
                     <a href="/recordings">Recordings</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
@@ -4589,7 +4589,7 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/">Live View</a>
+                    <a href="/">Live</a>
                     <a href="/recordings" class="active">Recordings</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
@@ -5839,7 +5839,7 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/">Live View</a>
+                    <a href="/">Live</a>
                     <a href="/recordings">Recordings</a>
                     <a href="/monitor" class="active">Monitor</a>
                     <a href="/settings">Settings</a>
@@ -6629,7 +6629,7 @@ class WebServer:
             </head>
             <body>
                 <div class="nav">
-                    <a href="/">Live View</a>
+                    <a href="/">Live</a>
                     <a href="/recordings">Recordings</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings" class="active">Settings</a>

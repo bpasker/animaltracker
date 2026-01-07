@@ -1333,100 +1333,135 @@ class WebServer:
                         opacity: 0.5;
                     }
                     
-                    /* Card-based layout for recordings (used in list view) */
-                    .recordings-list { display: flex; flex-direction: column; gap: 12px; }
+                    /* Gallery-style grid layout for recordings (like security camera view) */
+                    .recordings-list { 
+                        display: grid; 
+                        grid-template-columns: repeat(2, 1fr); 
+                        gap: 8px;
+                    }
                     .recording-card {
                         background: #2a2a2a;
                         border-radius: 12px;
-                        padding: 16px;
-                        display: flex;
-                        align-items: center;
-                        gap: 14px;
-                        transition: transform 0.15s, background 0.15s;
+                        overflow: hidden;
+                        position: relative;
                         cursor: pointer;
+                        transition: transform 0.15s, box-shadow 0.15s;
+                        aspect-ratio: 4/3;
                     }
-                    .recording-card:active { transform: scale(0.98); background: #333; }
+                    .recording-card:hover { transform: scale(1.02); box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+                    .recording-card:active { transform: scale(0.98); }
                     .recording-checkbox {
+                        position: absolute;
+                        top: 10px;
+                        left: 10px;
                         width: 22px;
                         height: 22px;
                         accent-color: #4CAF50;
-                        flex-shrink: 0;
+                        z-index: 10;
+                        opacity: 0;
+                        transition: opacity 0.2s;
                     }
+                    .recording-card:hover .recording-checkbox,
+                    .recording-checkbox:checked { opacity: 1; }
                     .recording-thumb {
-                        width: 100px;
-                        height: 70px;
-                        border-radius: 8px;
+                        width: 100%;
+                        height: 100%;
                         object-fit: cover;
                         background: #1a1a1a;
-                        flex-shrink: 0;
                     }
                     .recording-thumb-placeholder {
-                        width: 100px;
-                        height: 70px;
-                        border-radius: 8px;
-                        background: #1a1a1a;
-                        flex-shrink: 0;
+                        width: 100%;
+                        height: 100%;
+                        background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
                         display: flex;
                         align-items: center;
                         justify-content: center;
                         color: #444;
-                        font-size: 1.8em;
+                        font-size: 2.5em;
                     }
-                    .recording-info { flex: 1; min-width: 0; }
-                    .recording-species {
-                        font-weight: 700;
-                        font-size: 1.1em;
-                        color: #4CAF50;
-                        margin-bottom: 4px;
-                        display: flex;
-                        align-items: center;
-                        gap: 8px;
-                        flex-wrap: wrap;
+                    /* Overlay at bottom of card */
+                    .recording-overlay {
+                        position: absolute;
+                        bottom: 0;
+                        left: 0;
+                        right: 0;
+                        background: linear-gradient(transparent, rgba(0,0,0,0.85));
+                        padding: 30px 12px 12px 12px;
+                        pointer-events: none;
                     }
-                    .thumbnail-badge {
-                        font-size: 0.75em;
-                        font-weight: 500;
-                        background: #333;
-                        color: #888;
-                        padding: 2px 8px;
-                        border-radius: 12px;
+                    .recording-time-ago {
+                        font-weight: 600;
+                        font-size: 1em;
+                        color: #fff;
+                        margin-bottom: 2px;
+                        text-shadow: 0 1px 3px rgba(0,0,0,0.5);
                     }
                     .recording-camera {
-                        font-weight: 500;
-                        font-size: 0.9em;
-                        color: #ccc;
-                        margin-bottom: 4px;
-                    }
-                    .recording-time {
+                        font-weight: 400;
                         font-size: 0.85em;
-                        color: #aaa;
-                        margin-bottom: 2px;
+                        color: rgba(255,255,255,0.8);
+                        text-shadow: 0 1px 3px rgba(0,0,0,0.5);
                     }
-                    .recording-meta {
-                        font-size: 0.8em;
-                        color: #777;
-                    }
-                    .recording-actions {
+                    /* Species badge in top-right */
+                    .recording-species-badge {
+                        position: absolute;
+                        top: 10px;
+                        right: 10px;
+                        background: rgba(76, 175, 80, 0.9);
+                        color: white;
+                        font-size: 0.75em;
+                        font-weight: 600;
+                        padding: 4px 10px;
+                        border-radius: 20px;
                         display: flex;
-                        gap: 8px;
-                        flex-shrink: 0;
+                        align-items: center;
+                        gap: 4px;
+                        backdrop-filter: blur(4px);
+                    }
+                    .recording-species-badge svg {
+                        width: 14px;
+                        height: 14px;
+                    }
+                    /* Action buttons overlay (hidden by default, shown on hover) */
+                    .recording-actions {
+                        position: absolute;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
+                        display: flex;
+                        gap: 12px;
+                        opacity: 0;
+                        transition: opacity 0.2s;
+                        pointer-events: none;
+                    }
+                    .recording-card:hover .recording-actions {
+                        opacity: 1;
+                        pointer-events: auto;
                     }
                     .action-btn {
-                        width: 44px;
-                        height: 44px;
+                        width: 48px;
+                        height: 48px;
                         border: none;
-                        border-radius: 10px;
+                        border-radius: 50%;
                         cursor: pointer;
                         display: flex;
                         align-items: center;
                         justify-content: center;
                         transition: transform 0.15s, opacity 0.15s;
+                        backdrop-filter: blur(8px);
                     }
                     .action-btn:active { transform: scale(0.9); }
-                    .play-btn { background: #4CAF50; color: white; }
-                    .download-btn { background: #2196F3; color: white; }
-                    .delete-btn { background: #f44336; color: white; }
-                    .action-btn svg { width: 20px; height: 20px; }
+                    .play-btn { background: rgba(76, 175, 80, 0.95); color: white; }
+                    .play-btn:hover { background: #4CAF50; transform: scale(1.1); }
+                    .delete-btn { background: rgba(244, 67, 54, 0.95); color: white; }
+                    .delete-btn:hover { background: #f44336; transform: scale(1.1); }
+                    .action-btn svg { width: 22px; height: 22px; }
+                    
+                    /* Legacy fields hidden in grid view */
+                    .recording-info { display: none; }
+                    .thumbnail-badge { display: none; }
+                    .recording-time { display: none; }
+                    .recording-meta { display: none; }
                     
                     /* Bulk actions bar */
                     .bulk-actions {
@@ -1549,6 +1584,7 @@ class WebServer:
                     
                     /* Empty state */
                     .empty-state {
+                        grid-column: 1 / -1;
                         text-align: center;
                         padding: 60px 20px;
                         color: #666;
@@ -1634,27 +1670,28 @@ class WebServer:
                     
                     /* Date Group Headers in List View */
                     .date-group-header {
-                        background: #222;
-                        padding: 10px 16px;
-                        border-radius: 8px;
-                        margin-top: 16px;
-                        margin-bottom: 8px;
+                        grid-column: 1 / -1;
+                        background: transparent;
+                        padding: 16px 0 8px 0;
+                        margin-top: 8px;
                         font-weight: 600;
-                        color: #aaa;
-                        font-size: 0.9em;
+                        color: #fff;
+                        font-size: 1.1em;
                         display: flex;
                         align-items: center;
                         justify-content: space-between;
                     }
                     .date-group-header:first-child {
                         margin-top: 0;
+                        padding-top: 0;
                     }
                     .date-group-count {
                         background: #333;
-                        padding: 2px 10px;
+                        padding: 4px 12px;
                         border-radius: 12px;
-                        font-size: 0.85em;
+                        font-size: 0.75em;
                         color: #888;
+                        font-weight: 500;
                     }
                     
                     /* Filters Sidebar */
@@ -1888,12 +1925,22 @@ class WebServer:
                     
                     /* Desktop adjustments */
                     @media (min-width: 768px) {
-                        body { padding: 24px; max-width: 1100px; margin: 0 auto; }
+                        body { padding: 24px; max-width: 1400px; margin: 0 auto; }
                         .calendar-day { min-height: 90px; }
                         .day-panel-container { max-width: 500px; }
                         .filters-sidebar { max-width: 350px; }
-                        .recordings-list { gap: 8px; }
-                        .recording-card { padding: 14px 18px; }
+                        .recordings-list { 
+                            grid-template-columns: repeat(3, 1fr); 
+                            gap: 12px;
+                        }
+                        .recording-card { border-radius: 16px; }
+                    }
+                    
+                    @media (min-width: 1200px) {
+                        .recordings-list { 
+                            grid-template-columns: repeat(4, 1fr); 
+                            gap: 16px;
+                        }
                     }
                     
                     /* Mobile adjustments for calendar */
@@ -2079,7 +2126,7 @@ class WebServer:
         current_date = None
         for clip in clips:
             clip_date = clip['time'].strftime('%Y-%m-%d')
-            clip_date_display = clip['time'].strftime('%A, %B %d, %Y')
+            clip_date_display = clip['time'].strftime('%b %d, %Y')
             
             # Add date group header when date changes
             if clip_date != current_date:
@@ -2090,8 +2137,8 @@ class WebServer:
                 clips_on_date = sum(1 for c in clips if c['time'].strftime('%Y-%m-%d') == clip_date)
                 html += f"""
                         <div class="date-group-header" data-date="{clip_date}">
-                            <span>📅 {clip_date_display}</span>
-                            <span class="date-group-count">{clips_on_date} clip{'' if clips_on_date == 1 else 's'}</span>
+                            <span>{clip_date_display}</span>
+                            <span class="date-group-count">{clips_on_date}</span>
                         </div>
                 """
             
@@ -2101,17 +2148,22 @@ class WebServer:
             species_display = clip.get('species', 'Unknown')
             thumbnails = clip.get('thumbnails', [])
             thumbnail_url = thumbnails[0]['url'] if thumbnails else ''
-            thumbnail_html = f'<img class="recording-thumb" src="{thumbnail_url}" alt="" loading="lazy" onerror="this.style.display=\'none\'">' if thumbnail_url else '<div class="recording-thumb-placeholder">🎬</div>'
+            thumbnail_html = f'<img class="recording-thumb" src="{thumbnail_url}" alt="" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=recording-thumb-placeholder>🎬</div>\'">' if thumbnail_url else '<div class="recording-thumb-placeholder">🎬</div>'
+            
+            # Calculate time ago
+            time_iso = clip['time'].isoformat()
             
             html += f"""
-                        <div class="recording-card" data-date="{clip_date}" data-species="{species_display}" data-camera="{clip['camera']}" data-time="{clip['time'].isoformat()}" onclick="window.location.href='/recording/{url_encoded_path}'">
+                        <div class="recording-card" data-date="{clip_date}" data-species="{species_display}" data-camera="{clip['camera']}" data-time="{time_iso}" onclick="window.location.href='/recording/{url_encoded_path}'">
                             <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
                             {thumbnail_html}
-                            <div class="recording-info">
-                                <div class="recording-species">🐾 {species_display}</div>
+                            <div class="recording-species-badge">
+                                <svg fill="currentColor" viewBox="0 0 24 24"><path d="M4.5 9.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0-2 0m15 0m-1 0a1 1 0 1 0 2 0a1 1 0 1 0-2 0m-10.5 8.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5-1.5.67-1.5 1.5.67 1.5 1.5 1.5zm6 0c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5-1.5.67-1.5 1.5.67 1.5 1.5 1.5zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8 0-.29.02-.58.05-.86 2.36-1.05 4.23-2.98 5.21-5.37C11.07 8.33 14.05 10 17.42 10c.78 0 1.53-.09 2.25-.26.21.71.33 1.47.33 2.26 0 4.41-3.59 8-8 8z"/></svg>
+                                {species_display}
+                            </div>
+                            <div class="recording-overlay">
+                                <div class="recording-time-ago" data-time="{time_iso}">Loading...</div>
                                 <div class="recording-camera">{clip['camera']}</div>
-                                <div class="recording-time">{clip['time'].strftime('%b %d, %Y at %I:%M %p')}</div>
-                                <div class="recording-meta">{size_mb:.1f} MB</div>
                             </div>
                             <div class="recording-actions">
                                 <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}');" title="Quick Play">
@@ -2175,6 +2227,45 @@ class WebServer:
                 </div>
                 
                 <script>
+                    // Helper function to calculate "time ago" strings
+                    function getTimeAgo(dateString) {{
+                        const date = new Date(dateString);
+                        const now = new Date();
+                        const diffMs = now - date;
+                        const diffSec = Math.floor(diffMs / 1000);
+                        const diffMin = Math.floor(diffSec / 60);
+                        const diffHour = Math.floor(diffMin / 60);
+                        const diffDay = Math.floor(diffHour / 24);
+                        
+                        if (diffMin < 1) return 'Just now';
+                        if (diffMin === 1) return '1 minute ago';
+                        if (diffMin < 60) return diffMin + ' minutes ago';
+                        if (diffHour === 1) return '1 hour ago';
+                        if (diffHour < 24) return diffHour + ' hours ago';
+                        if (diffDay === 1) return 'Yesterday';
+                        if (diffDay < 7) return diffDay + ' days ago';
+                        
+                        // For older dates, show the actual date
+                        return date.toLocaleDateString('en-US', {{ month: 'short', day: 'numeric' }});
+                    }}
+                    
+                    // Update all time ago displays on the page
+                    function updateTimeAgoDisplays() {{
+                        document.querySelectorAll('.recording-time-ago[data-time]').forEach(el => {{
+                            const time = el.getAttribute('data-time');
+                            if (time) {{
+                                el.textContent = getTimeAgo(time);
+                            }}
+                        }});
+                    }}
+                    
+                    // Update time ago on load and periodically
+                    document.addEventListener('DOMContentLoaded', () => {{
+                        updateTimeAgoDisplays();
+                        // Update every minute
+                        setInterval(updateTimeAgoDisplays, 60000);
+                    }});
+                    
                     // CalendarApp - Placeholder for Phase 2B-2E JavaScript
                     const CalendarApp = {{
                         // Application state

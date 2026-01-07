@@ -9,6 +9,73 @@ YOLO + RTSP + ONVIF pipeline for multi-camera animal detection on a Jetson Nano,
 - `src/animaltracker/` – Python package containing the streaming pipeline, ONVIF helpers, clip buffer, notifications, and cleaners.
 - `systemd/` – unit files for running the services on-device.
 
+## Windows Setup
+
+### 1. Prerequisites
+- **Python 3.10+**: Download from [python.org](https://www.python.org/downloads/) (check "Add to PATH" during install)
+- **Git**: Download from [git-scm.com](https://git-scm.com/download/win)
+- **FFmpeg**: Install via one of these methods:
+  - [Chocolatey](https://chocolatey.org/): `choco install ffmpeg`
+  - [Scoop](https://scoop.sh/): `scoop install ffmpeg`
+  - Manual: Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH
+
+### 2. Project Setup
+Open PowerShell or Command Prompt:
+```powershell
+# Clone repo
+git clone https://github.com/bpasker/animaltracker.git
+cd animaltracker
+
+# Create directories
+mkdir storage, logs, models -Force
+
+# Create Virtual Environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install Dependencies
+pip install --upgrade pip wheel setuptools
+pip install -e .
+```
+
+### 3. Download Model
+```powershell
+# Using PowerShell
+Invoke-WebRequest -Uri "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt" -OutFile "models\yolo11n.pt"
+```
+Or download manually from the URL and save to `models\yolo11n.pt`.
+
+### 4. Configuration
+1. Copy config files:
+   ```powershell
+   copy config\secrets.sample.env config\secrets.env
+   copy config\cameras.sample.yml config\cameras.yml
+   ```
+2. Edit `config\secrets.env` with your Pushover credentials
+3. Edit `config\cameras.yml` with your camera settings
+
+### 5. Running on Windows
+```powershell
+cd animaltracker
+.venv\Scripts\activate
+python -m animaltracker.cli --config config\cameras.yml run --model models\yolo11n.pt
+```
+
+### 6. Run as Windows Service (Optional)
+To run at startup, use [NSSM](https://nssm.cc/) (Non-Sucking Service Manager):
+```powershell
+# Install NSSM via chocolatey
+choco install nssm
+
+# Create service
+nssm install AnimalTracker "C:\path\to\animaltracker\.venv\Scripts\python.exe"
+nssm set AnimalTracker AppParameters "-m animaltracker.cli --config config\cameras.yml run --model models\yolo11n.pt"
+nssm set AnimalTracker AppDirectory "C:\path\to\animaltracker"
+nssm start AnimalTracker
+```
+
+---
+
 ## Jetson Nano Setup (Ubuntu 20.04 / Python 3.10)
 
 ### 1. System Dependencies

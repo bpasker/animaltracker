@@ -285,3 +285,73 @@ def add_custom_mapping(technical_name: str, common_name: str) -> None:
     """
     normalized = technical_name.lower().replace(" ", "_").replace("-", "_")
     SPECIES_MAP[normalized] = common_name
+
+
+def get_species_icon(species: str) -> str:
+    """Get an emoji icon appropriate for the species type.
+    
+    Args:
+        species: The scientific/technical species name
+        
+    Returns:
+        Emoji icon string
+    """
+    if not species:
+        return "❓"
+    
+    normalized = species.lower().replace(" ", "_").replace("-", "_")
+    
+    # Check for birds
+    if normalized.startswith("bird") or "aves" in normalized:
+        return "🐦"
+    
+    # Check for specific mammal types
+    if "felidae" in normalized or "cat" in normalized:
+        return "🐱"
+    if "canidae" in normalized or "dog" in normalized or "coyote" in normalized or "fox" in normalized:
+        return "🐕"
+    if "cervidae" in normalized or "deer" in normalized:
+        return "🦌"
+    if "ursidae" in normalized or "bear" in normalized:
+        return "🐻"
+    if "procyonidae" in normalized or "raccoon" in normalized:
+        return "🦝"
+    if "sciuridae" in normalized or "squirrel" in normalized or "chipmunk" in normalized:
+        return "🐿️"
+    if "leporidae" in normalized or "rabbit" in normalized or "lagomorpha" in normalized:
+        return "🐰"
+    if "didelphidae" in normalized or "opossum" in normalized:
+        return "🐀"
+    if "mephitidae" in normalized or "skunk" in normalized:
+        return "🦨"
+    if "bovidae" in normalized:
+        return "🐄"
+    if "rodentia" in normalized:
+        return "🐭"
+    
+    # Check for reptiles
+    if normalized.startswith("reptilia") or "squamata" in normalized:
+        if "colubridae" in normalized or "viperidae" in normalized or "snake" in normalized:
+            return "🐍"
+        if "testudines" in normalized or "turtle" in normalized:
+            return "🐢"
+        return "🦎"
+    
+    # Check for amphibians
+    if "amphibia" in normalized or "frog" in normalized or "toad" in normalized:
+        return "🐸"
+    
+    # Check for humans/primates
+    if "primates" in normalized or "human" in normalized or "person" in normalized:
+        return "🧑"
+    
+    # Generic mammal
+    if normalized.startswith("mammalia") or "mammal" in normalized:
+        return "🐾"
+    
+    # Unknown animal
+    if "animal" in normalized or "unknown" in normalized:
+        return "❓"
+    
+    # Default to paw print for any unrecognized animal
+    return "🐾"

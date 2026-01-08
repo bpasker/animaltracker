@@ -10,7 +10,7 @@ from typing import Dict, TYPE_CHECKING
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-from .species_names import get_common_name, format_species_display
+from .species_names import get_common_name, format_species_display, get_species_icon
 
 # Central Time with automatic DST handling
 try:
@@ -434,6 +434,7 @@ class WebServer:
                 'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
                 'size': stat.st_size,
                 'species': 'Manual clip',
+                'raw_species': 'manual',
                 'thumbnails': []
             })
 
@@ -447,7 +448,7 @@ class WebServer:
                 rel_path = clip_file.relative_to(clips_dir)
                 
                 # Parse species from filename (format: timestamp_species.mp4)
-                species = self._parse_species_from_filename(clip_file.name)
+                species_display, raw_species = self._parse_species_from_filename(clip_file.name)
                 
                 # Find associated thumbnails
                 thumbnails = self._get_thumbnails_for_clip(clip_file)
@@ -459,7 +460,8 @@ class WebServer:
                     'filename': clip_file.name,
                     'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
                     'size': stat.st_size,
-                    'species': species,
+                    'species': species_display,
+                    'raw_species': raw_species,
                     'thumbnails': thumbnails
                 })
 
@@ -518,11 +520,14 @@ class WebServer:
         
         return thumbnails
 
-    def _parse_species_from_filename(self, filename: str) -> str:
+    def _parse_species_from_filename(self, filename: str) -> tuple:
         """Extract clean species name from clip filename.
         
         Filename format: timestamp_species.mp4
-        Example: 1766587074_bird_passeriformes_cardinalidae.mp4 -> "Cardinal"
+        Example: 1766587074_bird_passeriformes_cardinalidae.mp4 -> ("Cardinal", "bird_passeriformes_cardinalidae")
+        
+        Returns:
+            Tuple of (display_name, raw_species) where raw_species can be used for icon lookup
         """
         import re
         
@@ -532,7 +537,7 @@ class WebServer:
         # Split by underscore, species is after the timestamp
         parts = name.split('_', 1)
         if len(parts) < 2:
-            return 'Unknown'
+            return ('Unknown', 'unknown')
         
         species_part = parts[1]
         
@@ -542,6 +547,7 @@ class WebServer:
         
         # Split by + for multiple species
         species_list = []
+        raw_species_list = []
         for part in species_part.split('+'):
             # Split by semicolons and get meaningful parts
             segments = [s.strip() for s in part.split(';') if s.strip()]
@@ -550,13 +556,14 @@ class WebServer:
             raw_species = '_'.join(seg for seg in segments if seg.lower() not in ('no cv result', 'unknown', 'blank', 'empty', ''))
             
             if raw_species:
+                raw_species_list.append(raw_species)
                 # Use the common name mapping
                 common_name = get_common_name(raw_species)
                 if common_name and common_name not in species_list:
                     species_list.append(common_name)
         
         if not species_list:
-            return 'Unknown'
+            return ('Unknown', 'unknown')
         
         # Deduplicate and join
         seen = set()
@@ -566,7 +573,11 @@ class WebServer:
                 seen.add(s.lower())
                 unique.append(s)
         
-        return ', '.join(unique[:3])  # Limit to 3 species for display
+        display_name = ', '.join(unique[:3])  # Limit to 3 species for display
+        # Use first raw species for icon
+        first_raw = raw_species_list[0] if raw_species_list else 'unknown'
+        
+        return (display_name, first_raw)
 
     def _build_calendar_data(self, clips: list) -> dict:
         """
@@ -697,6 +708,8 @@ class WebServer:
                 'time_display': clip['time'].strftime('%I:%M %p'),
                 'hour': clip_hour,
                 'species': clip_species,
+                'raw_species': clip.get('raw_species', 'unknown'),
+                'species_icon': get_species_icon(clip.get('raw_species', 'unknown')),
                 'size_mb': round(clip['size'] / (1024 * 1024), 2),
                 'filename': clip['filename'],
                 'thumbnails': [
@@ -1430,12 +1443,11 @@ class WebServer:
                         border-radius: 20px;
                         display: flex;
                         align-items: center;
-                        gap: 4px;
+                        gap: 5px;
                         backdrop-filter: blur(4px);
                     }
-                    .recording-species-badge svg {
-                        width: 14px;
-                        height: 14px;
+                    .recording-species-badge .species-icon {
+                        font-size: 1.1em;
                     }
                     /* Action buttons overlay (hidden by default, shown on hover) */
                     .recording-actions {
@@ -2161,6 +2173,8 @@ class WebServer:
             escaped_path = clip['path'].replace("'", "\\'")
             url_encoded_path = clip['path'].replace('#', '%23')
             species_display = clip.get('species', 'Unknown')
+            raw_species = clip.get('raw_species', 'unknown')
+            species_icon = get_species_icon(raw_species)
             thumbnails = clip.get('thumbnails', [])
             thumbnail_url = thumbnails[0]['url'] if thumbnails else ''
             thumbnail_html = f'<img class="recording-thumb" src="{thumbnail_url}" alt="" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=recording-thumb-placeholder>🎬</div>\'">' if thumbnail_url else '<div class="recording-thumb-placeholder">🎬</div>'
@@ -2173,7 +2187,7 @@ class WebServer:
                             <input type="checkbox" class="recording-checkbox" name="clip_select" value="{clip['path']}" onclick="event.stopPropagation(); updateBulkButton();">
                             {thumbnail_html}
                             <div class="recording-species-badge">
-                                <svg fill="currentColor" viewBox="0 0 24 24"><path d="M4.5 9.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0-2 0m15 0m-1 0a1 1 0 1 0 2 0a1 1 0 1 0-2 0m-10.5 8.5c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5-1.5.67-1.5 1.5.67 1.5 1.5 1.5zm6 0c.83 0 1.5-.67 1.5-1.5s-.67-1.5-1.5-1.5-1.5.67-1.5 1.5.67 1.5 1.5 1.5zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8 0-.29.02-.58.05-.86 2.36-1.05 4.23-2.98 5.21-5.37C11.07 8.33 14.05 10 17.42 10c.78 0 1.53-.09 2.25-.26.21.71.33 1.47.33 2.26 0 4.41-3.59 8-8 8z"/></svg>
+                                <span class="species-icon">{species_icon}</span>
                                 {species_display}
                             </div>
                             <div class="recording-overlay">
@@ -2959,7 +2973,7 @@ class WebServer:
                                            onclick="event.stopPropagation(); CalendarApp.updateDaySelection();">
                                     ${{thumbHtml}}
                                     <div class="day-clip-info">
-                                        <div class="day-clip-species">🐾 ${{clip.species || 'Unknown'}}</div>
+                                        <div class="day-clip-species">${{clip.species_icon || '🐾'}} ${{clip.species || 'Unknown'}}</div>
                                         <div class="day-clip-meta">${{clip.time}} • ${{clip.camera}}</div>
                                         <div class="day-clip-size">${{clip.size_mb?.toFixed(1) || '?'}} MB</div>
                                     </div>

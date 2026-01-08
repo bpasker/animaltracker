@@ -68,7 +68,8 @@ class WebServer:
         # Track active reprocessing jobs: {clip_path: {'started': timestamp, 'clip_name': name}}
         self.reprocessing_jobs: Dict[str, dict] = {}
         self.app = web.Application()
-        self.app.router.add_get('/', self.handle_index)
+        self.app.router.add_get('/', self.handle_root_redirect)
+        self.app.router.add_get('/live', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
@@ -96,6 +97,10 @@ class WebServer:
         # Ensure it exists so static route doesn't fail on startup
         clips_path.mkdir(parents=True, exist_ok=True)
         self.app.router.add_static('/clips', clips_path, show_index=True)
+
+    async def handle_root_redirect(self, request):
+        """Redirect root URL to recordings page."""
+        raise web.HTTPFound('/recordings')
 
     async def handle_index(self, request):
         html = """
@@ -313,7 +318,7 @@ class WebServer:
             <body>
                 <div class="nav">
                     <a href="/recordings">Recordings</a>
-                    <a href="/" class="active">Live</a>
+                    <a href="/live" class="active">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -1969,7 +1974,7 @@ class WebServer:
             <body class="view-list">
                 <div class="nav">
                     <a href="/recordings" class="active">Recordings</a>
-                    <a href="/">Live</a>
+                    <a href="/live">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -4605,7 +4610,7 @@ class WebServer:
             <body>
                 <div class="nav">
                     <a href="/recordings" class="active">Recordings</a>
-                    <a href="/">Live</a>
+                    <a href="/live">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -5860,7 +5865,7 @@ class WebServer:
             <body>
                 <div class="nav">
                     <a href="/recordings">Recordings</a>
-                    <a href="/">Live</a>
+                    <a href="/live">Live</a>
                     <a href="/monitor" class="active">Monitor</a>
                     <a href="/settings">Settings</a>
                 </div>
@@ -6655,7 +6660,7 @@ class WebServer:
             <body>
                 <div class="nav">
                     <a href="/recordings">Recordings</a>
-                    <a href="/">Live</a>
+                    <a href="/live">Live</a>
                     <a href="/monitor">Monitor</a>
                     <a href="/settings" class="active">Settings</a>
                 </div>

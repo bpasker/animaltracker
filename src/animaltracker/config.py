@@ -120,7 +120,7 @@ class PTZTrackingSettings(BaseModel):
     tilt_center_y: float = Field(default=0.5, ge=0.0, le=1.0, description="Y position where PTZ center appears on wide-angle")
     # Patrol mode settings
     patrol_enabled: bool = Field(default=True, description="Enable patrol sweep when no objects detected")
-    patrol_speed: float = Field(default=0.15, ge=0.05, le=0.5, description="Patrol sweep speed (0.15 = slow scan)")
+    patrol_speed: float = Field(default=0.15, ge=0.05, le=1.0, description="Patrol sweep speed (0.15 = slow for detection)")
     patrol_return_delay: float = Field(default=3.0, ge=0.5, le=30.0, description="Seconds to wait after losing object before returning to patrol")
 
 

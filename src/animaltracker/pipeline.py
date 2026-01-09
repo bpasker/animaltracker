@@ -1091,12 +1091,16 @@ class PipelineOrchestrator:
                             'update_interval': ptz_cfg.update_interval,
                             'pan_center_x': ptz_cfg.pan_center_x,
                             'tilt_center_y': ptz_cfg.tilt_center_y,
+                            'patrol_enabled': ptz_cfg.patrol_enabled,
+                            'patrol_speed': ptz_cfg.patrol_speed,
+                            'patrol_return_delay': ptz_cfg.patrol_return_delay,
                         }
                     )
                     worker.ptz_tracker.start_tracking()
+                    mode = "patrol+track" if ptz_cfg.patrol_enabled else "track-only"
                     LOGGER.info(
-                        "PTZ auto-tracking enabled: %s detections -> %s PTZ",
-                        worker.camera.id, target_id
+                        "PTZ auto-tracking enabled (%s): %s detections -> %s PTZ",
+                        mode, worker.camera.id, target_id
                     )
                 else:
                     LOGGER.warning(

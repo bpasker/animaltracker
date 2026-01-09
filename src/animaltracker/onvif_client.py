@@ -161,3 +161,72 @@ class OnvifClient:
                     LOGGER.warning("Failed to get PTZ position for %s: %s", token, e)
         
         return positions
+
+    def ptz_get_configurations(self) -> list:
+        """Get all PTZ configurations to find which profiles support PTZ."""
+        if ONVIFCamera is None:
+            return []
+        
+        try:
+            ptz_service = self._camera.create_ptz_service()
+            configs = ptz_service.GetConfigurations()
+            result = []
+            for cfg in configs:
+                result.append({
+                    'token': getattr(cfg, 'token', None),
+                    'name': getattr(cfg, 'Name', None),
+                    'node_token': getattr(cfg, 'NodeToken', None),
+                })
+            return result
+        except Exception as e:
+            LOGGER.error("Failed to get PTZ configurations: %s", e)
+            return []
+
+    def ptz_find_working_profile(self) -> Optional[str]:
+        """Find a profile token that actually supports PTZ movement.
+        
+        Tests each profile by attempting a small move and checking if position changes.
+        Returns the first working profile token, or None if none work.
+        """
+        if ONVIFCamera is None:
+            return None
+        
+        import time
+        
+        profiles = self.get_profiles()
+        LOGGER.info("Testing %d profiles for PTZ support...", len(profiles))
+        
+        for profile in profiles:
+            token = profile.metadata.get("token")
+            if not token:
+                continue
+            
+            try:
+                # Get initial position
+                initial = self.ptz_get_position(token)
+                LOGGER.info("Profile '%s' initial position: pan=%.3f, tilt=%.3f", 
+                           token, initial['pan'], initial['tilt'])
+                
+                # Try continuous move (most compatible)
+                self.ptz_move(token, 0.3, 0.0, 0.0)
+                time.sleep(0.5)
+                self.ptz_stop(token)
+                time.sleep(0.5)
+                
+                # Check if position changed
+                after = self.ptz_get_position(token)
+                LOGGER.info("Profile '%s' after move: pan=%.3f, tilt=%.3f", 
+                           token, after['pan'], after['tilt'])
+                
+                if abs(after['pan'] - initial['pan']) > 0.001 or abs(after['tilt'] - initial['tilt']) > 0.001:
+                    LOGGER.info("Profile '%s' supports PTZ!", token)
+                    # Move back to original position
+                    self.ptz_move_absolute(token, initial['pan'], initial['tilt'], initial['zoom'])
+                    return token
+                    
+            except Exception as e:
+                LOGGER.debug("Profile '%s' PTZ test failed: %s", token, e)
+                continue
+        
+        LOGGER.warning("No PTZ-capable profile found!")
+        return None

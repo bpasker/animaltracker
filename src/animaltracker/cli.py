@@ -74,6 +74,71 @@ def cmd_discover(args: argparse.Namespace) -> None:
                 LOGGER.info("- %s", profile)
 
 
+def cmd_ptz_test(args: argparse.Namespace) -> None:
+    """Test PTZ capabilities and find working profile."""
+    _load_secrets(args.config)
+    runtime = load_runtime_config(args.config)
+    
+    camera_id = args.camera
+    camera = None
+    for cam in runtime.cameras:
+        if cam.id == camera_id:
+            camera = cam
+            break
+    
+    if not camera:
+        LOGGER.error("Camera %s not found in config", camera_id)
+        return
+    
+    username, password = camera.onvif.credentials()
+    if not username or not password:
+        LOGGER.error("Camera %s missing ONVIF credentials", camera_id)
+        return
+    
+    client = OnvifClient(camera.onvif.host, camera.onvif.port, username, password)
+    
+    # List all profiles
+    profiles = client.get_profiles()
+    LOGGER.info("Available profiles for %s:", camera_id)
+    for p in profiles:
+        token = p.metadata.get('token', 'unknown')
+        LOGGER.info("  - Token: %s", token)
+    
+    # Get PTZ configurations
+    LOGGER.info("\nPTZ Configurations:")
+    try:
+        configs = client.ptz_get_configurations()
+        for cfg in configs:
+            LOGGER.info("  - Token: %s, Name: %s, NodeToken: %s", 
+                       cfg.get('token'), cfg.get('name'), cfg.get('node_token'))
+    except Exception as e:
+        LOGGER.warning("Failed to get PTZ configurations: %s", e)
+    
+    # Try to find working PTZ profile
+    if args.find_working:
+        LOGGER.info("\nSearching for working PTZ profile (will move camera)...")
+        try:
+            working_token = client.ptz_find_working_profile()
+            if working_token:
+                LOGGER.info("SUCCESS! Working PTZ profile token: %s", working_token)
+                LOGGER.info("Update your cameras.yml profile setting to: %s", working_token)
+            else:
+                LOGGER.warning("No working PTZ profile found")
+        except Exception as e:
+            LOGGER.error("Error finding working profile: %s", e)
+    
+    # Get current position for all profiles
+    LOGGER.info("\nCurrent PTZ positions by profile:")
+    for p in profiles:
+        token = p.metadata.get('token', 'unknown')
+        try:
+            pos = client.ptz_get_position(token)
+            LOGGER.info("  %s: pan=%.4f, tilt=%.4f, zoom=%.4f", 
+                       token, pos.get('pan', 0), pos.get('tilt', 0), pos.get('zoom', 0))
+        except Exception as e:
+            LOGGER.info("  %s: Error - %s", token, e)
+
+
 def cmd_cleanup(args: argparse.Namespace) -> None:
     _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
@@ -198,6 +263,12 @@ def build_parser() -> argparse.ArgumentParser:
     discover_cmd = sub.add_parser("discover", help="Run ONVIF discovery")
     discover_cmd.add_argument("--inspect", action="store_true", help="Print profile details")
     discover_cmd.set_defaults(func=cmd_discover)
+
+    ptz_test_cmd = sub.add_parser("ptz-test", help="Test PTZ capabilities and find working profile")
+    ptz_test_cmd.add_argument("--camera", "-c", required=True, help="Camera ID to test")
+    ptz_test_cmd.add_argument("--find-working", "-f", action="store_true", 
+                              help="Try to find working PTZ profile by testing movement")
+    ptz_test_cmd.set_defaults(func=cmd_ptz_test)
 
     cleanup_cmd = sub.add_parser("cleanup", help="Prune old clips")
     cleanup_cmd.add_argument("--dry-run", action="store_true")

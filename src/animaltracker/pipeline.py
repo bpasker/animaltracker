@@ -242,6 +242,9 @@ class StreamWorker:
                     # Get profile token - use configured profile name or first available
                     profiles = self.onvif_client.get_profiles()
                     if profiles:
+                        available_tokens = [p.metadata.get('token') for p in profiles]
+                        LOGGER.info(f"ONVIF {camera.id}: Available profiles: {available_tokens}")
+                        
                         # Try to find the profile specified in config
                         target_profile = camera.onvif.profile
                         if target_profile:
@@ -256,7 +259,7 @@ class StreamWorker:
                         # Fallback to first profile if no match
                         if not self.onvif_profile_token:
                             self.onvif_profile_token = profiles[0].metadata.get("token")
-                            LOGGER.info(f"ONVIF {camera.id}: Using first profile '{self.onvif_profile_token}' (available: {[p.metadata.get('token') for p in profiles]})")
+                            LOGGER.info(f"ONVIF {camera.id}: Using first profile '{self.onvif_profile_token}'")
                 except Exception as e:
                     LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
 

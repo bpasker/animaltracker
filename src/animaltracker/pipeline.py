@@ -408,19 +408,19 @@ class StreamWorker:
         )
         filtered = self._filter_detections(detections)
 
-        if not filtered:
-            self.pending_detection_start_ts = None
-            await self._maybe_close_event(ts)
-            return
-        
-        # PTZ auto-tracking: move zoom camera to follow detection
-        if self.ptz_tracker and filtered:
+        # PTZ auto-tracking: always call update (handles patrol when no detections)
+        if self.ptz_tracker:
             frame_h, frame_w = frame.shape[:2]
             await loop.run_in_executor(
                 None,
                 self.ptz_tracker.update,
                 filtered, frame_w, frame_h
             )
+
+        if not filtered:
+            self.pending_detection_start_ts = None
+            await self._maybe_close_event(ts)
+            return
         
         # Use all filtered detections to update state
         primary = filtered[0]

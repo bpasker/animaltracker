@@ -1126,10 +1126,17 @@ class PipelineOrchestrator:
                             'patrol_enabled': ptz_cfg.patrol_enabled,
                             'patrol_speed': ptz_cfg.patrol_speed,
                             'patrol_return_delay': ptz_cfg.patrol_return_delay,
+                            'patrol_presets': ptz_cfg.patrol_presets,
+                            'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
                         }
                     )
                     worker.ptz_tracker.start_tracking()
-                    mode = "patrol+track" if ptz_cfg.patrol_enabled else "track-only"
+                    if ptz_cfg.patrol_presets:
+                        mode = f"preset-patrol({len(ptz_cfg.patrol_presets)})+track"
+                    elif ptz_cfg.patrol_enabled:
+                        mode = "sweep-patrol+track"
+                    else:
+                        mode = "track-only"
                     LOGGER.info(
                         "PTZ auto-tracking enabled (%s): %s detections -> %s PTZ",
                         mode, worker.camera.id, target_id

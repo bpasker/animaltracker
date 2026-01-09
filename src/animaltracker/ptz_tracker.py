@@ -140,6 +140,13 @@ class PTZTracker:
     patrol_zoom: float = 0.0    # Zoom level during patrol (wide)
     patrol_return_delay: float = 3.0  # Seconds after losing object before returning to patrol
     
+    # Preset-based patrol
+    patrol_presets: list = field(default_factory=list)  # List of preset tokens
+    patrol_dwell_time: float = 10.0  # Seconds at each preset
+    _preset_tokens: list = field(default_factory=list, init=False)  # Resolved preset tokens
+    _current_preset_index: int = field(default=0, init=False)
+    _preset_arrival_time: float = field(default=0.0, init=False)
+    
     # State
     _last_update: float = field(default=0.0, init=False)
     _target_pan: float = field(default=0.0, init=False)
@@ -151,15 +158,69 @@ class PTZTracker:
     _last_detection_time: float = field(default=0.0, init=False)
     _patrol_reverse_time: float = field(default=0.0, init=False)
     
+    def _resolve_presets(self) -> None:
+        """Resolve preset names to tokens."""
+        if not self.patrol_presets:
+            return
+            
+        try:
+            available = self.onvif_client.ptz_get_presets(self.profile_token)
+            preset_map = {}
+            for p in available:
+                if p.get('token'):
+                    preset_map[p['token']] = p['token']
+                    if p.get('name'):
+                        preset_map[p['name']] = p['token']
+            
+            self._preset_tokens = []
+            for preset in self.patrol_presets:
+                if preset in preset_map:
+                    self._preset_tokens.append(preset_map[preset])
+                else:
+                    LOGGER.warning("Preset '%s' not found on camera", preset)
+            
+            if self._preset_tokens:
+                LOGGER.info("Patrol will use %d presets: %s", 
+                           len(self._preset_tokens), self._preset_tokens)
+            else:
+                LOGGER.warning("No valid presets found, falling back to continuous sweep")
+                
+        except Exception as e:
+            LOGGER.error("Failed to resolve presets: %s", e)
+            self._preset_tokens = []
+    
     def start_tracking(self) -> None:
         """Enable auto-tracking with patrol mode."""
         self._tracking_active = True
+        
+        # Resolve presets if configured
+        if self.patrol_presets:
+            self._resolve_presets()
+        
         if self.patrol_enabled:
             self._mode = PTZMode.PATROL
-            LOGGER.info("PTZ patrol mode enabled - scanning for objects")
+            if self._preset_tokens:
+                LOGGER.info("PTZ preset patrol enabled - cycling %d positions", len(self._preset_tokens))
+                # Go to first preset
+                self._goto_current_preset()
+            else:
+                LOGGER.info("PTZ patrol mode enabled - continuous sweep")
         else:
             self._mode = PTZMode.IDLE
             LOGGER.info("PTZ tracking enabled (patrol disabled)")
+    
+    def _goto_current_preset(self) -> None:
+        """Move to current preset in the patrol sequence."""
+        if not self._preset_tokens:
+            return
+        try:
+            preset = self._preset_tokens[self._current_preset_index]
+            self.onvif_client.ptz_goto_preset(self.profile_token, preset, speed=0.3)
+            self._preset_arrival_time = time.time()
+            LOGGER.info("Moving to patrol preset %d/%d: %s", 
+                       self._current_preset_index + 1, len(self._preset_tokens), preset)
+        except Exception as e:
+            LOGGER.error("Failed to go to preset: %s", e)
     
     def stop_tracking(self) -> None:
         """Disable auto-tracking."""
@@ -176,10 +237,19 @@ class PTZTracker:
         return self._mode.value
     
     def _do_patrol(self) -> None:
-        """Execute patrol sweep pattern."""
+        """Execute patrol pattern - either preset-based or continuous sweep."""
         now = time.time()
         
-        # Reverse direction periodically
+        # Preset-based patrol
+        if self._preset_tokens:
+            # Check if dwell time has elapsed
+            if now - self._preset_arrival_time > self.patrol_dwell_time:
+                # Move to next preset
+                self._current_preset_index = (self._current_preset_index + 1) % len(self._preset_tokens)
+                self._goto_current_preset()
+            return
+        
+        # Continuous sweep patrol (fallback if no presets)
         # At very slow speed 0.08, need ~90 seconds to cover full pan range
         sweep_duration = 90.0  # seconds per sweep direction
         
@@ -426,6 +496,8 @@ def create_ptz_tracker(
             - patrol_enabled: Enable patrol mode when no detections (default True)
             - patrol_speed: Patrol sweep speed (default 0.15)
             - patrol_return_delay: Seconds to wait before returning to patrol (default 3.0)
+            - patrol_presets: List of preset tokens/names for patrol (default [])
+            - patrol_dwell_time: Seconds to stay at each preset (default 10.0)
             
     Returns:
         Configured PTZTracker instance
@@ -449,6 +521,8 @@ def create_ptz_tracker(
         patrol_enabled=config.get('patrol_enabled', True),
         patrol_speed=config.get('patrol_speed', 0.15),
         patrol_return_delay=config.get('patrol_return_delay', 3.0),
+        patrol_presets=config.get('patrol_presets', []),
+        patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
     )
     
     return tracker

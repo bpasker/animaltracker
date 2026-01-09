@@ -76,6 +76,9 @@ class WebServer:
         self.app.router.add_get('/ptz/{camera_id}/position', self.handle_ptz_position)
         self.app.router.add_get('/ptz/{camera_id}/mode', self.handle_ptz_mode)
         self.app.router.add_post('/ptz/{camera_id}/patrol', self.handle_ptz_patrol)
+        self.app.router.add_get('/ptz/{camera_id}/presets', self.handle_ptz_presets)
+        self.app.router.add_post('/ptz/{camera_id}/presets', self.handle_ptz_set_patrol_presets)
+        self.app.router.add_post('/ptz/{camera_id}/goto_preset', self.handle_ptz_goto_preset)
         self.app.router.add_post('/ptz/calibrate', self.handle_ptz_calibrate)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
@@ -294,6 +297,52 @@ class WebServer:
                     .ptz-mode-status.patrol { background: #1565C0; color: white; }
                     .ptz-mode-status.tracking { background: #2E7D32; color: white; }
                     .ptz-mode-status.idle { background: #555; color: #aaa; }
+                    .ptz-presets {
+                        margin-top: 12px;
+                        padding: 12px;
+                        border-top: 1px solid #333;
+                        background: #252525;
+                        border-radius: 4px;
+                    }
+                    .preset-list {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 4px;
+                    }
+                    .preset-item {
+                        display: flex;
+                        align-items: center;
+                        padding: 6px 8px;
+                        background: #333;
+                        border-radius: 4px;
+                        cursor: pointer;
+                        transition: background 0.2s;
+                    }
+                    .preset-item:hover {
+                        background: #404040;
+                    }
+                    .preset-item.selected {
+                        background: #1565C0;
+                    }
+                    .preset-item input[type="checkbox"] {
+                        margin-right: 8px;
+                    }
+                    .preset-item .preset-name {
+                        flex: 1;
+                        font-size: 13px;
+                    }
+                    .preset-item .preset-goto {
+                        padding: 2px 6px;
+                        font-size: 11px;
+                        background: #555;
+                        border: none;
+                        border-radius: 3px;
+                        color: white;
+                        cursor: pointer;
+                    }
+                    .preset-item .preset-goto:hover {
+                        background: #666;
+                    }
                     .toggle-switch {
                         position: relative;
                         width: 50px;
@@ -350,7 +399,16 @@ class WebServer:
 
                     function togglePtz(element) {
                         const ptzControls = element.closest('.ptz-controls');
+                        const wasExpanded = ptzControls.classList.contains('expanded');
                         ptzControls.classList.toggle('expanded');
+                        
+                        // Auto-load presets when first expanded
+                        if (!wasExpanded) {
+                            const camId = ptzControls.dataset.camId;
+                            if (camId) {
+                                loadPresets(camId);
+                            }
+                        }
                     }
 
                     async function saveClip(camId) {
@@ -451,6 +509,116 @@ class WebServer:
                             setTimeout(() => updatePtzMode(camId), 200);
                         } catch (e) {
                             console.error('Patrol toggle error:', e);
+                        }
+                    }
+
+                    async function loadPresets(camId) {
+                        const listEl = document.getElementById('preset-list-' + camId);
+                        listEl.innerHTML = '<div style="color: #888; font-size: 12px;">Loading presets...</div>';
+                        
+                        try {
+                            const response = await fetch('/ptz/' + camId + '/presets');
+                            const data = await response.json();
+                            
+                            if (data.error) {
+                                listEl.innerHTML = '<div style="color: #f44336; font-size: 12px;">Error: ' + data.error + '</div>';
+                                return;
+                            }
+                            
+                            if (!data.presets || data.presets.length === 0) {
+                                listEl.innerHTML = '<div style="color: #888; font-size: 12px;">No presets found. Create presets in camera settings first.</div>';
+                                return;
+                            }
+                            
+                            const activePresets = data.active_patrol_presets || [];
+                            
+                            let html = '';
+                            for (const preset of data.presets) {
+                                const token = preset.token || '';
+                                const name = preset.name || token;
+                                const isActive = activePresets.includes(token);
+                                
+                                html += `
+                                    <div class="preset-item ${isActive ? 'selected' : ''}" data-token="${token}">
+                                        <input type="checkbox" ${isActive ? 'checked' : ''} onchange="togglePresetSelection(this, '${camId}', '${token}')">
+                                        <span class="preset-name">${name}</span>
+                                        <button class="preset-goto" onclick="gotoPreset('${camId}', '${token}')">Go</button>
+                                    </div>
+                                `;
+                            }
+                            listEl.innerHTML = html;
+                            
+                        } catch (e) {
+                            console.error('Load presets error:', e);
+                            listEl.innerHTML = '<div style="color: #f44336; font-size: 12px;">Failed to load presets</div>';
+                        }
+                    }
+
+                    function togglePresetSelection(checkbox, camId, token) {
+                        const item = checkbox.closest('.preset-item');
+                        if (checkbox.checked) {
+                            item.classList.add('selected');
+                        } else {
+                            item.classList.remove('selected');
+                        }
+                    }
+
+                    async function gotoPreset(camId, presetToken) {
+                        try {
+                            await fetch('/ptz/' + camId + '/goto_preset', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ preset_token: presetToken })
+                            });
+                        } catch (e) {
+                            console.error('Goto preset error:', e);
+                        }
+                    }
+
+                    async function applyPatrolPresets(camId) {
+                        const listEl = document.getElementById('preset-list-' + camId);
+                        const selected = [];
+                        
+                        listEl.querySelectorAll('.preset-item input[type="checkbox"]:checked').forEach(cb => {
+                            const item = cb.closest('.preset-item');
+                            selected.push(item.dataset.token);
+                        });
+                        
+                        try {
+                            const response = await fetch('/ptz/' + camId + '/presets', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ presets: selected })
+                            });
+                            const data = await response.json();
+                            
+                            if (data.success) {
+                                alert('Patrol will cycle through ' + selected.length + ' preset(s)');
+                            }
+                        } catch (e) {
+                            console.error('Apply presets error:', e);
+                        }
+                    }
+
+                    async function clearPatrolPresets(camId) {
+                        // Uncheck all
+                        const listEl = document.getElementById('preset-list-' + camId);
+                        listEl.querySelectorAll('.preset-item').forEach(item => {
+                            item.classList.remove('selected');
+                            const cb = item.querySelector('input[type="checkbox"]');
+                            if (cb) cb.checked = false;
+                        });
+                        
+                        // Apply empty preset list (will use continuous sweep)
+                        try {
+                            await fetch('/ptz/' + camId + '/presets', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ presets: [] })
+                            });
+                            alert('Patrol presets cleared. Using continuous sweep.');
+                        } catch (e) {
+                            console.error('Clear presets error:', e);
                         }
                     }
 
@@ -583,6 +751,19 @@ class WebServer:
                                 <div style="display: flex; justify-content: space-between; align-items: center;">
                                     <span style="color: #888;">Status:</span>
                                     <span class="ptz-mode-status" id="ptz-status-{cam_id}" style="font-weight: bold; color: #888;">--</span>
+                                </div>
+                            </div>
+                            <div class="ptz-presets" id="ptz-presets-{cam_id}">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <span style="font-weight: bold;">Patrol Presets</span>
+                                    <button onclick="loadPresets('{cam_id}')" style="padding: 4px 8px; font-size: 12px;">Refresh</button>
+                                </div>
+                                <div id="preset-list-{cam_id}" class="preset-list" style="max-height: 200px; overflow-y: auto;">
+                                    <div style="color: #888; font-size: 12px;">Click Refresh to load presets...</div>
+                                </div>
+                                <div style="margin-top: 8px; display: flex; gap: 8px;">
+                                    <button onclick="applyPatrolPresets('{cam_id}')" style="flex: 1; padding: 6px;">Apply Selected</button>
+                                    <button onclick="clearPatrolPresets('{cam_id}')" style="padding: 6px; background: #666;">Clear</button>
                                 </div>
                             </div>
                             {calibrate_html}
@@ -726,6 +907,107 @@ class WebServer:
             
         except Exception as e:
             LOGGER.error(f"PTZ patrol toggle error: {e}")
+            return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_presets(self, request):
+        """Get available PTZ presets for a camera."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker or not worker.onvif_client or not worker.onvif_profile_token:
+            return web.json_response({'presets': [], 'error': 'Camera not found or ONVIF not configured'})
+        
+        try:
+            loop = asyncio.get_running_loop()
+            presets = await loop.run_in_executor(
+                None,
+                worker.onvif_client.ptz_get_presets,
+                worker.onvif_profile_token
+            )
+            
+            # Get current patrol presets from tracker
+            tracker = getattr(worker, 'ptz_tracker', None)
+            active_presets = []
+            if tracker:
+                active_presets = list(tracker._preset_tokens) if tracker._preset_tokens else []
+            
+            return web.json_response({
+                'presets': presets,
+                'active_patrol_presets': active_presets
+            })
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ presets error: {e}")
+            return web.json_response({'presets': [], 'error': str(e)})
+
+    async def handle_ptz_set_patrol_presets(self, request):
+        """Set which presets to use for patrol mode."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker:
+            return web.Response(status=400, text="Camera not found")
+        
+        try:
+            data = await request.json()
+            preset_tokens = data.get('presets', [])
+            
+            tracker = getattr(worker, 'ptz_tracker', None)
+            if not tracker:
+                return web.json_response({'error': 'No PTZ tracker configured for this camera'}, status=400)
+            
+            # Update the patrol presets
+            tracker.patrol_presets = preset_tokens
+            tracker._preset_tokens = preset_tokens
+            tracker._current_preset_index = 0
+            
+            if preset_tokens:
+                LOGGER.info(f"Updated patrol presets for {camera_id}: {preset_tokens}")
+                # Go to first preset if patrol is active
+                from .ptz_tracker import PTZMode
+                if tracker._mode == PTZMode.PATROL:
+                    tracker._goto_current_preset()
+            else:
+                LOGGER.info(f"Cleared patrol presets for {camera_id}, using continuous sweep")
+            
+            return web.json_response({
+                'success': True,
+                'presets': preset_tokens
+            })
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ set patrol presets error: {e}")
+            return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_goto_preset(self, request):
+        """Move camera to a specific preset."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker or not worker.onvif_client or not worker.onvif_profile_token:
+            return web.Response(status=400, text="Camera not found or ONVIF not configured")
+        
+        try:
+            data = await request.json()
+            preset_token = data.get('preset_token')
+            
+            if not preset_token:
+                return web.Response(status=400, text="Missing preset_token")
+            
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                worker.onvif_client.ptz_goto_preset,
+                worker.onvif_profile_token,
+                preset_token,
+                0.5  # speed
+            )
+            
+            LOGGER.info(f"Moving {camera_id} to preset {preset_token}")
+            return web.json_response({'success': True})
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ goto preset error: {e}")
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_calibrate(self, request):

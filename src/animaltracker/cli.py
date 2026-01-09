@@ -72,6 +72,25 @@ def cmd_discover(args: argparse.Namespace) -> None:
         if args.inspect:
             for profile in profiles:
                 LOGGER.info("- %s", profile)
+        
+        # List PTZ presets if requested
+        if args.presets:
+            LOGGER.info("\nPTZ Presets for %s:", camera.id)
+            for profile in profiles:
+                token = profile.metadata.get('token')
+                if token:
+                    try:
+                        presets = client.ptz_get_presets(token)
+                        if presets:
+                            LOGGER.info("  Profile '%s' presets:", token)
+                            for p in presets:
+                                pos_str = ""
+                                if 'pan' in p:
+                                    pos_str = f" (pan={p['pan']:.2f}, tilt={p['tilt']:.2f})"
+                                LOGGER.info("    - Token: '%s', Name: '%s'%s", 
+                                           p.get('token', '?'), p.get('name', '?'), pos_str)
+                    except Exception as e:
+                        LOGGER.debug("Could not get presets for %s: %s", token, e)
 
 
 def cmd_ptz_test(args: argparse.Namespace) -> None:
@@ -262,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover_cmd = sub.add_parser("discover", help="Run ONVIF discovery")
     discover_cmd.add_argument("--inspect", action="store_true", help="Print profile details")
+    discover_cmd.add_argument("--presets", action="store_true", help="List PTZ presets for each camera")
     discover_cmd.set_defaults(func=cmd_discover)
 
     ptz_test_cmd = sub.add_parser("ptz-test", help="Test PTZ capabilities and find working profile")

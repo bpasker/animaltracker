@@ -242,3 +242,89 @@ class OnvifClient:
         
         LOGGER.warning("No PTZ-capable profile found!")
         return None
+
+    def ptz_get_presets(self, profile_token: str) -> list[Dict[str, Any]]:
+        """Get list of PTZ presets for a profile.
+        
+        Returns list of dicts with 'token', 'name', and optionally position info.
+        """
+        if ONVIFCamera is None:
+            return []
+        
+        try:
+            ptz_service = self._camera.create_ptz_service()
+            presets = ptz_service.GetPresets({"ProfileToken": profile_token})
+            
+            result = []
+            for preset in presets:
+                preset_info = {
+                    'token': getattr(preset, 'token', None),
+                    'name': getattr(preset, 'Name', None),
+                }
+                
+                # Try to get position if available
+                position = getattr(preset, 'PTZPosition', None)
+                if position:
+                    pan_tilt = getattr(position, 'PanTilt', None)
+                    zoom = getattr(position, 'Zoom', None)
+                    if pan_tilt:
+                        preset_info['pan'] = float(getattr(pan_tilt, 'x', 0) or 0)
+                        preset_info['tilt'] = float(getattr(pan_tilt, 'y', 0) or 0)
+                    if zoom:
+                        preset_info['zoom'] = float(getattr(zoom, 'x', 0) or 0)
+                
+                result.append(preset_info)
+            
+            LOGGER.info("Found %d PTZ presets for profile %s", len(result), profile_token)
+            return result
+            
+        except Exception as e:
+            LOGGER.error("Failed to get PTZ presets: %s", e)
+            return []
+
+    def ptz_goto_preset(self, profile_token: str, preset_token: str, speed: float = 0.5) -> None:
+        """Move PTZ to a preset position.
+        
+        Args:
+            profile_token: ONVIF profile token
+            preset_token: Preset token (from ptz_get_presets)
+            speed: Movement speed (0.0 to 1.0)
+        """
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        
+        ptz_service = self._camera.create_ptz_service()
+        request = ptz_service.create_type("GotoPreset")
+        request.ProfileToken = profile_token
+        request.PresetToken = preset_token
+        request.Speed = {
+            "PanTilt": {"x": speed, "y": speed},
+            "Zoom": {"x": speed},
+        }
+        ptz_service.GotoPreset(request)
+        LOGGER.debug("Moving to preset %s", preset_token)
+
+    def ptz_set_preset(self, profile_token: str, preset_name: str, preset_token: Optional[str] = None) -> str:
+        """Save current position as a preset.
+        
+        Args:
+            profile_token: ONVIF profile token
+            preset_name: Name for the preset
+            preset_token: Optional existing preset token to overwrite
+            
+        Returns:
+            The preset token
+        """
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        
+        ptz_service = self._camera.create_ptz_service()
+        request = ptz_service.create_type("SetPreset")
+        request.ProfileToken = profile_token
+        request.PresetName = preset_name
+        if preset_token:
+            request.PresetToken = preset_token
+        
+        result = ptz_service.SetPreset(request)
+        LOGGER.info("Saved preset '%s' with token %s", preset_name, result)
+        return result

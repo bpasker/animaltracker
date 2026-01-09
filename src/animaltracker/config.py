@@ -123,6 +123,9 @@ class PTZTrackingSettings(BaseModel):
     patrol_enabled: bool = Field(default=True, description="Enable patrol sweep when no objects detected")
     patrol_speed: float = Field(default=0.08, ge=0.02, le=1.0, description="Patrol sweep speed (0.08 = slow for detection)")
     patrol_return_delay: float = Field(default=3.0, ge=0.5, le=30.0, description="Seconds to wait after losing object before returning to patrol")
+    # Preset-based patrol (instead of continuous sweep)
+    patrol_presets: list[str] = Field(default=[], description="List of preset tokens/names for patrol. Empty = continuous sweep")
+    patrol_dwell_time: float = Field(default=10.0, ge=2.0, le=120.0, description="Seconds to stay at each preset position")
 
 
 class CameraNotificationSettings(BaseModel):

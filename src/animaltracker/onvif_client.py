@@ -86,6 +86,26 @@ class OnvifClient:
         }
         ptz_service.AbsoluteMove(request)
 
+    def ptz_move_relative(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
+        """Move PTZ by a relative amount from current position.
+        
+        Args:
+            profile_token: ONVIF profile token
+            pan: Relative pan movement (-1.0 to 1.0, negative=left, positive=right)
+            tilt: Relative tilt movement (-1.0 to 1.0, negative=down, positive=up)
+            zoom: Relative zoom movement (-1.0 to 1.0, negative=out, positive=in)
+        """
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        ptz_service = self._camera.create_ptz_service()
+        request = ptz_service.create_type("RelativeMove")
+        request.ProfileToken = profile_token
+        request.Translation = {
+            "PanTilt": {"x": pan, "y": tilt},
+            "Zoom": {"x": zoom},
+        }
+        ptz_service.RelativeMove(request)
+
     def ptz_stop(self, profile_token: str) -> None:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")

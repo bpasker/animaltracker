@@ -74,6 +74,7 @@ class WebServer:
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
         self.app.router.add_get('/ptz/{camera_id}/position', self.handle_ptz_position)
+        self.app.router.add_post('/ptz/calibrate', self.handle_ptz_calibrate)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
@@ -257,6 +258,25 @@ class WebServer:
                         color: #4CAF50;
                         font-size: 1.1em;
                     }
+                    .ptz-calibrate {
+                        margin-top: 12px;
+                        padding-top: 12px;
+                        border-top: 1px solid #333;
+                    }
+                    .ptz-calibrate button {
+                        background: #2196F3;
+                        width: 100%;
+                    }
+                    .ptz-calibrate button:disabled {
+                        background: #666;
+                        cursor: wait;
+                    }
+                    .ptz-calibrate-status {
+                        margin-top: 8px;
+                        font-size: 0.8em;
+                        color: #aaa;
+                        line-height: 1.4;
+                    }
                     .toggle-switch {
                         position: relative;
                         width: 50px;
@@ -372,6 +392,51 @@ class WebServer:
                         }, 1000);
                     }
                     startPositionPolling();
+
+                    async function runCalibration(wideCamId, zoomCamId) {
+                        const btn = document.getElementById('calibrate-btn-' + wideCamId);
+                        const status = document.getElementById('calibrate-status-' + wideCamId);
+                        
+                        btn.disabled = true;
+                        btn.textContent = 'Calibrating...';
+                        status.textContent = 'Moving PTZ to calibration points...';
+                        status.style.color = '#ffa500';
+                        
+                        try {
+                            const response = await fetch('/ptz/calibrate', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    wide_camera_id: wideCamId,
+                                    zoom_camera_id: zoomCamId,
+                                    num_points: 9
+                                })
+                            });
+                            
+                            const result = await response.json();
+                            
+                            if (result.error) {
+                                status.textContent = 'Error: ' + result.error;
+                                status.style.color = '#f44336';
+                            } else {
+                                status.innerHTML = `
+                                    <strong>Calibration Complete!</strong><br>
+                                    pan_scale: ${result.pan_scale.toFixed(3)}<br>
+                                    tilt_scale: ${result.tilt_scale.toFixed(3)}<br>
+                                    pan_center_x: ${result.pan_center_x.toFixed(3)}<br>
+                                    tilt_center_y: ${result.tilt_center_y.toFixed(3)}<br>
+                                    Points: ${result.num_points}
+                                `;
+                                status.style.color = '#4CAF50';
+                            }
+                        } catch (e) {
+                            status.textContent = 'Error: ' + e;
+                            status.style.color = '#f44336';
+                        }
+                        
+                        btn.disabled = false;
+                        btn.textContent = 'Auto-Calibrate PTZ';
+                    }
                 </script>
             </head>
             <body>
@@ -389,6 +454,21 @@ class WebServer:
             cam_name = worker.camera.name
             ptz_html = ""
             if worker.onvif_client and worker.onvif_profile_token:
+                # Check if this camera has PTZ tracking configured (to show calibration)
+                ptz_tracking = getattr(worker.camera, 'ptz_tracking', None)
+                target_cam_id = ptz_tracking.target_camera_id if ptz_tracking and ptz_tracking.enabled else None
+                
+                calibrate_html = ""
+                if target_cam_id:
+                    calibrate_html = f"""
+                            <div class="ptz-calibrate">
+                                <button id="calibrate-btn-{cam_id}" onclick="runCalibration('{cam_id}', '{target_cam_id}')">Auto-Calibrate PTZ</button>
+                                <div id="calibrate-status-{cam_id}" class="ptz-calibrate-status">
+                                    Calibrates PTZ mapping between wide-angle and zoom cameras
+                                </div>
+                            </div>
+                    """
+                
                 ptz_html = f"""
                     <div class="ptz-controls" data-cam-id="{cam_id}">
                         <div class="ptz-header" onclick="togglePtz(this)">
@@ -427,6 +507,7 @@ class WebServer:
                                     </div>
                                 </div>
                             </div>
+                            {calibrate_html}
                         </div>
                     </div>
                 """
@@ -506,6 +587,49 @@ class WebServer:
         except Exception as e:
             LOGGER.error(f"PTZ position error: {e}")
             return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_calibrate(self, request):
+        """Run PTZ auto-calibration between wide and zoom cameras."""
+        from .ptz_calibration import run_auto_calibration
+        
+        try:
+            data = await request.json()
+            wide_camera_id = data.get('wide_camera_id')
+            zoom_camera_id = data.get('zoom_camera_id')
+            num_points = int(data.get('num_points', 9))
+            
+            wide_worker = self.workers.get(wide_camera_id)
+            zoom_worker = self.workers.get(zoom_camera_id)
+            
+            if not wide_worker:
+                return web.json_response({'error': f'Wide camera {wide_camera_id} not found'}, status=400)
+            if not zoom_worker:
+                return web.json_response({'error': f'Zoom camera {zoom_camera_id} not found'}, status=400)
+            
+            # Run calibration in executor (it's blocking)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                run_auto_calibration,
+                wide_worker,
+                zoom_worker,
+                num_points
+            )
+            
+            # If calibration succeeded, update the live tracker
+            if not result.error and wide_worker.ptz_tracker:
+                wide_worker.ptz_tracker.update_calibration(
+                    pan_scale=result.pan_scale,
+                    tilt_scale=result.tilt_scale,
+                    pan_center_x=result.pan_center_x,
+                    tilt_center_y=result.tilt_center_y,
+                )
+            
+            return web.json_response(result.to_dict())
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ calibration error: {e}")
+            return web.json_response({'error': str(e)}, status=500)
 
     def _scan_recordings(self):
         clips_dir = self.storage_root / 'clips'

@@ -106,6 +106,20 @@ class ThresholdSettings(BaseModel):
     min_duration: float = Field(default=2.0, ge=0)
 
 
+class PTZTrackingSettings(BaseModel):
+    """Settings for PTZ auto-tracking (follow detected objects with zoom camera)."""
+    enabled: bool = Field(default=False, description="Enable PTZ auto-tracking")
+    target_camera_id: Optional[str] = Field(default=None, description="Camera ID to send PTZ commands to (for linked cameras)")
+    target_fill_pct: float = Field(default=0.6, ge=0.1, le=0.95, description="Target object fill percentage (0.6 = 60%)")
+    pan_scale: float = Field(default=0.8, ge=0.1, le=2.0, description="PTZ pan range as fraction of wide-angle FOV")
+    tilt_scale: float = Field(default=0.6, ge=0.1, le=2.0, description="PTZ tilt range as fraction of wide-angle FOV")
+    smoothing: float = Field(default=0.3, ge=0.0, le=0.9, description="Movement smoothing (0=instant, 0.9=very smooth)")
+    update_interval: float = Field(default=0.2, ge=0.1, le=2.0, description="Seconds between PTZ updates")
+    # Calibration offsets (where PTZ 0,0 appears on wide-angle, as fraction)
+    pan_center_x: float = Field(default=0.5, ge=0.0, le=1.0, description="X position where PTZ center appears on wide-angle")
+    tilt_center_y: float = Field(default=0.5, ge=0.0, le=1.0, description="Y position where PTZ center appears on wide-angle")
+
+
 class CameraNotificationSettings(BaseModel):
     priority: int = 0
     sound: Optional[str] = None
@@ -116,9 +130,10 @@ class CameraConfig(BaseModel):
     name: str
     location: Optional[str] = None
     rtsp: RTSPSettings
-    onvif: ONVIFSettings
+    onvif: Optional[ONVIFSettings] = None
     thresholds: ThresholdSettings = ThresholdSettings()
     detect_enabled: bool = True
+    ptz_tracking: PTZTrackingSettings = PTZTrackingSettings()
     include_species: List[str] = Field(default_factory=list)
     exclude_species: List[str] = Field(default_factory=list)
     notification: CameraNotificationSettings = CameraNotificationSettings()

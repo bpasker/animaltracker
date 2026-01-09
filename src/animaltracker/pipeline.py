@@ -21,6 +21,7 @@ from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
 from .tracker import ObjectTracker, create_tracker
+from .ptz_tracker import PTZTracker, create_ptz_tracker
 from .web import WebServer
 
 LOGGER = logging.getLogger(__name__)
@@ -226,8 +227,9 @@ class StreamWorker:
         # Initialize ONVIF client if configured
         self.onvif_client: Optional[OnvifClient] = None
         self.onvif_profile_token: Optional[str] = None
+        self.ptz_tracker: Optional[PTZTracker] = None
         
-        if camera.onvif.host:
+        if camera.onvif and camera.onvif.host:
             user, password = camera.onvif.credentials()
             if user and password:
                 try:
@@ -393,6 +395,15 @@ class StreamWorker:
             self.pending_detection_start_ts = None
             await self._maybe_close_event(ts)
             return
+        
+        # PTZ auto-tracking: move zoom camera to follow detection
+        if self.ptz_tracker and filtered:
+            frame_h, frame_w = frame.shape[:2]
+            await loop.run_in_executor(
+                None,
+                self.ptz_tracker.update,
+                filtered, frame_w, frame_h
+            )
         
         # Use all filtered detections to update state
         primary = filtered[0]
@@ -1042,6 +1053,39 @@ class PipelineOrchestrator:
         ]
         
         worker_map = {w.camera.id: w for w in workers}
+        
+        # Initialize PTZ auto-tracking for cameras with it enabled
+        for worker in workers:
+            ptz_cfg = worker.camera.ptz_tracking
+            if ptz_cfg.enabled:
+                # Find target camera for PTZ control
+                target_id = ptz_cfg.target_camera_id or worker.camera.id
+                target_worker = worker_map.get(target_id)
+                
+                if target_worker and target_worker.onvif_client and target_worker.onvif_profile_token:
+                    worker.ptz_tracker = create_ptz_tracker(
+                        onvif_client=target_worker.onvif_client,
+                        profile_token=target_worker.onvif_profile_token,
+                        config={
+                            'pan_scale': ptz_cfg.pan_scale,
+                            'tilt_scale': ptz_cfg.tilt_scale,
+                            'target_fill_pct': ptz_cfg.target_fill_pct,
+                            'smoothing': ptz_cfg.smoothing,
+                            'update_interval': ptz_cfg.update_interval,
+                            'pan_center_x': ptz_cfg.pan_center_x,
+                            'tilt_center_y': ptz_cfg.tilt_center_y,
+                        }
+                    )
+                    worker.ptz_tracker.start_tracking()
+                    LOGGER.info(
+                        "PTZ auto-tracking enabled: %s detections -> %s PTZ",
+                        worker.camera.id, target_id
+                    )
+                else:
+                    LOGGER.warning(
+                        "PTZ tracking enabled for %s but target %s has no ONVIF",
+                        worker.camera.id, target_id
+                    )
 
         # Start web server
         web_server = WebServer(

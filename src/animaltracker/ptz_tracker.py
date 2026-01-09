@@ -180,8 +180,8 @@ class PTZTracker:
         now = time.time()
         
         # Reverse direction periodically
-        # At slow speed 0.15, need ~45 seconds to cover full pan range
-        sweep_duration = 45.0  # seconds per sweep direction
+        # At very slow speed 0.08, need ~90 seconds to cover full pan range
+        sweep_duration = 90.0  # seconds per sweep direction
         
         if now - self._patrol_reverse_time > sweep_duration:
             self._patrol_direction *= -1
@@ -189,7 +189,7 @@ class PTZTracker:
             LOGGER.info("Patrol reversing direction: %s", 
                         "right" if self._patrol_direction > 0 else "left")
         
-        # Pan sweep at patrol speed (0.15 = slow, good for detection)
+        # Pan sweep at patrol speed (0.08 = very slow, good for small/distant animals)
         pan_vel = self.patrol_speed * self._patrol_direction
         
         try:

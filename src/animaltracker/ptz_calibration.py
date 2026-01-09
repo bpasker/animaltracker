@@ -203,7 +203,7 @@ class PTZAutoCalibrator:
             for tilt in tilt_values:
                 try:
                     # Move PTZ to position
-                    LOGGER.debug("Moving PTZ to pan=%.2f, tilt=%.2f", pan, tilt)
+                    LOGGER.info("Moving PTZ to pan=%.2f, tilt=%.2f", pan, tilt)
                     self.onvif_client.ptz_move_absolute(
                         self.profile_token, pan, tilt, 0.0
                     )
@@ -216,14 +216,21 @@ class PTZAutoCalibrator:
                     actual_pan = actual_pos['pan']
                     actual_tilt = actual_pos['tilt']
                     actual_zoom = actual_pos['zoom']
+                    LOGGER.info("PTZ actual position: pan=%.3f, tilt=%.3f, zoom=%.3f", 
+                               actual_pan, actual_tilt, actual_zoom)
                     
                     # Capture frames
                     wide_frame = get_wide_frame()
                     zoom_frame = get_zoom_frame()
                     
-                    if wide_frame is None or zoom_frame is None:
-                        LOGGER.warning("Failed to get frames at pan=%.2f, tilt=%.2f", pan, tilt)
+                    if wide_frame is None:
+                        LOGGER.warning("Wide frame is None at pan=%.2f, tilt=%.2f", pan, tilt)
                         continue
+                    if zoom_frame is None:
+                        LOGGER.warning("Zoom frame is None at pan=%.2f, tilt=%.2f", pan, tilt)
+                        continue
+                    
+                    LOGGER.info("Got frames: wide=%s, zoom=%s", wide_frame.shape, zoom_frame.shape)
                     
                     # Find zoom view in wide frame
                     match = self.find_zoom_in_wide(wide_frame, zoom_frame)
@@ -363,12 +370,46 @@ def run_auto_calibration(
     Returns:
         CalibrationResult with computed parameters
     """
-    if not zoom_worker.onvif_client or not zoom_worker.onvif_profile_token:
+    LOGGER.info("Starting auto-calibration: wide=%s, zoom=%s", 
+                wide_worker.camera.id, zoom_worker.camera.id)
+    
+    if not zoom_worker.onvif_client:
+        LOGGER.error("Zoom camera has no ONVIF client")
         return CalibrationResult(
             pan_scale=0.8, tilt_scale=0.6,
             pan_center_x=0.5, tilt_center_y=0.5,
             points=[],
-            error="Zoom camera has no ONVIF configured"
+            error="Zoom camera has no ONVIF client configured"
+        )
+    
+    if not zoom_worker.onvif_profile_token:
+        LOGGER.error("Zoom camera has no ONVIF profile token")
+        return CalibrationResult(
+            pan_scale=0.8, tilt_scale=0.6,
+            pan_center_x=0.5, tilt_center_y=0.5,
+            points=[],
+            error="Zoom camera has no ONVIF profile token"
+        )
+    
+    LOGGER.info("Using ONVIF profile token: %s", zoom_worker.onvif_profile_token)
+    
+    # Check if we have frames
+    if wide_worker.latest_frame is None:
+        LOGGER.error("Wide camera has no frames yet")
+        return CalibrationResult(
+            pan_scale=0.8, tilt_scale=0.6,
+            pan_center_x=0.5, tilt_center_y=0.5,
+            points=[],
+            error="Wide camera has no frames - is it streaming?"
+        )
+    
+    if zoom_worker.latest_frame is None:
+        LOGGER.error("Zoom camera has no frames yet")
+        return CalibrationResult(
+            pan_scale=0.8, tilt_scale=0.6,
+            pan_center_x=0.5, tilt_center_y=0.5,
+            points=[],
+            error="Zoom camera has no frames - is it streaming?"
         )
     
     calibrator = PTZAutoCalibrator(

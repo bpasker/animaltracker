@@ -239,10 +239,24 @@ class StreamWorker:
                         username=user,
                         password=password
                     )
-                    # Cache the first profile token for PTZ
+                    # Get profile token - use configured profile name or first available
                     profiles = self.onvif_client.get_profiles()
                     if profiles:
-                        self.onvif_profile_token = profiles[0].metadata.get("token")
+                        # Try to find the profile specified in config
+                        target_profile = camera.onvif.profile
+                        if target_profile:
+                            for p in profiles:
+                                token = p.metadata.get("token", "")
+                                # Match by token or by checking if profile name contains target
+                                if token == target_profile or target_profile.lower() in token.lower():
+                                    self.onvif_profile_token = token
+                                    LOGGER.info(f"ONVIF {camera.id}: Using profile '{token}' (matched '{target_profile}')")
+                                    break
+                        
+                        # Fallback to first profile if no match
+                        if not self.onvif_profile_token:
+                            self.onvif_profile_token = profiles[0].metadata.get("token")
+                            LOGGER.info(f"ONVIF {camera.id}: Using first profile '{self.onvif_profile_token}' (available: {[p.metadata.get('token') for p in profiles]})")
                 except Exception as e:
                     LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
 

@@ -199,6 +199,51 @@ class PTZAutoCalibrator:
         
         LOGGER.info("Starting PTZ auto-calibration with %d points", num_points)
         
+        # First, test if PTZ actually works by doing a small move
+        try:
+            initial_pos = self.onvif_client.ptz_get_position(self.profile_token)
+            LOGGER.info("Initial PTZ position: %s", initial_pos)
+            
+            # Try a relative move first (more compatible)
+            LOGGER.info("Testing PTZ with relative move...")
+            self.onvif_client.ptz_move_relative(self.profile_token, 0.1, 0.0, 0.0)
+            time.sleep(1.5)
+            
+            test_pos = self.onvif_client.ptz_get_position(self.profile_token)
+            LOGGER.info("After test move: %s", test_pos)
+            
+            if test_pos['pan'] == initial_pos['pan'] and test_pos['tilt'] == initial_pos['tilt']:
+                LOGGER.warning("PTZ did not move! Trying continuous move instead...")
+                # Try continuous move as fallback
+                self.onvif_client.ptz_move(self.profile_token, 0.5, 0.0, 0.0)
+                time.sleep(0.5)
+                self.onvif_client.ptz_stop(self.profile_token)
+                time.sleep(1.0)
+                test_pos2 = self.onvif_client.ptz_get_position(self.profile_token)
+                LOGGER.info("After continuous move: %s", test_pos2)
+                
+                if test_pos2['pan'] == initial_pos['pan']:
+                    LOGGER.error("PTZ still not moving! Check ONVIF profile token.")
+                    return CalibrationResult(
+                        pan_scale=0.8, tilt_scale=0.6,
+                        pan_center_x=0.5, tilt_center_y=0.5,
+                        points=[],
+                        error=f"PTZ not responding. Profile token '{self.profile_token}' may not support PTZ."
+                    )
+            
+            # Return to center before starting calibration
+            self.onvif_client.ptz_move_absolute(self.profile_token, 0.0, 0.0, 0.0)
+            time.sleep(1.0)
+            
+        except Exception as e:
+            LOGGER.error("PTZ test failed: %s", e)
+            return CalibrationResult(
+                pan_scale=0.8, tilt_scale=0.6,
+                pan_center_x=0.5, tilt_center_y=0.5,
+                points=[],
+                error=f"PTZ test failed: {e}"
+            )
+        
         for pan in pan_values:
             for tilt in tilt_values:
                 try:

@@ -73,6 +73,7 @@ class WebServer:
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
+        self.app.router.add_get('/ptz/{camera_id}/position', self.handle_ptz_position)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
@@ -228,6 +229,34 @@ class WebServer:
                         border-top: 1px solid #333;
                     }
                     .ptz-zoom button { flex: 1; }
+                    .ptz-position {
+                        margin-top: 12px;
+                        padding-top: 12px;
+                        border-top: 1px solid #333;
+                        font-family: 'SF Mono', Monaco, monospace;
+                        font-size: 0.8em;
+                        color: #aaa;
+                    }
+                    .ptz-position-grid {
+                        display: grid;
+                        grid-template-columns: 1fr 1fr 1fr;
+                        gap: 8px;
+                        text-align: center;
+                    }
+                    .ptz-position-value {
+                        background: #333;
+                        padding: 8px;
+                        border-radius: 4px;
+                    }
+                    .ptz-position-label {
+                        font-size: 0.75em;
+                        color: #666;
+                        margin-bottom: 2px;
+                    }
+                    .ptz-position-num {
+                        color: #4CAF50;
+                        font-size: 1.1em;
+                    }
                     .toggle-switch {
                         position: relative;
                         width: 50px;
@@ -309,10 +338,40 @@ class WebServer:
                                     zoom: zoom
                                 })
                             });
+                            // Refresh position after move
+                            setTimeout(() => updatePtzPosition(camId), 200);
                         } catch (e) {
                             console.error('PTZ error:', e);
                         }
                     }
+
+                    async function updatePtzPosition(camId) {
+                        try {
+                            const response = await fetch('/ptz/' + camId + '/position');
+                            if (response.ok) {
+                                const data = await response.json();
+                                const container = document.getElementById('ptz-pos-' + camId);
+                                if (container) {
+                                    container.querySelector('.pan-val').textContent = data.pan.toFixed(3);
+                                    container.querySelector('.tilt-val').textContent = data.tilt.toFixed(3);
+                                    container.querySelector('.zoom-val').textContent = data.zoom.toFixed(3);
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Position fetch error:', e);
+                        }
+                    }
+
+                    // Poll positions for expanded PTZ panels
+                    function startPositionPolling() {
+                        setInterval(() => {
+                            document.querySelectorAll('.ptz-controls.expanded').forEach(panel => {
+                                const camId = panel.dataset.camId;
+                                if (camId) updatePtzPosition(camId);
+                            });
+                        }, 1000);
+                    }
+                    startPositionPolling();
                 </script>
             </head>
             <body>
@@ -331,7 +390,7 @@ class WebServer:
             ptz_html = ""
             if worker.onvif_client and worker.onvif_profile_token:
                 ptz_html = f"""
-                    <div class="ptz-controls">
+                    <div class="ptz-controls" data-cam-id="{cam_id}">
                         <div class="ptz-header" onclick="togglePtz(this)">
                             <span>PTZ Controls</span>
                             <span class="ptz-toggle">▼</span>
@@ -351,6 +410,22 @@ class WebServer:
                             <div class="ptz-zoom">
                                 <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom +</button>
                                 <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom -</button>
+                            </div>
+                            <div class="ptz-position" id="ptz-pos-{cam_id}">
+                                <div class="ptz-position-grid">
+                                    <div class="ptz-position-value">
+                                        <div class="ptz-position-label">PAN</div>
+                                        <div class="ptz-position-num pan-val">--</div>
+                                    </div>
+                                    <div class="ptz-position-value">
+                                        <div class="ptz-position-label">TILT</div>
+                                        <div class="ptz-position-num tilt-val">--</div>
+                                    </div>
+                                    <div class="ptz-position-value">
+                                        <div class="ptz-position-label">ZOOM</div>
+                                        <div class="ptz-position-num zoom-val">--</div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -410,6 +485,26 @@ class WebServer:
             return web.Response(text="OK")
         except Exception as e:
             LOGGER.error(f"PTZ error: {e}")
+            return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_position(self, request):
+        """Get current PTZ position for a camera."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker or not worker.onvif_client or not worker.onvif_profile_token:
+            return web.Response(status=400, text="Camera not found or ONVIF not configured")
+            
+        try:
+            loop = asyncio.get_running_loop()
+            position = await loop.run_in_executor(
+                None,
+                worker.onvif_client.ptz_get_position,
+                worker.onvif_profile_token
+            )
+            return web.json_response(position)
+        except Exception as e:
+            LOGGER.error(f"PTZ position error: {e}")
             return web.Response(status=500, text=str(e))
 
     def _scan_recordings(self):

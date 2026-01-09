@@ -95,3 +95,49 @@ class OnvifClient:
         request.PanTilt = True
         request.Zoom = True
         ptz_service.Stop(request)
+
+    def ptz_get_position(self, profile_token: str) -> Dict[str, float]:
+        """Get current PTZ position for the given profile.
+        
+        Returns dict with keys: pan, tilt, zoom (normalized -1.0 to 1.0 range).
+        Useful for mapping zoom camera position to wide angle field of view.
+        """
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        ptz_service = self._camera.create_ptz_service()
+        status = ptz_service.GetStatus({"ProfileToken": profile_token})
+        
+        position = status.Position
+        result = {
+            "pan": 0.0,
+            "tilt": 0.0,
+            "zoom": 0.0,
+        }
+        
+        if position is not None:
+            if hasattr(position, "PanTilt") and position.PanTilt is not None:
+                result["pan"] = float(position.PanTilt.x)
+                result["tilt"] = float(position.PanTilt.y)
+            if hasattr(position, "Zoom") and position.Zoom is not None:
+                result["zoom"] = float(position.Zoom.x)
+        
+        return result
+
+    def ptz_get_all_positions(self) -> Dict[str, Dict[str, float]]:
+        """Get PTZ position for all profiles (useful for TrackMix with multiple streams).
+        
+        Returns dict mapping profile token -> position dict.
+        """
+        if ONVIFCamera is None:
+            return {}
+        
+        positions = {}
+        for profile in self.get_profiles():
+            token = profile.metadata.get("token")
+            if token:
+                try:
+                    positions[token] = self.ptz_get_position(token)
+                except Exception as e:  # noqa: BLE001
+                    LOGGER.warning("Failed to get PTZ position for %s: %s", token, e)
+        
+        return positions

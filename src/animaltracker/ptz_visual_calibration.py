@@ -547,10 +547,10 @@ async def run_visual_calibration(
     )
     
     def get_wide_frame():
-        return wide_worker.last_frame
+        return wide_worker.latest_frame
     
     def get_zoom_frame():
-        return zoom_worker.last_frame
+        return zoom_worker.latest_frame
     
     # Run calibration in executor (blocking)
     loop = asyncio.get_running_loop()

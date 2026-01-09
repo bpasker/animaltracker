@@ -79,6 +79,7 @@ class WebServer:
         self.app.router.add_get('/ptz/{camera_id}/presets', self.handle_ptz_presets)
         self.app.router.add_post('/ptz/{camera_id}/presets', self.handle_ptz_set_patrol_presets)
         self.app.router.add_post('/ptz/{camera_id}/goto_preset', self.handle_ptz_goto_preset)
+        self.app.router.add_post('/ptz/{camera_id}/save_preset', self.handle_ptz_save_preset)
         self.app.router.add_post('/ptz/calibrate', self.handle_ptz_calibrate)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
@@ -622,6 +623,38 @@ class WebServer:
                         }
                     }
 
+                    async function savePreset(camId) {
+                        const nameInput = document.getElementById('preset-name-' + camId);
+                        const name = nameInput.value.trim();
+                        
+                        if (!name) {
+                            alert('Please enter a preset name');
+                            return;
+                        }
+                        
+                        try {
+                            const response = await fetch('/ptz/' + camId + '/save_preset', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ name: name })
+                            });
+                            
+                            if (response.ok) {
+                                const data = await response.json();
+                                alert('Preset "' + name + '" saved!');
+                                nameInput.value = '';
+                                // Refresh presets list
+                                loadPresets(camId);
+                            } else {
+                                const text = await response.text();
+                                alert('Failed to save preset: ' + text);
+                            }
+                        } catch (e) {
+                            console.error('Save preset error:', e);
+                            alert('Error saving preset');
+                        }
+                    }
+
                     async function runCalibration(wideCamId, zoomCamId) {
                         const btn = document.getElementById('calibrate-btn-' + wideCamId);
                         const status = document.getElementById('calibrate-status-' + wideCamId);
@@ -764,6 +797,13 @@ class WebServer:
                                 <div style="margin-top: 8px; display: flex; gap: 8px;">
                                     <button onclick="applyPatrolPresets('{cam_id}')" style="flex: 1; padding: 6px;">Apply Selected</button>
                                     <button onclick="clearPatrolPresets('{cam_id}')" style="padding: 6px; background: #666;">Clear</button>
+                                </div>
+                                <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #444;">
+                                    <div style="font-size: 12px; color: #888; margin-bottom: 6px;">Save Current Position:</div>
+                                    <div style="display: flex; gap: 8px;">
+                                        <input type="text" id="preset-name-{cam_id}" placeholder="Preset name" style="flex: 1; padding: 6px; background: #333; border: 1px solid #555; color: white; border-radius: 4px;">
+                                        <button onclick="savePreset('{cam_id}')" style="padding: 6px 12px;">Save</button>
+                                    </div>
                                 </div>
                             </div>
                             {calibrate_html}
@@ -1008,6 +1048,41 @@ class WebServer:
             
         except Exception as e:
             LOGGER.error(f"PTZ goto preset error: {e}")
+            return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_save_preset(self, request):
+        """Save current PTZ position as a preset."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker or not worker.onvif_client or not worker.onvif_profile_token:
+            return web.Response(status=400, text="Camera not found or ONVIF not configured")
+        
+        try:
+            data = await request.json()
+            preset_name = data.get('name', '').strip()
+            
+            if not preset_name:
+                return web.Response(status=400, text="Missing preset name")
+            
+            loop = asyncio.get_running_loop()
+            preset_token = await loop.run_in_executor(
+                None,
+                worker.onvif_client.ptz_set_preset,
+                worker.onvif_profile_token,
+                preset_name,
+                None  # Create new preset
+            )
+            
+            LOGGER.info(f"Saved preset '{preset_name}' for {camera_id} with token {preset_token}")
+            return web.json_response({
+                'success': True,
+                'token': preset_token,
+                'name': preset_name
+            })
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ save preset error: {e}")
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_calibrate(self, request):

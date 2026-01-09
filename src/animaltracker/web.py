@@ -74,6 +74,8 @@ class WebServer:
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
         self.app.router.add_get('/ptz/{camera_id}/position', self.handle_ptz_position)
+        self.app.router.add_get('/ptz/{camera_id}/mode', self.handle_ptz_mode)
+        self.app.router.add_post('/ptz/{camera_id}/patrol', self.handle_ptz_patrol)
         self.app.router.add_post('/ptz/calibrate', self.handle_ptz_calibrate)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
@@ -277,6 +279,21 @@ class WebServer:
                         color: #aaa;
                         line-height: 1.4;
                     }
+                    .ptz-mode {
+                        margin-top: 12px;
+                        padding: 12px;
+                        border-top: 1px solid #333;
+                        background: #2a2a2a;
+                        border-radius: 4px;
+                    }
+                    .ptz-mode-status {
+                        padding: 2px 8px;
+                        border-radius: 4px;
+                        font-size: 0.85em;
+                    }
+                    .ptz-mode-status.patrol { background: #1565C0; color: white; }
+                    .ptz-mode-status.tracking { background: #2E7D32; color: white; }
+                    .ptz-mode-status.idle { background: #555; color: #aaa; }
                     .toggle-switch {
                         position: relative;
                         width: 50px;
@@ -393,11 +410,49 @@ class WebServer:
                         setInterval(() => {
                             document.querySelectorAll('.ptz-controls.expanded').forEach(panel => {
                                 const camId = panel.dataset.camId;
-                                if (camId) updatePtzPosition(camId);
+                                if (camId) {
+                                    updatePtzPosition(camId);
+                                    updatePtzMode(camId);
+                                }
                             });
                         }, 1000);
                     }
                     startPositionPolling();
+
+                    async function updatePtzMode(camId) {
+                        try {
+                            const response = await fetch('/ptz/' + camId + '/mode');
+                            if (response.ok) {
+                                const data = await response.json();
+                                const statusEl = document.getElementById('ptz-status-' + camId);
+                                const toggleEl = document.getElementById('patrol-toggle-' + camId);
+                                
+                                if (statusEl) {
+                                    statusEl.textContent = data.mode.toUpperCase();
+                                    statusEl.className = 'ptz-mode-status ' + data.mode;
+                                }
+                                if (toggleEl && !toggleEl.matches(':focus')) {
+                                    toggleEl.checked = data.patrol_enabled;
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Mode fetch error:', e);
+                        }
+                    }
+
+                    async function togglePatrol(camId, enabled) {
+                        try {
+                            await fetch('/ptz/' + camId + '/patrol', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ enabled: enabled })
+                            });
+                            // Update status immediately
+                            setTimeout(() => updatePtzMode(camId), 200);
+                        } catch (e) {
+                            console.error('Patrol toggle error:', e);
+                        }
+                    }
 
                     async function runCalibration(wideCamId, zoomCamId) {
                         const btn = document.getElementById('calibrate-btn-' + wideCamId);
@@ -517,6 +572,19 @@ class WebServer:
                                     </div>
                                 </div>
                             </div>
+                            <div class="ptz-mode" id="ptz-mode-{cam_id}">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <span>Auto-Track Mode</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="patrol-toggle-{cam_id}" onchange="togglePatrol('{cam_id}', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span style="color: #888;">Status:</span>
+                                    <span class="ptz-mode-status" id="ptz-status-{cam_id}" style="font-weight: bold; color: #888;">--</span>
+                                </div>
+                            </div>
                             {calibrate_html}
                         </div>
                     </div>
@@ -596,6 +664,68 @@ class WebServer:
             return web.json_response(position)
         except Exception as e:
             LOGGER.error(f"PTZ position error: {e}")
+            return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_mode(self, request):
+        """Get current PTZ tracking mode for a camera."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker:
+            return web.Response(status=400, text="Camera not found")
+        
+        # Find if this camera has a PTZ tracker
+        tracker = getattr(worker, 'ptz_tracker', None)
+        if not tracker:
+            return web.json_response({
+                'mode': 'idle',
+                'patrol_enabled': False,
+                'tracking_active': False
+            })
+        
+        return web.json_response({
+            'mode': tracker._mode.value if hasattr(tracker._mode, 'value') else str(tracker._mode),
+            'patrol_enabled': tracker._tracking_active,
+            'tracking_active': tracker._mode.value == 'tracking' if hasattr(tracker._mode, 'value') else False
+        })
+
+    async def handle_ptz_patrol(self, request):
+        """Toggle patrol mode for a camera's PTZ tracker."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker:
+            return web.Response(status=400, text="Camera not found")
+        
+        try:
+            data = await request.json()
+            enabled = data.get('enabled', True)
+            
+            tracker = getattr(worker, 'ptz_tracker', None)
+            if not tracker:
+                return web.json_response({'error': 'No PTZ tracker configured for this camera'}, status=400)
+            
+            # Toggle tracking active state (which enables/disables patrol)
+            tracker._tracking_active = enabled
+            
+            # Import PTZMode if we need to set mode
+            if enabled:
+                from .ptz_tracker import PTZMode
+                tracker._mode = PTZMode.PATROL
+                LOGGER.info(f"Patrol mode enabled for camera {camera_id}")
+            else:
+                from .ptz_tracker import PTZMode
+                tracker._mode = PTZMode.IDLE
+                LOGGER.info(f"Patrol mode disabled for camera {camera_id}")
+            
+            return web.json_response({
+                'success': True,
+                'patrol_enabled': enabled,
+                'mode': tracker._mode.value
+            })
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ patrol toggle error: {e}")
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_calibrate(self, request):

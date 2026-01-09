@@ -595,14 +595,14 @@ class WebServer:
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_calibrate(self, request):
-        """Run PTZ auto-calibration between wide and zoom cameras."""
-        from .ptz_calibration import run_auto_calibration
+        """Run PTZ visual auto-calibration between wide and zoom cameras."""
+        from .ptz_visual_calibration import run_visual_calibration
         
         try:
             data = await request.json()
             wide_camera_id = data.get('wide_camera_id')
             zoom_camera_id = data.get('zoom_camera_id')
-            num_points = int(data.get('num_points', 9))
+            grid_size = int(data.get('grid_size', 3))
             
             wide_worker = self.workers.get(wide_camera_id)
             zoom_worker = self.workers.get(zoom_camera_id)
@@ -612,29 +612,19 @@ class WebServer:
             if not zoom_worker:
                 return web.json_response({'error': f'Zoom camera {zoom_camera_id} not found'}, status=400)
             
-            # Run calibration in executor (it's blocking)
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                run_auto_calibration,
-                wide_worker,
-                zoom_worker,
-                num_points
+            # Run visual calibration
+            result = await run_visual_calibration(
+                wide_worker=wide_worker,
+                zoom_worker=zoom_worker,
+                grid_size=grid_size
             )
             
-            # If calibration succeeded, update the live tracker
-            if not result.error and wide_worker.ptz_tracker:
-                wide_worker.ptz_tracker.update_calibration(
-                    pan_scale=result.pan_scale,
-                    tilt_scale=result.tilt_scale,
-                    pan_center_x=result.pan_center_x,
-                    tilt_center_y=result.tilt_center_y,
-                )
-            
-            return web.json_response(result.to_dict())
+            return web.json_response(result)
             
         except Exception as e:
             LOGGER.error(f"PTZ calibration error: {e}")
+            import traceback
+            traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)
 
     def _scan_recordings(self):

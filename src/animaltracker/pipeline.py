@@ -1074,7 +1074,39 @@ class PipelineOrchestrator:
         # Initialize PTZ auto-tracking for cameras with it enabled
         for worker in workers:
             ptz_cfg = worker.camera.ptz_tracking
-            if ptz_cfg.enabled:
+            
+            # Handle self-tracking mode (camera tracks its own detections)
+            if ptz_cfg.self_track:
+                if worker.onvif_client and worker.onvif_profile_token:
+                    worker.ptz_tracker = create_ptz_tracker(
+                        onvif_client=worker.onvif_client,
+                        profile_token=worker.onvif_profile_token,
+                        config={
+                            'pan_scale': ptz_cfg.pan_scale,
+                            'tilt_scale': ptz_cfg.tilt_scale,
+                            'target_fill_pct': ptz_cfg.target_fill_pct,
+                            'smoothing': ptz_cfg.smoothing,
+                            'update_interval': ptz_cfg.update_interval,
+                            'pan_center_x': 0.5,  # Self-tracking always centers
+                            'tilt_center_y': 0.5,
+                            'patrol_enabled': False,  # No patrol in self-track mode
+                            'patrol_speed': 0.0,
+                            'patrol_return_delay': 3.0,
+                        }
+                    )
+                    worker.ptz_tracker.start_tracking()
+                    LOGGER.info(
+                        "PTZ self-tracking enabled: %s centers on its own detections",
+                        worker.camera.id
+                    )
+                else:
+                    LOGGER.warning(
+                        "Self-tracking enabled for %s but no ONVIF configured",
+                        worker.camera.id
+                    )
+            
+            # Handle cross-camera tracking (cam1 detects -> cam2 PTZ)
+            elif ptz_cfg.enabled:
                 # Find target camera for PTZ control
                 target_id = ptz_cfg.target_camera_id or worker.camera.id
                 target_worker = worker_map.get(target_id)

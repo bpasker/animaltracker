@@ -127,19 +127,28 @@ class OnvifClient:
         ptz_service = self._camera.create_ptz_service()
         status = ptz_service.GetStatus({"ProfileToken": profile_token})
         
-        position = status.Position
         result = {
             "pan": 0.0,
             "tilt": 0.0,
             "zoom": 0.0,
         }
         
+        # Try to extract position from various response formats
+        position = getattr(status, 'Position', None)
+        
         if position is not None:
-            if hasattr(position, "PanTilt") and position.PanTilt is not None:
-                result["pan"] = float(position.PanTilt.x)
-                result["tilt"] = float(position.PanTilt.y)
-            if hasattr(position, "Zoom") and position.Zoom is not None:
-                result["zoom"] = float(position.Zoom.x)
+            # Standard ONVIF format
+            pan_tilt = getattr(position, 'PanTilt', None)
+            zoom = getattr(position, 'Zoom', None)
+            
+            if pan_tilt is not None:
+                result["pan"] = float(getattr(pan_tilt, 'x', 0) or 0)
+                result["tilt"] = float(getattr(pan_tilt, 'y', 0) or 0)
+            if zoom is not None:
+                result["zoom"] = float(getattr(zoom, 'x', 0) or 0)
+        
+        # Debug: Log raw status for troubleshooting
+        LOGGER.debug("PTZ GetStatus for %s: %s", profile_token, status)
         
         return result
 

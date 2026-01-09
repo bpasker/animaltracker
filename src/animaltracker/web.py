@@ -372,9 +372,15 @@ class WebServer:
                                 const data = await response.json();
                                 const container = document.getElementById('ptz-pos-' + camId);
                                 if (container) {
-                                    container.querySelector('.pan-val').textContent = data.pan.toFixed(3);
-                                    container.querySelector('.tilt-val').textContent = data.tilt.toFixed(3);
-                                    container.querySelector('.zoom-val').textContent = data.zoom.toFixed(3);
+                                    if (data.available) {
+                                        container.querySelector('.pan-val').textContent = data.pan.toFixed(3);
+                                        container.querySelector('.tilt-val').textContent = data.tilt.toFixed(3);
+                                        container.querySelector('.zoom-val').textContent = data.zoom.toFixed(3);
+                                    } else {
+                                        container.querySelector('.pan-val').textContent = 'N/A';
+                                        container.querySelector('.tilt-val').textContent = 'N/A';
+                                        container.querySelector('.zoom-val').textContent = 'N/A';
+                                    }
                                 }
                             }
                         } catch (e) {

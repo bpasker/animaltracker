@@ -116,21 +116,22 @@ class OnvifClient:
         request.Zoom = True
         ptz_service.Stop(request)
 
-    def ptz_get_position(self, profile_token: str) -> Dict[str, float]:
+    def ptz_get_position(self, profile_token: str) -> Dict[str, Any]:
         """Get current PTZ position for the given profile.
         
-        Returns dict with keys: pan, tilt, zoom (normalized -1.0 to 1.0 range).
-        Useful for mapping zoom camera position to wide angle field of view.
+        Returns dict with keys: pan, tilt, zoom (normalized -1.0 to 1.0 range),
+        and 'available' (bool) indicating if camera reports position.
         """
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
         ptz_service = self._camera.create_ptz_service()
         status = ptz_service.GetStatus({"ProfileToken": profile_token})
         
-        result = {
-            "pan": 0.0,
-            "tilt": 0.0,
-            "zoom": 0.0,
+        result: Dict[str, Any] = {
+            "pan": None,
+            "tilt": None,
+            "zoom": None,
+            "available": False,
         }
         
         # Try to extract position from various response formats
@@ -144,8 +145,10 @@ class OnvifClient:
             if pan_tilt is not None:
                 result["pan"] = float(getattr(pan_tilt, 'x', 0) or 0)
                 result["tilt"] = float(getattr(pan_tilt, 'y', 0) or 0)
+                result["available"] = True
             if zoom is not None:
                 result["zoom"] = float(getattr(zoom, 'x', 0) or 0)
+                result["available"] = True
         
         # Debug: Log raw status for troubleshooting
         LOGGER.debug("PTZ GetStatus for %s: %s", profile_token, status)

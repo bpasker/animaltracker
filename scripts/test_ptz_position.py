@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Test PTZ position reporting from camera."""
-import os
 import sys
 from pathlib import Path
 
@@ -12,17 +11,40 @@ from dotenv import load_dotenv
 # Load secrets
 load_dotenv(Path(__file__).parent.parent / "config" / "secrets.env")
 
+from animaltracker.config import load_runtime_config
 from animaltracker.onvif_client import OnvifClient
 
-# Camera settings - adjust as needed
-HOST = "10.0.1.198"
-PORT = 8000
-USERNAME = os.environ.get("ONVIF_USER", "admin")
-PASSWORD = os.environ.get("ONVIF_PASSWORD", "")
+CONFIG_PATH = Path(__file__).parent.parent / "config" / "cameras.yml"
 
 def main():
-    print(f"Connecting to {HOST}:{PORT} as {USERNAME}...")
-    client = OnvifClient(HOST, PORT, USERNAME, PASSWORD)
+    # Load config the same way as main app
+    runtime = load_runtime_config(str(CONFIG_PATH))
+    
+    # Find camera with ONVIF - prefer cam2 (the PTZ one)
+    camera = None
+    for cam in runtime.cameras:
+        if cam.id == "cam2" and cam.onvif and cam.onvif.host:
+            camera = cam
+            break
+    
+    if not camera:
+        # Fall back to first camera with ONVIF
+        for cam in runtime.cameras:
+            if cam.onvif and cam.onvif.host:
+                camera = cam
+                break
+    
+    if not camera:
+        print("No camera with ONVIF config found")
+        return
+    
+    username, password = camera.onvif.credentials()
+    if not username or not password:
+        print(f"Missing credentials for {camera.id}")
+        return
+    
+    print(f"Connecting to {camera.onvif.host}:{camera.onvif.port} as {username}...")
+    client = OnvifClient(camera.onvif.host, camera.onvif.port, username, password)
     
     # Get all profiles
     profiles = client.get_profiles()

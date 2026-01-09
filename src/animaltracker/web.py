@@ -415,7 +415,7 @@ class WebServer:
                                 body: JSON.stringify({
                                     wide_camera_id: wideCamId,
                                     zoom_camera_id: zoomCamId,
-                                    num_points: 9
+                                    grid_size: 3
                                 })
                             });
                             
@@ -425,13 +425,17 @@ class WebServer:
                                 status.textContent = 'Error: ' + result.error;
                                 status.style.color = '#f44336';
                             } else {
+                                const panPx = result.pan_to_pixel_x?.toFixed(3) ?? 'N/A';
+                                const tiltPx = result.tilt_to_pixel_y?.toFixed(3) ?? 'N/A';
+                                const centerX = result.center_x?.toFixed(3) ?? 'N/A';
+                                const centerY = result.center_y?.toFixed(3) ?? 'N/A';
                                 status.innerHTML = `
                                     <strong>Calibration Complete!</strong><br>
-                                    pan_scale: ${result.pan_scale.toFixed(3)}<br>
-                                    tilt_scale: ${result.tilt_scale.toFixed(3)}<br>
-                                    pan_center_x: ${result.pan_center_x.toFixed(3)}<br>
-                                    tilt_center_y: ${result.tilt_center_y.toFixed(3)}<br>
-                                    Points: ${result.num_points}
+                                    pan_to_pixel: ${panPx}<br>
+                                    tilt_to_pixel: ${tiltPx}<br>
+                                    center_x: ${centerX}<br>
+                                    center_y: ${centerY}<br>
+                                    Points: ${result.num_points || 0}
                                 `;
                                 status.style.color = '#4CAF50';
                             }

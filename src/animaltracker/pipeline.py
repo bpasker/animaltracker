@@ -224,7 +224,7 @@ class StreamWorker:
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
         
-        # Initialize ONVIF client if configured
+        # Initialize ONVIF client if configured (with timeout to prevent blocking)
         self.onvif_client: Optional[OnvifClient] = None
         self.onvif_profile_token: Optional[str] = None
         self.ptz_tracker: Optional[PTZTracker] = None
@@ -233,14 +233,27 @@ class StreamWorker:
             user, password = camera.onvif.credentials()
             if user and password:
                 try:
-                    self.onvif_client = OnvifClient(
-                        host=camera.onvif.host,
-                        port=camera.onvif.port,
-                        username=user,
-                        password=password
-                    )
-                    # Get profile token - use configured profile name or first available
-                    profiles = self.onvif_client.get_profiles()
+                    import concurrent.futures
+                    
+                    def init_onvif():
+                        client = OnvifClient(
+                            host=camera.onvif.host,
+                            port=camera.onvif.port,
+                            username=user,
+                            password=password
+                        )
+                        profiles = client.get_profiles()
+                        return client, profiles
+                    
+                    # Use ThreadPoolExecutor with timeout to prevent blocking
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(init_onvif)
+                        try:
+                            self.onvif_client, profiles = future.result(timeout=10)  # 10 second timeout
+                        except concurrent.futures.TimeoutError:
+                            LOGGER.warning(f"ONVIF initialization timed out for {camera.id} (10s)")
+                            profiles = []
+                    
                     if profiles:
                         available_tokens = [p.metadata.get('token') for p in profiles]
                         LOGGER.info(f"ONVIF {camera.id}: Available profiles: {available_tokens}")

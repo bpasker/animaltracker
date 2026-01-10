@@ -77,6 +77,7 @@ class WebServer:
         self.app.router.add_get('/ptz/{camera_id}/mode', self.handle_ptz_mode)
         self.app.router.add_post('/ptz/{camera_id}/patrol', self.handle_ptz_patrol)
         self.app.router.add_post('/ptz/{camera_id}/track', self.handle_ptz_track)
+        self.app.router.add_post('/ptz/{camera_id}/return_delay', self.handle_ptz_return_delay)
         self.app.router.add_get('/ptz/{camera_id}/presets', self.handle_ptz_presets)
         self.app.router.add_post('/ptz/{camera_id}/presets', self.handle_ptz_set_patrol_presets)
         self.app.router.add_post('/ptz/{camera_id}/goto_preset', self.handle_ptz_goto_preset)
@@ -498,6 +499,13 @@ class WebServer:
                                 if (trackToggleEl && !trackToggleEl.matches(':focus')) {
                                     trackToggleEl.checked = data.track_enabled;
                                 }
+                                // Sync return delay slider
+                                const delaySlider = document.getElementById('return-delay-' + camId);
+                                const delayLabel = document.getElementById('return-delay-value-' + camId);
+                                if (delaySlider && !delaySlider.matches(':active') && data.patrol_return_delay) {
+                                    delaySlider.value = data.patrol_return_delay;
+                                    if (delayLabel) delayLabel.textContent = data.patrol_return_delay + 's';
+                                }
                             }
                         } catch (e) {
                             console.error('Mode fetch error:', e);
@@ -529,6 +537,22 @@ class WebServer:
                             setTimeout(() => updatePtzMode(camId), 200);
                         } catch (e) {
                             console.error('Track toggle error:', e);
+                        }
+                    }
+
+                    function updateReturnDelayLabel(camId, value) {
+                        document.getElementById('return-delay-value-' + camId).textContent = value + 's';
+                    }
+
+                    async function setReturnDelay(camId, value) {
+                        try {
+                            await fetch('/ptz/' + camId + '/return_delay', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ delay: parseFloat(value) })
+                            });
+                        } catch (e) {
+                            console.error('Return delay error:', e);
                         }
                     }
 
@@ -813,7 +837,18 @@ class WebServer:
                                 <div style="font-size: 11px; color: #888; margin-bottom: 12px;">
                                     Follow detected objects automatically
                                 </div>
-                                <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 8px; border-top: 1px solid #444;">
+                                <div style="margin-bottom: 12px; padding-top: 8px; border-top: 1px solid #444;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                        <span style="font-size: 12px;">Return to Patrol</span>
+                                        <span id="return-delay-value-{cam_id}" style="font-size: 12px; color: #4CAF50;">3.0s</span>
+                                    </div>
+                                    <input type="range" id="return-delay-{cam_id}" min="0.5" max="30" step="0.5" value="3" 
+                                           style="width: 100%; accent-color: #4CAF50;"
+                                           oninput="updateReturnDelayLabel('{cam_id}', this.value)"
+                                           onchange="setReturnDelay('{cam_id}', this.value)">
+                                    <div style="font-size: 10px; color: #666;">Seconds after losing object before resuming patrol</div>
+                                </div>
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
                                     <span style="color: #888;">Current:</span>
                                     <span class="ptz-mode-status" id="ptz-status-{cam_id}" style="font-weight: bold; color: #888;">--</span>
                                 </div>
@@ -933,13 +968,15 @@ class WebServer:
             return web.json_response({
                 'mode': 'idle',
                 'patrol_enabled': False,
-                'track_enabled': False
+                'track_enabled': False,
+                'patrol_return_delay': 3.0
             })
         
         return web.json_response({
             'mode': tracker._mode.value if hasattr(tracker._mode, 'value') else str(tracker._mode),
             'patrol_enabled': tracker.is_patrol_enabled(),
-            'track_enabled': tracker.is_track_enabled()
+            'track_enabled': tracker.is_track_enabled(),
+            'patrol_return_delay': tracker.patrol_return_delay
         })
 
     async def handle_ptz_patrol(self, request):
@@ -1000,6 +1037,37 @@ class WebServer:
             
         except Exception as e:
             LOGGER.error(f"PTZ track toggle error: {e}")
+            return web.Response(status=500, text=str(e))
+
+    async def handle_ptz_return_delay(self, request):
+        """Set patrol return delay for a camera's PTZ tracker."""
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+        
+        if not worker:
+            return web.Response(status=400, text="Camera not found")
+        
+        try:
+            data = await request.json()
+            delay = float(data.get('delay', 3.0))
+            
+            # Clamp to valid range
+            delay = max(0.5, min(30.0, delay))
+            
+            tracker = getattr(worker, 'ptz_tracker', None)
+            if not tracker:
+                return web.json_response({'error': 'No PTZ tracker configured for this camera'}, status=400)
+            
+            tracker.patrol_return_delay = delay
+            LOGGER.info(f"PTZ return delay set to {delay}s for camera {camera_id}")
+            
+            return web.json_response({
+                'success': True,
+                'patrol_return_delay': delay
+            })
+            
+        except Exception as e:
+            LOGGER.error(f"PTZ return delay error: {e}")
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_presets(self, request):

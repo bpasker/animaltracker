@@ -1208,18 +1208,32 @@ class PipelineOrchestrator:
                                 'update_interval': ptz_cfg.update_interval,
                                 'pan_center_x': 0.5,  # Self-tracking always centers
                                 'tilt_center_y': 0.5,
-                                'patrol_enabled': False,  # No patrol in self-track mode
-                                'patrol_speed': 0.0,
+                                # Respect patrol config in self-track mode
+                                'patrol_enabled': ptz_cfg.patrol_enabled,
+                                'patrol_speed': ptz_cfg.patrol_speed,
                                 'patrol_return_delay': ptz_cfg.patrol_return_delay,
+                                'patrol_presets': ptz_cfg.patrol_presets,
+                                'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
                             }
                         )
-                        # Self-track mode: only tracking, no patrol
-                        worker.ptz_tracker.set_patrol_enabled(False)
-                        worker.ptz_tracker.set_track_enabled(True)
+                        # Enable patrol and tracking based on config
+                        worker.ptz_tracker.set_patrol_enabled(ptz_cfg.patrol_enabled)
+                        worker.ptz_tracker.set_track_enabled(ptz_cfg.track_enabled)
                         shared_ptz_trackers[worker.camera.id] = worker.ptz_tracker
+                        
+                        mode_parts = []
+                        if ptz_cfg.patrol_enabled:
+                            if ptz_cfg.patrol_presets:
+                                mode_parts.append(f"preset-patrol({len(ptz_cfg.patrol_presets)})")
+                            else:
+                                mode_parts.append("sweep-patrol")
+                        if ptz_cfg.track_enabled:
+                            mode_parts.append("self-track")
+                        mode = "+".join(mode_parts) if mode_parts else "idle"
+                        
                         LOGGER.info(
-                            "PTZ self-tracking enabled: %s centers on its own detections (with zoom)",
-                            worker.camera.id
+                            "PTZ self-tracking enabled (%s): %s controls its own PTZ",
+                            mode, worker.camera.id
                         )
                 else:
                     LOGGER.warning(

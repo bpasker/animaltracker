@@ -75,6 +75,7 @@ class RetentionSettings(BaseModel):
 class NotificationSettings(BaseModel):
     pushover_app_token_env: str
     pushover_user_key_env: str
+    web_base_url: Optional[str] = Field(default=None, description="Base URL for web UI (e.g., http://192.168.1.195:8080). Used for clickable links in notifications.")
 
 
 class ONVIFSettings(BaseModel):

@@ -43,6 +43,9 @@ general:
   notification:
     pushover_app_token_env: PUSHOVER_APP_TOKEN
     pushover_user_key_env: PUSHOVER_USER_KEY
+    # Web UI base URL for clickable video links in notifications
+    # Example: http://192.168.1.100:8080 (your Jetson/server IP and port)
+    web_base_url: null
   retention:
     min_days: 7
     max_days: 30

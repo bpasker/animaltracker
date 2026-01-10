@@ -46,9 +46,12 @@ if __name__ == "__main__":
             confidence=0.99,
             camera_id="test_cam_01",
             camera_name="Debug Camera",
-            clip_path="/tmp/placeholder.mp4", # Won't actually be uploaded unless implemented
+            clip_path="/tmp/placeholder.mp4",  # Won't actually be uploaded unless implemented
             event_started_at=time.time(),
-            event_duration=10.5
+            event_duration=10.5,
+            thumbnail_path=None,  # Set to an actual .jpg path to test image attachment
+            storage_root=None,
+            web_base_url=None,  # Set to test URL link, e.g., "http://192.168.1.195:8080"
         )
 
         print("Sending test notification to Pushover...")

@@ -591,6 +591,9 @@ class StreamWorker:
         detector = self.detector
         storage_root = self.storage.storage_root
         
+        # Capture web_base_url for notification links
+        web_base_url = getattr(self.runtime.general.notification, 'web_base_url', None)
+        
         # Capture exclusion lists for post-processing check
         # (species may be reclassified by post-processor to an excluded species)
         camera_excludes = set(self._normalize_species(s) for s in self.camera.exclude_species)
@@ -700,7 +703,19 @@ class StreamWorker:
                     LOGGER.warning("Failed to clean up excluded clip files: %s", e)
                 return  # Skip notification for excluded species
             
-            # Step 7: Send notification with refined info
+            # Step 7: Find thumbnail for notification
+            thumbnail_path = None
+            try:
+                thumb_pattern = clip_path.stem + "_thumb_*.jpg"
+                thumb_files = list(clip_path.parent.glob(thumb_pattern))
+                if thumb_files:
+                    # Use the first thumbnail found (usually the main species)
+                    thumbnail_path = str(thumb_files[0])
+                    LOGGER.debug("Found thumbnail for notification: %s", thumbnail_path)
+            except Exception as e:
+                LOGGER.warning("Failed to find thumbnail: %s", e)
+            
+            # Step 8: Send notification with refined info
             ctx = NotificationContext(
                 species=final_species,
                 confidence=final_confidence,
@@ -709,6 +724,9 @@ class StreamWorker:
                 clip_path=str(clip_path),
                 event_started_at=ctx_base['event_started_at'],
                 event_duration=ctx_base['event_duration'],
+                thumbnail_path=thumbnail_path,
+                storage_root=str(storage_root),
+                web_base_url=web_base_url,
             )
             self.notifier.send(ctx, priority=priority, sound=sound)
             LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)", 

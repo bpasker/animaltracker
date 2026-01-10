@@ -364,8 +364,14 @@ class PTZTracker:
         
         # Preset-based patrol
         if self._preset_tokens:
+            time_at_preset = now - self._preset_arrival_time
+            PTZ_LOGGER.debug(
+                "[PATROL] Preset mode: at preset %d/%d, time=%.1fs (dwell=%.1fs)",
+                self._current_preset_index + 1, len(self._preset_tokens),
+                time_at_preset, self.patrol_dwell_time
+            )
             # Check if dwell time has elapsed
-            if now - self._preset_arrival_time > self.patrol_dwell_time:
+            if time_at_preset > self.patrol_dwell_time:
                 # Move to next preset
                 self._current_preset_index = (self._current_preset_index + 1) % len(self._preset_tokens)
                 self._goto_current_preset()
@@ -532,6 +538,14 @@ class PTZTracker:
             # Start patrol if enabled but not started yet
             if self._patrol_active and self._mode != PTZMode.PATROL:
                 self._mode = PTZMode.PATROL
+                PTZ_LOGGER.info("[MODE_CHANGE] -> PATROL (patrol enabled, starting)")
+                # Initialize patrol - go to first preset or start sweep
+                if self._preset_tokens:
+                    self._current_preset_index = 0
+                    self._goto_current_preset()
+                else:
+                    # Start continuous sweep
+                    self._patrol_reverse_time = time.time()
             
             if self._mode == PTZMode.PATROL:
                 self._do_patrol()

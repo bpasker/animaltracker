@@ -609,18 +609,22 @@ class ObjectTracker:
                     primary.first_seen_frame = min(primary.first_seen_frame, other.first_seen_frame)
                     primary.last_seen_frame = max(primary.last_seen_frame, other.last_seen_frame)
                     
-                    # Update best frame if other's is better
-                    if other.best_confidence > primary.best_confidence:
-                        primary.best_confidence = other.best_confidence
-                        primary.best_bbox = other.best_bbox
-                        primary.best_frame = other.best_frame
+                    # Update best frame if other's is better OR if primary has no frame
+                    if other.best_frame is not None:
+                        if primary.best_frame is None or other.best_confidence > primary.best_confidence:
+                            primary.best_confidence = other.best_confidence
+                            primary.best_bbox = other.best_bbox
+                            primary.best_frame = other.best_frame
                     
-                    # Merge species_best_frames (keep best confidence per species)
+                    # Merge species_best_frames (keep best confidence per species, or copy if missing)
                     for sp, frame_data in other.species_best_frames.items():
                         if sp not in primary.species_best_frames:
                             primary.species_best_frames[sp] = frame_data
-                        elif frame_data[1] > primary.species_best_frames[sp][1]:
-                            primary.species_best_frames[sp] = frame_data
+                        elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                            existing = primary.species_best_frames[sp]
+                            # Copy if primary has no frame for this species, or if other has better confidence
+                            if existing[0] is None or frame_data[1] > existing[1]:
+                                primary.species_best_frames[sp] = frame_data
                     
                     tracks_to_remove.add(other_id)
                     merged_count += 1
@@ -755,18 +759,22 @@ class ObjectTracker:
                 specific_info.last_seen_frame = max(specific_info.last_seen_frame, 
                                                     generic_info.last_seen_frame)
                 
-                # Update best frame if generic's is better
-                if generic_info.best_confidence > specific_info.best_confidence:
-                    specific_info.best_confidence = generic_info.best_confidence
-                    specific_info.best_bbox = generic_info.best_bbox
-                    specific_info.best_frame = generic_info.best_frame
+                # Update best frame if generic's is better OR if specific has no frame
+                if generic_info.best_frame is not None:
+                    if specific_info.best_frame is None or generic_info.best_confidence > specific_info.best_confidence:
+                        specific_info.best_confidence = generic_info.best_confidence
+                        specific_info.best_bbox = generic_info.best_bbox
+                        specific_info.best_frame = generic_info.best_frame
                 
-                # Merge species_best_frames (keep best confidence per species)
+                # Merge species_best_frames (keep best confidence per species, or copy if missing)
                 for sp, frame_data in generic_info.species_best_frames.items():
                     if sp not in specific_info.species_best_frames:
                         specific_info.species_best_frames[sp] = frame_data
-                    elif frame_data[1] > specific_info.species_best_frames[sp][1]:
-                        specific_info.species_best_frames[sp] = frame_data
+                    elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                        existing = specific_info.species_best_frames[sp]
+                        # Copy if specific has no frame for this species, or if generic has better confidence
+                        if existing[0] is None or frame_data[1] > existing[1]:
+                            specific_info.species_best_frames[sp] = frame_data
                 
                 tracks_to_remove.add(generic['track_id'])
                 merged_count += 1
@@ -853,12 +861,21 @@ class ObjectTracker:
             primary_info.last_seen_frame = max(primary_info.last_seen_frame, 
                                                other_info.last_seen_frame)
             
-            # Merge species_best_frames (keep best confidence per species)
+            # Update best frame if other's is better OR if primary has no frame
+            if other_info.best_frame is not None:
+                if primary_info.best_frame is None or other_info.best_confidence > primary_info.best_confidence:
+                    primary_info.best_confidence = other_info.best_confidence
+                    primary_info.best_bbox = other_info.best_bbox
+                    primary_info.best_frame = other_info.best_frame
+            
+            # Merge species_best_frames (keep best confidence per species, or copy if missing)
             for sp, frame_data in other_info.species_best_frames.items():
                 if sp not in primary_info.species_best_frames:
                     primary_info.species_best_frames[sp] = frame_data
-                elif frame_data[1] > primary_info.species_best_frames[sp][1]:
-                    primary_info.species_best_frames[sp] = frame_data
+                elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                    existing = primary_info.species_best_frames[sp]
+                    if existing[0] is None or frame_data[1] > existing[1]:
+                        primary_info.species_best_frames[sp] = frame_data
             
             tracks_to_remove.add(other['track_id'])
             merged_count += 1
@@ -985,16 +1002,21 @@ class ObjectTracker:
                     larger_info.last_seen_frame = max(larger_info.last_seen_frame,
                                                       smaller_info.last_seen_frame)
                     
-                    if smaller_info.best_confidence > larger_info.best_confidence:
-                        larger_info.best_confidence = smaller_info.best_confidence
-                        larger_info.best_bbox = smaller_info.best_bbox
-                        larger_info.best_frame = smaller_info.best_frame
+                    # Update best frame if smaller's is better OR if larger has no frame
+                    if smaller_info.best_frame is not None:
+                        if larger_info.best_frame is None or smaller_info.best_confidence > larger_info.best_confidence:
+                            larger_info.best_confidence = smaller_info.best_confidence
+                            larger_info.best_bbox = smaller_info.best_bbox
+                            larger_info.best_frame = smaller_info.best_frame
                     
+                    # Merge species_best_frames (keep best confidence per species, or copy if missing)
                     for sp, frame_data in smaller_info.species_best_frames.items():
                         if sp not in larger_info.species_best_frames:
                             larger_info.species_best_frames[sp] = frame_data
-                        elif frame_data[1] > larger_info.species_best_frames[sp][1]:
-                            larger_info.species_best_frames[sp] = frame_data
+                        elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                            existing = larger_info.species_best_frames[sp]
+                            if existing[0] is None or frame_data[1] > existing[1]:
+                                larger_info.species_best_frames[sp] = frame_data
                     
                     # Update larger's frame_bboxes for subsequent comparisons
                     larger['frame_bboxes'].update(smaller['frame_bboxes'])
@@ -1120,16 +1142,21 @@ class ObjectTracker:
                         larger_info.last_seen_frame = max(larger_info.last_seen_frame,
                                                           smaller_info.last_seen_frame)
                         
-                        if smaller_info.best_confidence > larger_info.best_confidence:
-                            larger_info.best_confidence = smaller_info.best_confidence
-                            larger_info.best_bbox = smaller_info.best_bbox
-                            larger_info.best_frame = smaller_info.best_frame
+                        # Update best frame if smaller's is better OR if larger has no frame
+                        if smaller_info.best_frame is not None:
+                            if larger_info.best_frame is None or smaller_info.best_confidence > larger_info.best_confidence:
+                                larger_info.best_confidence = smaller_info.best_confidence
+                                larger_info.best_bbox = smaller_info.best_bbox
+                                larger_info.best_frame = smaller_info.best_frame
                         
+                        # Merge species_best_frames (keep best confidence per species, or copy if missing)
                         for sp, frame_data in smaller_info.species_best_frames.items():
                             if sp not in larger_info.species_best_frames:
                                 larger_info.species_best_frames[sp] = frame_data
-                            elif frame_data[1] > larger_info.species_best_frames[sp][1]:
-                                larger_info.species_best_frames[sp] = frame_data
+                            elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                                existing = larger_info.species_best_frames[sp]
+                                if existing[0] is None or frame_data[1] > existing[1]:
+                                    larger_info.species_best_frames[sp] = frame_data
                         
                         # Update larger's detection_frames for subsequent gap detection
                         larger['detection_frames'].update(smaller['detection_frames'])
@@ -1291,18 +1318,22 @@ class ObjectTracker:
                     earlier_info.last_seen_frame = max(earlier_info.last_seen_frame, 
                                                        later_info.last_seen_frame)
                     
-                    # Update best frame if later's is better
-                    if later_info.best_confidence > earlier_info.best_confidence:
-                        earlier_info.best_confidence = later_info.best_confidence
-                        earlier_info.best_bbox = later_info.best_bbox
-                        earlier_info.best_frame = later_info.best_frame
+                    # Update best frame if later's is better OR if earlier has no frame
+                    if later_info.best_frame is not None:
+                        if earlier_info.best_frame is None or later_info.best_confidence > earlier_info.best_confidence:
+                            earlier_info.best_confidence = later_info.best_confidence
+                            earlier_info.best_bbox = later_info.best_bbox
+                            earlier_info.best_frame = later_info.best_frame
                     
-                    # Merge species_best_frames (keep best confidence per species)
+                    # Merge species_best_frames (keep best confidence per species, or copy if missing)
                     for sp, frame_data in later_info.species_best_frames.items():
                         if sp not in earlier_info.species_best_frames:
                             earlier_info.species_best_frames[sp] = frame_data
-                        elif frame_data[1] > earlier_info.species_best_frames[sp][1]:
-                            earlier_info.species_best_frames[sp] = frame_data
+                        elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                            existing = earlier_info.species_best_frames[sp]
+                            # Copy if earlier has no frame for this species, or if later has better confidence
+                            if existing[0] is None or frame_data[1] > existing[1]:
+                                earlier_info.species_best_frames[sp] = frame_data
                     
                     # Update the earlier track's last_bbox for chaining
                     earlier['last_bbox'] = later['last_bbox']

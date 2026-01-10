@@ -201,11 +201,35 @@ class PTZTracker:
         """Get all logged PTZ decisions as dicts."""
         return [entry.to_dict() for entry in self._decision_log]
     
+    def get_decisions_in_window(self, start_ts: float, end_ts: float) -> List[Dict[str, Any]]:
+        """Get PTZ decisions within a time window (for event finalization).
+        
+        This is safe for shared trackers - doesn't clear the log, just returns
+        decisions that fall within the event's time window.
+        """
+        return [
+            entry.to_dict() 
+            for entry in self._decision_log 
+            if start_ts <= entry.timestamp <= end_ts
+        ]
+    
     def clear_decision_log(self) -> List[Dict[str, Any]]:
-        """Get and clear all logged PTZ decisions (for event finalization)."""
+        """Get and clear all logged PTZ decisions (for event finalization).
+        
+        DEPRECATED: Use get_decisions_in_window() for shared trackers.
+        """
         log = self.get_decision_log()
         self._decision_log = []
         return log
+    
+    def trim_old_decisions(self, cutoff_ts: float) -> int:
+        """Remove decisions older than cutoff timestamp.
+        
+        Returns number of entries removed.
+        """
+        original_len = len(self._decision_log)
+        self._decision_log = [e for e in self._decision_log if e.timestamp >= cutoff_ts]
+        return original_len - len(self._decision_log)
     
     def _resolve_presets(self) -> None:
         """Resolve preset names to tokens."""

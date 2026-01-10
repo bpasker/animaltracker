@@ -429,6 +429,10 @@ class StreamWorker:
                 self.ptz_tracker.update,
                 filtered, frame_w, frame_h
             )
+            # Periodically trim old decisions to prevent unbounded memory growth
+            # Keep last 5 minutes of decisions (enough for any reasonable clip)
+            cutoff = ts - 300  # 5 minutes
+            self.ptz_tracker.trim_old_decisions(cutoff)
 
         if not filtered:
             self.pending_detection_start_ts = None
@@ -608,11 +612,20 @@ class StreamWorker:
         web_base_url = getattr(self.runtime.general.notification, 'web_base_url', None)
         
         # Capture PTZ decisions if tracker is active
+        # Use time-windowed approach to avoid clearing decisions that other
+        # cameras sharing this tracker may need
         ptz_log = None
         if self.ptz_tracker:
-            ptz_log = self.ptz_tracker.clear_decision_log()
+            event_start = self.event_state.start_ts
+            event_end = ts  # Current time (event closing)
+            # Add buffer for pre-event decisions that may be relevant
+            ptz_log = self.ptz_tracker.get_decisions_in_window(
+                event_start - self.runtime.general.clip.pre_seconds,
+                event_end
+            )
             if ptz_log:
-                LOGGER.debug("Captured %d PTZ decisions for event", len(ptz_log))
+                LOGGER.debug("Captured %d PTZ decisions for event (window: %.1fs)", 
+                            len(ptz_log), event_end - event_start)
         
         # Capture exclusion lists for post-processing check
         # (species may be reclassified by post-processor to an excluded species)

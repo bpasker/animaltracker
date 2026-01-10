@@ -4714,8 +4714,42 @@ class WebServer:
         # Offload image processing to thread to avoid blocking event loop
         loop = asyncio.get_running_loop()
         
-        def process_image(img):
+        # Get current detections for overlay
+        detections = getattr(worker, 'latest_detections', []) or []
+        
+        def process_image(img, detections):
             height, width = img.shape[:2]
+            
+            # Draw bounding boxes and labels for current detections
+            for det in detections:
+                if det.bbox:
+                    x1, y1, x2, y2 = [int(v) for v in det.bbox]
+                    
+                    # Draw bounding box (green)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    
+                    # Prepare label with species name and confidence
+                    common_name = get_common_name(det.species)
+                    label = f"{common_name} {det.confidence*100:.0f}%"
+                    
+                    # Calculate text size for background rectangle
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.6
+                    thickness = 2
+                    (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+                    
+                    # Draw background rectangle for label
+                    label_y = max(y1 - 10, text_height + 10)
+                    cv2.rectangle(img, 
+                                  (x1, label_y - text_height - 5), 
+                                  (x1 + text_width + 10, label_y + 5), 
+                                  (0, 255, 0), -1)
+                    
+                    # Draw label text (black on green background)
+                    cv2.putText(img, label, (x1 + 5, label_y), 
+                                font, font_scale, (0, 0, 0), thickness)
+            
+            # Resize for web display
             if width > 640:
                 scale = 640 / width
                 new_height = int(height * scale)
@@ -4725,7 +4759,7 @@ class WebServer:
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
             return cv2.imencode('.jpg', img, encode_param)
 
-        success, buffer = await loop.run_in_executor(None, process_image, worker.latest_frame)
+        success, buffer = await loop.run_in_executor(None, process_image, worker.latest_frame.copy(), detections)
         
         if not success:
             return web.Response(status=500, text="Failed to encode frame")

@@ -223,6 +223,7 @@ class StreamWorker:
         self.pending_detection_start_ts: Optional[float] = None
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
+        self.latest_detections: List[Detection] = []  # Current detections for live view overlay
         
         # Initialize ONVIF client if configured (with timeout to prevent blocking)
         self.onvif_client: Optional[OnvifClient] = None
@@ -420,6 +421,9 @@ class StreamWorker:
             )
         )
         filtered = self._filter_detections(detections)
+        
+        # Store for live view overlay
+        self.latest_detections = filtered
 
         # PTZ auto-tracking: always call update (handles patrol when no detections)
         if self.ptz_tracker:

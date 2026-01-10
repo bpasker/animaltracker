@@ -767,6 +767,9 @@ class WebServer:
                 ptz_tracking = getattr(worker.camera, 'ptz_tracking', None)
                 target_cam_id = ptz_tracking.target_camera_id if ptz_tracking and ptz_tracking.enabled else None
                 
+                # Check if this camera has a PTZ tracker attached (for patrol/track controls)
+                has_tracker = hasattr(worker, 'ptz_tracker') and worker.ptz_tracker is not None
+                
                 calibrate_html = ""
                 if target_cam_id:
                     calibrate_html = f"""
@@ -778,45 +781,19 @@ class WebServer:
                             </div>
                     """
                 
-                ptz_html = f"""
-                    <div class="ptz-controls" data-cam-id="{cam_id}">
-                        <div class="ptz-header" onclick="togglePtz(this)">
-                            <span>PTZ Controls</span>
-                            <span class="ptz-toggle">▼</span>
-                        </div>
-                        <div class="ptz-content">
-                            <div class="ptz-grid">
-                                <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▲</button>
-                                <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', -1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">◄</button>
-                                <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">►</button>
-                                <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, -1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▼</button>
-                                <div></div>
-                            </div>
-                            <div class="ptz-zoom">
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom +</button>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom -</button>
-                            </div>
-                            <div class="ptz-position" id="ptz-pos-{cam_id}">
-                                <div class="ptz-position-grid">
-                                    <div class="ptz-position-value">
-                                        <div class="ptz-position-label">PAN</div>
-                                        <div class="ptz-position-num pan-val">--</div>
-                                    </div>
-                                    <div class="ptz-position-value">
-                                        <div class="ptz-position-label">TILT</div>
-                                        <div class="ptz-position-num tilt-val">--</div>
-                                    </div>
-                                    <div class="ptz-position-value">
-                                        <div class="ptz-position-label">ZOOM</div>
-                                        <div class="ptz-position-num zoom-val">--</div>
-                                    </div>
-                                </div>
-                            </div>
+                # Patrol/track controls - only show if this camera has a tracker
+                patrol_track_html = ""
+                if has_tracker:
+                    # Determine what camera's PTZ this controls
+                    controls_label = ""
+                    if target_cam_id:
+                        target_name = self.workers.get(target_cam_id, {})
+                        if hasattr(target_name, 'camera'):
+                            controls_label = f'<div style="font-size: 11px; color: #4CAF50; margin-bottom: 8px;">Controls {target_name.camera.name} PTZ</div>'
+                    
+                    patrol_track_html = f"""
                             <div class="ptz-mode" id="ptz-mode-{cam_id}">
+                                {controls_label}
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                     <span>Patrol</span>
                                     <label class="toggle-switch">
@@ -873,6 +850,47 @@ class WebServer:
                                     </div>
                                 </div>
                             </div>
+                    """
+                
+                ptz_html = f"""
+                    <div class="ptz-controls" data-cam-id="{cam_id}">
+                        <div class="ptz-header" onclick="togglePtz(this)">
+                            <span>PTZ Controls</span>
+                            <span class="ptz-toggle">▼</span>
+                        </div>
+                        <div class="ptz-content">
+                            <div class="ptz-grid">
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▲</button>
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', -1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">◄</button>
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">►</button>
+                                <div></div>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, -1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▼</button>
+                                <div></div>
+                            </div>
+                            <div class="ptz-zoom">
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom +</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom -</button>
+                            </div>
+                            <div class="ptz-position" id="ptz-pos-{cam_id}">
+                                <div class="ptz-position-grid">
+                                    <div class="ptz-position-value">
+                                        <div class="ptz-position-label">PAN</div>
+                                        <div class="ptz-position-num pan-val">--</div>
+                                    </div>
+                                    <div class="ptz-position-value">
+                                        <div class="ptz-position-label">TILT</div>
+                                        <div class="ptz-position-num tilt-val">--</div>
+                                    </div>
+                                    <div class="ptz-position-value">
+                                        <div class="ptz-position-label">ZOOM</div>
+                                        <div class="ptz-position-num zoom-val">--</div>
+                                    </div>
+                                </div>
+                            </div>
+                            {patrol_track_html}
                             {calibrate_html}
                         </div>
                     </div>

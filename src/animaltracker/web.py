@@ -65,6 +65,10 @@ class WebServer:
         self.port = port
         self.config_path = config_path
         self.runtime = runtime
+        # State file for persisting PTZ settings across restarts
+        # Store in config directory alongside cameras.yml
+        config_dir = config_path.parent if config_path else None
+        self.state_file = config_dir / 'ptz_state.json' if config_dir else None
         # Track active reprocessing jobs: {clip_path: {'started': timestamp, 'clip_name': name}}
         self.reprocessing_jobs: Dict[str, dict] = {}
         self.app = web.Application()
@@ -1016,6 +1020,9 @@ class WebServer:
             # Use the new method
             tracker.set_patrol_enabled(enabled)
             
+            # Persist the state
+            self._update_ptz_state(camera_id, patrol_enabled=enabled)
+            
             return web.json_response({
                 'success': True,
                 'patrol_enabled': tracker.is_patrol_enabled(),
@@ -1045,6 +1052,9 @@ class WebServer:
             
             # Use the new method
             tracker.set_track_enabled(enabled)
+            
+            # Persist the state
+            self._update_ptz_state(camera_id, track_enabled=enabled)
             
             return web.json_response({
                 'success': True,
@@ -1077,6 +1087,10 @@ class WebServer:
                 return web.json_response({'error': 'No PTZ tracker configured for this camera'}, status=400)
             
             tracker.patrol_return_delay = delay
+            
+            # Persist the state
+            self._update_ptz_state(camera_id, patrol_return_delay=delay)
+            
             LOGGER.info(f"PTZ return delay set to {delay}s for camera {camera_id}")
             
             return web.json_response({
@@ -1139,6 +1153,9 @@ class WebServer:
             tracker.patrol_presets = preset_tokens
             tracker._preset_tokens = preset_tokens
             tracker._current_preset_index = 0
+            
+            # Persist the state
+            self._update_ptz_state(camera_id, patrol_presets=preset_tokens)
             
             if preset_tokens:
                 LOGGER.info(f"Updated patrol presets for {camera_id}: {preset_tokens}")
@@ -8706,7 +8723,76 @@ class WebServer:
         with self.config_path.open('w', encoding='utf-8') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
+    def _load_ptz_state(self) -> dict:
+        """Load persisted PTZ state from file."""
+        if not self.state_file or not self.state_file.exists():
+            return {}
+        try:
+            with open(self.state_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            LOGGER.warning(f"Failed to load PTZ state: {e}")
+            return {}
+    
+    def _save_ptz_state(self, state: dict) -> None:
+        """Save PTZ state to file."""
+        if not self.state_file:
+            return
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+            LOGGER.debug(f"Saved PTZ state to {self.state_file}")
+        except Exception as e:
+            LOGGER.error(f"Failed to save PTZ state: {e}")
+    
+    def _apply_ptz_state(self) -> None:
+        """Apply persisted PTZ state to trackers after startup."""
+        state = self._load_ptz_state()
+        if not state:
+            return
+        
+        for cam_id, cam_state in state.items():
+            worker = self.workers.get(cam_id)
+            if not worker:
+                continue
+            
+            tracker = getattr(worker, 'ptz_tracker', None)
+            if not tracker:
+                continue
+            
+            # Restore patrol presets
+            if 'patrol_presets' in cam_state:
+                preset_tokens = cam_state['patrol_presets']
+                tracker.patrol_presets = preset_tokens
+                tracker._preset_tokens = preset_tokens
+                tracker._current_preset_index = 0
+                if preset_tokens:
+                    LOGGER.info(f"Restored patrol presets for {cam_id}: {preset_tokens}")
+            
+            # Restore patrol return delay
+            if 'patrol_return_delay' in cam_state:
+                tracker.patrol_return_delay = cam_state['patrol_return_delay']
+                LOGGER.info(f"Restored patrol return delay for {cam_id}: {cam_state['patrol_return_delay']}s")
+            
+            # Restore patrol/track enabled states
+            if 'patrol_enabled' in cam_state:
+                tracker.set_patrol_enabled(cam_state['patrol_enabled'])
+            if 'track_enabled' in cam_state:
+                tracker.set_track_enabled(cam_state['track_enabled'])
+    
+    def _update_ptz_state(self, cam_id: str, **kwargs) -> None:
+        """Update and save PTZ state for a camera."""
+        state = self._load_ptz_state()
+        if cam_id not in state:
+            state[cam_id] = {}
+        state[cam_id].update(kwargs)
+        self._save_ptz_state(state)
+
     async def start(self):
+        # Apply persisted PTZ state to trackers
+        self._apply_ptz_state()
+        
         # Setup access logger
         access_logger = logging.getLogger('web_access')
         access_logger.setLevel(logging.INFO)

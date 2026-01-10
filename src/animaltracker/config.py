@@ -119,10 +119,12 @@ class PTZTrackingSettings(BaseModel):
     # Calibration offsets (where PTZ 0,0 appears on wide-angle, as fraction)
     pan_center_x: float = Field(default=0.5, ge=0.0, le=1.0, description="X position where PTZ center appears on wide-angle")
     tilt_center_y: float = Field(default=0.5, ge=0.0, le=1.0, description="Y position where PTZ center appears on wide-angle")
-    # Patrol mode settings
+    # Patrol mode settings (scan for objects)
     patrol_enabled: bool = Field(default=True, description="Enable patrol sweep when no objects detected")
     patrol_speed: float = Field(default=0.08, ge=0.02, le=1.0, description="Patrol sweep speed (0.08 = slow for detection)")
     patrol_return_delay: float = Field(default=3.0, ge=0.5, le=30.0, description="Seconds to wait after losing object before returning to patrol")
+    # Track mode settings (follow detected objects)
+    track_enabled: bool = Field(default=True, description="Enable tracking of detected objects")
     # Preset-based patrol (instead of continuous sweep)
     patrol_presets: list[str] = Field(default=[], description="List of preset tokens/names for patrol. Empty = continuous sweep")
     patrol_dwell_time: float = Field(default=10.0, ge=2.0, le=120.0, description="Seconds to stay at each preset position")

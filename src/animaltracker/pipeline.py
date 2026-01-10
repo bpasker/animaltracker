@@ -1094,7 +1094,9 @@ class PipelineOrchestrator:
                             'patrol_return_delay': 3.0,
                         }
                     )
-                    worker.ptz_tracker.start_tracking()
+                    # Self-track mode: only tracking, no patrol
+                    worker.ptz_tracker.set_patrol_enabled(False)
+                    worker.ptz_tracker.set_track_enabled(True)
                     LOGGER.info(
                         "PTZ self-tracking enabled: %s centers on its own detections",
                         worker.camera.id
@@ -1130,7 +1132,9 @@ class PipelineOrchestrator:
                             'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
                         }
                     )
-                    worker.ptz_tracker.start_tracking()
+                    # Enable patrol and tracking separately based on config
+                    worker.ptz_tracker.set_patrol_enabled(ptz_cfg.patrol_enabled)
+                    worker.ptz_tracker.set_track_enabled(ptz_cfg.track_enabled)
                     if ptz_cfg.patrol_presets:
                         mode = f"preset-patrol({len(ptz_cfg.patrol_presets)})+track"
                     elif ptz_cfg.patrol_enabled:

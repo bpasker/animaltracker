@@ -152,7 +152,8 @@ class PTZTracker:
     _target_pan: float = field(default=0.0, init=False)
     _target_tilt: float = field(default=0.0, init=False)
     _target_zoom: float = field(default=0.0, init=False)
-    _tracking_active: bool = field(default=False, init=False)
+    _patrol_active: bool = field(default=False, init=False)  # Patrol toggle state
+    _track_active: bool = field(default=False, init=False)   # Tracking toggle state
     _mode: PTZMode = field(default=PTZMode.IDLE, init=False)
     _patrol_direction: int = field(default=1, init=False)  # 1 = right, -1 = left
     _last_detection_time: float = field(default=0.0, init=False)
@@ -190,24 +191,58 @@ class PTZTracker:
             self._preset_tokens = []
     
     def start_tracking(self) -> None:
-        """Enable auto-tracking with patrol mode."""
-        self._tracking_active = True
+        """Enable auto-tracking with patrol mode (legacy - enables both)."""
+        self.set_patrol_enabled(True)
+        self.set_track_enabled(True)
+    
+    def set_patrol_enabled(self, enabled: bool) -> None:
+        """Enable or disable patrol mode independently."""
+        self._patrol_active = enabled
         
-        # Resolve presets if configured
-        if self.patrol_presets:
-            self._resolve_presets()
-        
-        if self.patrol_enabled:
-            self._mode = PTZMode.PATROL
-            if self._preset_tokens:
-                LOGGER.info("PTZ preset patrol enabled - cycling %d positions", len(self._preset_tokens))
-                # Go to first preset
-                self._goto_current_preset()
-            else:
-                LOGGER.info("PTZ patrol mode enabled - continuous sweep")
+        if enabled:
+            # Resolve presets if configured
+            if self.patrol_presets and not self._preset_tokens:
+                self._resolve_presets()
+            
+            # Start patrol if not currently tracking
+            if self._mode != PTZMode.TRACKING:
+                self._mode = PTZMode.PATROL
+                if self._preset_tokens:
+                    LOGGER.info("PTZ preset patrol enabled - cycling %d positions", len(self._preset_tokens))
+                    self._goto_current_preset()
+                else:
+                    LOGGER.info("PTZ patrol mode enabled - continuous sweep")
         else:
-            self._mode = PTZMode.IDLE
-            LOGGER.info("PTZ tracking enabled (patrol disabled)")
+            # If patrol disabled and not tracking, go idle
+            if self._mode == PTZMode.PATROL:
+                self._mode = PTZMode.IDLE
+                try:
+                    self.onvif_client.ptz_stop(self.profile_token)
+                except Exception:
+                    pass
+            LOGGER.info("PTZ patrol disabled")
+    
+    def set_track_enabled(self, enabled: bool) -> None:
+        """Enable or disable object tracking independently."""
+        self._track_active = enabled
+        
+        if enabled:
+            LOGGER.info("PTZ tracking enabled")
+        else:
+            LOGGER.info("PTZ tracking disabled")
+            # If currently tracking, either return to patrol or go idle
+            if self._mode == PTZMode.TRACKING:
+                if self._patrol_active:
+                    self._mode = PTZMode.PATROL
+                    if self._preset_tokens:
+                        self._goto_current_preset()
+                    LOGGER.info("PTZ returning to patrol (tracking disabled)")
+                else:
+                    self._mode = PTZMode.IDLE
+                    try:
+                        self.onvif_client.ptz_stop(self.profile_token)
+                    except Exception:
+                        pass
     
     def _goto_current_preset(self) -> None:
         """Move to current preset in the patrol sequence."""
@@ -223,14 +258,23 @@ class PTZTracker:
             LOGGER.error("Failed to go to preset: %s", e)
     
     def stop_tracking(self) -> None:
-        """Disable auto-tracking."""
-        self._tracking_active = False
+        """Disable auto-tracking (legacy - disables both)."""
+        self.set_patrol_enabled(False)
+        self.set_track_enabled(False)
         self._mode = PTZMode.IDLE
         try:
             self.onvif_client.ptz_stop(self.profile_token)
         except Exception:
             pass
         LOGGER.info("PTZ tracking disabled")
+    
+    def is_patrol_enabled(self) -> bool:
+        """Check if patrol is enabled."""
+        return self._patrol_active
+    
+    def is_track_enabled(self) -> bool:
+        """Check if tracking is enabled."""
+        return self._track_active
     
     def get_mode(self) -> str:
         """Get current PTZ mode as string."""
@@ -300,7 +344,8 @@ class PTZTracker:
         Returns:
             True if PTZ was moved, False otherwise
         """
-        if not self._tracking_active:
+        # Need at least one of patrol or track enabled
+        if not self._patrol_active and not self._track_active:
             return False
         
         # Rate limit updates
@@ -311,8 +356,8 @@ class PTZTracker:
         self._last_update = now
         
         # Handle state transitions based on detections
-        if detections:
-            # We have detections - switch to tracking mode
+        if detections and self._track_active:
+            # We have detections and tracking is enabled - switch to tracking mode
             self._last_detection_time = now
             
             if self._mode != PTZMode.TRACKING:
@@ -321,19 +366,22 @@ class PTZTracker:
             
             return self._do_tracking(detections, frame_width, frame_height)
         else:
-            # No detections
+            # No detections or tracking disabled
             if self._mode == PTZMode.TRACKING:
                 # Was tracking, check if we should return to patrol
                 time_since_detection = now - self._last_detection_time
                 
-                if time_since_detection > self.patrol_return_delay:
-                    # Object lost for long enough, return to patrol
-                    if self.patrol_enabled:
+                if time_since_detection > self.patrol_return_delay or not self._track_active:
+                    # Object lost for long enough (or tracking disabled), return to patrol
+                    if self._patrol_active:
                         self._mode = PTZMode.PATROL
-                        LOGGER.info("PTZ returning to PATROL mode - object lost for %.1fs", 
-                                   time_since_detection)
+                        if self._track_active:
+                            LOGGER.info("PTZ returning to PATROL mode - object lost for %.1fs", 
+                                       time_since_detection)
+                        else:
+                            LOGGER.info("PTZ returning to PATROL mode - tracking disabled")
                     else:
-                        # Stop and wait
+                        # Patrol disabled, stop and wait
                         self._mode = PTZMode.IDLE
                         try:
                             self.onvif_client.ptz_stop(self.profile_token)
@@ -346,6 +394,10 @@ class PTZTracker:
                     except Exception:
                         pass
                     return False
+            
+            # Start patrol if enabled but not started yet
+            if self._patrol_active and self._mode != PTZMode.PATROL:
+                self._mode = PTZMode.PATROL
             
             if self._mode == PTZMode.PATROL:
                 self._do_patrol()

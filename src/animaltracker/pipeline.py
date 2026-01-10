@@ -607,6 +607,13 @@ class StreamWorker:
         # Capture web_base_url for notification links
         web_base_url = getattr(self.runtime.general.notification, 'web_base_url', None)
         
+        # Capture PTZ decisions if tracker is active
+        ptz_log = None
+        if self.ptz_tracker:
+            ptz_log = self.ptz_tracker.clear_decision_log()
+            if ptz_log:
+                LOGGER.debug("Captured %d PTZ decisions for event", len(ptz_log))
+        
         # Capture exclusion lists for post-processing check
         # (species may be reclassified by post-processor to an excluded species)
         camera_excludes = set(self._normalize_species(s) for s in self.camera.exclude_species)
@@ -616,7 +623,7 @@ class StreamWorker:
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
         
-        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames):
+        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions):
             """Finalize event with optional post-clip species analysis."""
             final_species = ctx_base['species']
             final_confidence = ctx_base['confidence']
@@ -689,6 +696,31 @@ class StreamWorker:
                                    final_species, final_confidence * 100, tracks_count)
                 except Exception as e:
                     LOGGER.error("Unified post-processing failed: %s", e)
+            
+            # Step 5.5: Append PTZ decisions to the processing log if available
+            if ptz_decisions:
+                try:
+                    import json
+                    log_path = clip_path.with_suffix('.log.json')
+                    if log_path.exists():
+                        # Merge with existing log
+                        with open(log_path, 'r') as f:
+                            log_data = json.load(f)
+                        log_data['ptz_decisions'] = ptz_decisions
+                        with open(log_path, 'w') as f:
+                            json.dump(log_data, f, indent=2, default=str)
+                        LOGGER.debug("Added %d PTZ decisions to processing log", len(ptz_decisions))
+                    else:
+                        # Create new log file with just PTZ data
+                        log_data = {
+                            'clip': str(clip_path.name),
+                            'ptz_decisions': ptz_decisions,
+                        }
+                        with open(log_path, 'w') as f:
+                            json.dump(log_data, f, indent=2, default=str)
+                        LOGGER.debug("Created PTZ log with %d decisions", len(ptz_decisions))
+                except Exception as e:
+                    LOGGER.warning("Failed to save PTZ decisions: %s", e)
             
             # Step 6: Check if final species is excluded (post-processing may have reclassified)
             # If excluded, delete the clip and skip notification
@@ -773,7 +805,8 @@ class StreamWorker:
             ctx_base, 
             self.camera.notification.priority, 
             self.camera.notification.sound,
-            species_key_frames
+            species_key_frames,
+            ptz_log,
         )
         
         self.event_state = None

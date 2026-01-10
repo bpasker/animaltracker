@@ -4999,12 +4999,21 @@ class WebServer:
         thumbnails_html = ""
         processing_log_html = """
                     <div class="processing-log">
-                        <button class="log-toggle" onclick="toggleLog()">
+                        <button class="log-toggle" onclick="toggleLog('processing')">
                             <span class="arrow">▶</span>
                             <span>📋 Processing Details</span>
                         </button>
-                        <div class="log-content" id="logContent">
+                        <div class="log-content" id="processingLogContent">
                             <div id="logData" class="log-no-data">Loading...</div>
+                        </div>
+                    </div>
+                    <div class="processing-log ptz-log">
+                        <button class="log-toggle" onclick="toggleLog('ptz')">
+                            <span class="arrow">▶</span>
+                            <span>🎥 PTZ Decisions</span>
+                        </button>
+                        <div class="log-content" id="ptzLogContent">
+                            <div id="ptzLogData" class="log-no-data">Loading...</div>
                         </div>
                     </div>
         """
@@ -5351,6 +5360,37 @@ class WebServer:
                     .log-event .confidence {{ color: #4CAF50; }}
                     .log-event .reason {{ color: #aaa; font-style: italic; font-size: 0.9em; }}
                     .log-no-data {{ color: #666; font-style: italic; text-align: center; padding: 20px; }}
+                    
+                    /* PTZ Log Styles */
+                    .ptz-log {{ margin-top: 8px; }}
+                    .ptz-event {{
+                        padding: 8px;
+                        margin: 4px 0;
+                        border-radius: 4px;
+                        font-family: 'SF Mono', Monaco, 'Consolas', monospace;
+                        font-size: 0.85em;
+                    }}
+                    .ptz-event.mode_change {{ background: rgba(156, 39, 176, 0.15); border-left: 3px solid #9C27B0; }}
+                    .ptz-event.move {{ background: rgba(33, 150, 243, 0.1); border-left: 3px solid #2196F3; }}
+                    .ptz-event.deadzone {{ background: rgba(255, 193, 7, 0.1); border-left: 3px solid #FFC107; }}
+                    .ptz-event.error {{ background: rgba(244, 67, 54, 0.15); border-left: 3px solid #F44336; }}
+                    .ptz-event .timestamp {{ color: #888; font-size: 0.8em; }}
+                    .ptz-event .event-type {{ color: #fff; font-weight: 600; text-transform: uppercase; font-size: 0.75em; }}
+                    .ptz-event .details {{ color: #ccc; margin-top: 4px; }}
+                    .ptz-summary {{
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        margin-bottom: 12px;
+                    }}
+                    .ptz-summary h4 {{ margin: 0 0 8px 0; color: #9C27B0; }}
+                    .ptz-summary-row {{
+                        display: flex;
+                        justify-content: space-between;
+                        padding: 4px 0;
+                        border-bottom: 1px solid #333;
+                    }}
+                    .ptz-summary-row:last-child {{ border-bottom: none; }}
                     
                     /* Settings Panel Styles */
                     .settings-toggle {{
@@ -5748,35 +5788,57 @@ class WebServer:
                     }}
                     
                     // Processing log functions
-                    let logLoaded = false;
+                    let processingLogLoaded = false;
+                    let ptzLogLoaded = false;
+                    let cachedLogData = null;
                     
-                    function toggleLog() {{
-                        const toggle = document.querySelector('.log-toggle');
-                        const content = document.getElementById('logContent');
+                    function toggleLog(logType) {{
+                        const isProcessing = logType === 'processing';
+                        const toggles = document.querySelectorAll('.log-toggle');
+                        const toggle = isProcessing ? toggles[0] : toggles[1];
+                        const content = document.getElementById(isProcessing ? 'processingLogContent' : 'ptzLogContent');
                         
                         toggle.classList.toggle('expanded');
                         content.classList.toggle('visible');
                         
-                        if (!logLoaded && content.classList.contains('visible')) {{
-                            loadProcessingLog();
+                        // Load data on first expand
+                        if (content.classList.contains('visible')) {{
+                            if (cachedLogData) {{
+                                // Use cached data
+                                if (isProcessing && !processingLogLoaded) {{
+                                    renderProcessingLog(cachedLogData);
+                                    processingLogLoaded = true;
+                                }} else if (!isProcessing && !ptzLogLoaded) {{
+                                    renderPtzLog(cachedLogData);
+                                    ptzLogLoaded = true;
+                                }}
+                            }} else {{
+                                loadAllLogs(logType);
+                            }}
                         }}
                     }}
                     
-                    async function loadProcessingLog() {{
-                        const logData = document.getElementById('logData');
-                        
+                    async function loadAllLogs(requestedType) {{
                         try {{
                             const response = await fetch('/recordings/log/{clip_info['path']}');
                             const result = await response.json();
                             
                             if (result.exists) {{
-                                renderProcessingLog(result.data);
+                                cachedLogData = result.data;
+                                if (requestedType === 'processing') {{
+                                    renderProcessingLog(result.data);
+                                    processingLogLoaded = true;
+                                }} else {{
+                                    renderPtzLog(result.data);
+                                    ptzLogLoaded = true;
+                                }}
                             }} else {{
-                                logData.innerHTML = '<div class="log-no-data">' + result.message + '</div>';
+                                const target = requestedType === 'processing' ? 'logData' : 'ptzLogData';
+                                document.getElementById(target).innerHTML = '<div class="log-no-data">' + result.message + '</div>';
                             }}
-                            logLoaded = true;
                         }} catch (e) {{
-                            logData.innerHTML = '<div class="log-no-data">Error loading log: ' + e + '</div>';
+                            const target = requestedType === 'processing' ? 'logData' : 'ptzLogData';
+                            document.getElementById(target).innerHTML = '<div class="log-no-data">Error loading log: ' + e + '</div>';
                         }}
                     }}
                     
@@ -5897,6 +5959,158 @@ class WebServer:
                             }} catch (err) {{
                                 console.error('Fallback copy failed:', err);
                                 alert('Failed to copy logs to clipboard');
+                            }}
+                            document.body.removeChild(textarea);
+                        }}
+                    }}
+                    
+                    // PTZ Log rendering
+                    function renderPtzLog(data) {{
+                        const ptzLogData = document.getElementById('ptzLogData');
+                        
+                        if (!data.ptz_decisions || data.ptz_decisions.length === 0) {{
+                            ptzLogData.innerHTML = '<div class="log-no-data">No PTZ decisions recorded for this clip. PTZ tracking may not have been active.</div>';
+                            return;
+                        }}
+                        
+                        const decisions = data.ptz_decisions;
+                        window.currentPtzDecisions = decisions;
+                        
+                        let html = '';
+                        
+                        // PTZ Summary
+                        const modeChanges = decisions.filter(d => d.event === 'mode_change').length;
+                        const moves = decisions.filter(d => d.event === 'move').length;
+                        const deadzones = decisions.filter(d => d.event === 'deadzone').length;
+                        const errors = decisions.filter(d => d.event === 'error').length;
+                        
+                        html += '<div class="ptz-summary">';
+                        html += '<h4>🎥 PTZ Summary</h4>';
+                        html += '<div class="ptz-summary-row"><span>Total Decisions</span><span>' + decisions.length + '</span></div>';
+                        html += '<div class="ptz-summary-row"><span>Mode Changes</span><span>' + modeChanges + '</span></div>';
+                        html += '<div class="ptz-summary-row"><span>Move Commands</span><span>' + moves + '</span></div>';
+                        html += '<div class="ptz-summary-row"><span>In Deadzone</span><span>' + deadzones + '</span></div>';
+                        if (errors > 0) {{
+                            html += '<div class="ptz-summary-row"><span style="color: #F44336;">Errors</span><span style="color: #F44336;">' + errors + '</span></div>';
+                        }}
+                        html += '</div>';
+                        
+                        // PTZ Events
+                        html += '<div class="log-events">';
+                        html += '<div class="log-events-header">';
+                        html += '<h4>📝 PTZ Events (' + decisions.length + ')</h4>';
+                        html += '<button class="copy-logs-btn" onclick="copyPtzLogs()">📋 Copy Logs</button>';
+                        html += '</div>';
+                        
+                        for (const entry of decisions) {{
+                            const eventClass = entry.event || 'move';
+                            const time = new Date(entry.timestamp * 1000).toLocaleTimeString();
+                            
+                            html += '<div class="ptz-event ' + eventClass + '">';
+                            html += '<span class="timestamp">' + time + '</span> ';
+                            html += '<span class="event-type">' + entry.event + '</span> ';
+                            html += '<span class="mode">[' + entry.mode + ']</span>';
+                            
+                            // Format details based on event type
+                            if (entry.details) {{
+                                html += '<div class="details">';
+                                if (entry.event === 'move') {{
+                                    const d = entry.details;
+                                    html += 'Species: ' + (d.species || 'unknown') + ' (' + ((d.confidence || 0) * 100).toFixed(1) + '%) ';
+                                    if (d.velocity) {{
+                                        html += '| Vel: pan=' + d.velocity.pan.toFixed(2) + ', tilt=' + d.velocity.tilt.toFixed(2);
+                                    }}
+                                    if (d.offset) {{
+                                        html += ' | Offset: ' + (d.offset.magnitude * 100).toFixed(1) + '%';
+                                    }}
+                                    if (d.fill_pct) {{
+                                        html += ' | Fill: ' + d.fill_pct.toFixed(0) + '%';
+                                    }}
+                                }} else if (entry.event === 'mode_change') {{
+                                    html += entry.details.from + ' → ' + entry.details.to;
+                                    if (entry.details.reason) {{
+                                        html += ' (' + entry.details.reason + ')';
+                                    }}
+                                    if (entry.details.trigger) {{
+                                        html += ' | Trigger: ' + entry.details.trigger;
+                                    }}
+                                }} else if (entry.event === 'deadzone') {{
+                                    html += 'In center zone (offset: ' + (entry.details.offset_magnitude * 100).toFixed(1) + '% < ' + (entry.details.threshold * 100).toFixed(0) + '%)';
+                                }} else if (entry.event === 'error') {{
+                                    html += '<span style="color: #F44336;">' + (entry.details.error || 'Unknown error') + '</span>';
+                                }} else {{
+                                    html += JSON.stringify(entry.details);
+                                }}
+                                html += '</div>';
+                            }}
+                            html += '</div>';
+                        }}
+                        html += '</div>';
+                        
+                        ptzLogData.innerHTML = html;
+                    }}
+                    
+                    function copyPtzLogs() {{
+                        if (!window.currentPtzDecisions || window.currentPtzDecisions.length === 0) {{
+                            return;
+                        }}
+                        
+                        let logText = 'PTZ Decision Log\\n================\\n\\n';
+                        for (const entry of window.currentPtzDecisions) {{
+                            const time = new Date(entry.timestamp * 1000).toLocaleTimeString();
+                            let line = time + ' [' + entry.mode + '] ' + entry.event.toUpperCase();
+                            
+                            if (entry.details) {{
+                                if (entry.event === 'move') {{
+                                    const d = entry.details;
+                                    line += ': ' + (d.species || 'unknown');
+                                    if (d.velocity) {{
+                                        line += ' vel=(pan=' + d.velocity.pan.toFixed(2) + ', tilt=' + d.velocity.tilt.toFixed(2) + ')';
+                                    }}
+                                }} else if (entry.event === 'mode_change') {{
+                                    line += ': ' + entry.details.from + ' -> ' + entry.details.to;
+                                }} else {{
+                                    line += ': ' + JSON.stringify(entry.details);
+                                }}
+                            }}
+                            logText += line + '\\n';
+                        }}
+                        
+                        // Use same copy logic as processing logs
+                        function showCopiedFeedback() {{
+                            const btns = document.querySelectorAll('.copy-logs-btn');
+                            const btn = btns[btns.length - 1]; // Last button is PTZ copy
+                            const originalText = btn.innerHTML;
+                            btn.innerHTML = '✓ Copied!';
+                            btn.classList.add('copied');
+                            setTimeout(() => {{
+                                btn.innerHTML = originalText;
+                                btn.classList.remove('copied');
+                            }}, 2000);
+                        }}
+                        
+                        if (navigator.clipboard && navigator.clipboard.writeText) {{
+                            navigator.clipboard.writeText(logText).then(() => {{
+                                showCopiedFeedback();
+                            }}).catch(err => {{
+                                fallbackCopyPtz(logText, showCopiedFeedback);
+                            }});
+                        }} else {{
+                            fallbackCopyPtz(logText, showCopiedFeedback);
+                        }}
+                        
+                        function fallbackCopyPtz(text, callback) {{
+                            const textarea = document.createElement('textarea');
+                            textarea.value = text;
+                            textarea.style.position = 'fixed';
+                            textarea.style.left = '-9999px';
+                            document.body.appendChild(textarea);
+                            textarea.select();
+                            try {{
+                                document.execCommand('copy');
+                                callback();
+                            }} catch (err) {{
+                                alert('Failed to copy PTZ logs');
                             }}
                             document.body.removeChild(textarea);
                         }}

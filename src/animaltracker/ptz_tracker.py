@@ -4,13 +4,34 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from .onvif_client import OnvifClient
     from .detector import Detection
 
 LOGGER = logging.getLogger(__name__)
+
+# Dedicated PTZ decision logger for debugging tracking behavior
+# Enable with: logging.getLogger('ptz.decisions').setLevel(logging.DEBUG)
+PTZ_LOGGER = logging.getLogger('ptz.decisions')
+
+
+@dataclass
+class PTZDecisionEntry:
+    """A single PTZ decision log entry for storage."""
+    timestamp: float
+    event: str  # mode_change, move, deadzone, rate_limit, tracking_lost, etc.
+    mode: str  # idle, patrol, tracking
+    details: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'timestamp': self.timestamp,
+            'event': self.event,
+            'mode': self.mode,
+            'details': self.details,
+        }
 
 
 @dataclass
@@ -158,6 +179,33 @@ class PTZTracker:
     _patrol_direction: int = field(default=1, init=False)  # 1 = right, -1 = left
     _last_detection_time: float = field(default=0.0, init=False)
     _patrol_reverse_time: float = field(default=0.0, init=False)
+    
+    # Decision log buffer (for storing with clips)
+    _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
+    _decision_log_max_entries: int = field(default=1000, init=False)  # Prevent unbounded growth
+    
+    def _log_decision(self, event: str, details: Optional[Dict[str, Any]] = None) -> None:
+        """Log a PTZ decision for later retrieval."""
+        entry = PTZDecisionEntry(
+            timestamp=time.time(),
+            event=event,
+            mode=self._mode.value,
+            details=details or {},
+        )
+        self._decision_log.append(entry)
+        # Trim if too large
+        if len(self._decision_log) > self._decision_log_max_entries:
+            self._decision_log = self._decision_log[-self._decision_log_max_entries:]
+    
+    def get_decision_log(self) -> List[Dict[str, Any]]:
+        """Get all logged PTZ decisions as dicts."""
+        return [entry.to_dict() for entry in self._decision_log]
+    
+    def clear_decision_log(self) -> List[Dict[str, Any]]:
+        """Get and clear all logged PTZ decisions (for event finalization)."""
+        log = self.get_decision_log()
+        self._decision_log = []
+        return log
     
     def _resolve_presets(self) -> None:
         """Resolve preset names to tokens."""
@@ -351,6 +399,10 @@ class PTZTracker:
         # Rate limit updates
         now = time.time()
         if now - self._last_update < self.update_interval:
+            PTZ_LOGGER.debug(
+                "[RATE_LIMIT] Skipping update, %.2fs since last (interval=%.2fs)",
+                now - self._last_update, self.update_interval
+            )
             return False
         
         self._last_update = now
@@ -360,20 +412,62 @@ class PTZTracker:
             # We have detections and tracking is enabled - switch to tracking mode
             self._last_detection_time = now
             
+            PTZ_LOGGER.debug(
+                "[DETECTIONS] %d objects detected, track_active=%s",
+                len(detections), self._track_active
+            )
+            for i, det in enumerate(detections):
+                PTZ_LOGGER.debug(
+                    "  [DET %d] species=%s conf=%.1f%% bbox=[%.0f,%.0f,%.0f,%.0f] track_id=%s",
+                    i, det.species, det.confidence * 100, 
+                    det.bbox[0], det.bbox[1], det.bbox[2], det.bbox[3],
+                    getattr(det, 'track_id', 'N/A')
+                )
+            
             if self._mode != PTZMode.TRACKING:
+                PTZ_LOGGER.info(
+                    "[MODE_CHANGE] %s -> TRACKING (detected %s at %.1f%%)",
+                    self._mode.value, detections[0].species, detections[0].confidence * 100
+                )
+                self._log_decision('mode_change', {
+                    'from': self._mode.value,
+                    'to': 'tracking',
+                    'trigger': f"{detections[0].species} ({detections[0].confidence*100:.1f}%)",
+                    'detection_count': len(detections),
+                })
                 self._mode = PTZMode.TRACKING
                 LOGGER.info("PTZ switching to TRACKING mode - object detected")
             
             return self._do_tracking(detections, frame_width, frame_height)
         else:
             # No detections or tracking disabled
+            PTZ_LOGGER.debug(
+                "[NO_DETECTION] detections=%d, track_active=%s, mode=%s",
+                len(detections) if detections else 0, self._track_active, self._mode.value
+            )
+            
             if self._mode == PTZMode.TRACKING:
                 # Was tracking, check if we should return to patrol
                 time_since_detection = now - self._last_detection_time
                 
+                PTZ_LOGGER.debug(
+                    "[TRACKING_LOST] Time since last detection: %.2fs (return_delay=%.2fs)",
+                    time_since_detection, self.patrol_return_delay
+                )
+                
                 if time_since_detection > self.patrol_return_delay or not self._track_active:
                     # Object lost for long enough (or tracking disabled), return to patrol
                     if self._patrol_active:
+                        PTZ_LOGGER.info(
+                            "[MODE_CHANGE] TRACKING -> PATROL (object lost for %.1fs)",
+                            time_since_detection
+                        )
+                        self._log_decision('mode_change', {
+                            'from': 'tracking',
+                            'to': 'patrol',
+                            'reason': 'object_lost',
+                            'time_since_detection': round(time_since_detection, 2),
+                        })
                         self._mode = PTZMode.PATROL
                         if self._track_active:
                             LOGGER.info("PTZ returning to PATROL mode - object lost for %.1fs", 
@@ -382,6 +476,12 @@ class PTZTracker:
                             LOGGER.info("PTZ returning to PATROL mode - tracking disabled")
                     else:
                         # Patrol disabled, stop and wait
+                        PTZ_LOGGER.info("[MODE_CHANGE] TRACKING -> IDLE (patrol disabled)")
+                        self._log_decision('mode_change', {
+                            'from': 'tracking',
+                            'to': 'idle',
+                            'reason': 'patrol_disabled',
+                        })
                         self._mode = PTZMode.IDLE
                         try:
                             self.onvif_client.ptz_stop(self.profile_token)
@@ -389,6 +489,10 @@ class PTZTracker:
                             pass
                 else:
                     # Still within delay, stop and wait for object to reappear
+                    PTZ_LOGGER.debug(
+                        "[WAITING] Holding position, %.2fs until patrol return",
+                        self.patrol_return_delay - time_since_detection
+                    )
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)
                     except Exception:
@@ -415,6 +519,12 @@ class PTZTracker:
         best = max(detections, key=lambda d: d.confidence)
         bbox = best.bbox
         
+        PTZ_LOGGER.debug(
+            "[TARGET_SELECT] Selected %s (%.1f%%) from %d candidates, track_id=%s",
+            best.species, best.confidence * 100, len(detections),
+            getattr(best, 'track_id', 'N/A')
+        )
+        
         # Calculate bbox center
         center_x = (bbox[0] + bbox[2]) / 2
         center_y = (bbox[1] + bbox[3]) / 2
@@ -422,6 +532,11 @@ class PTZTracker:
         # Convert to PTZ coordinates
         target_pan, target_tilt = self.calibration.pixel_to_ptz(center_x, center_y)
         target_zoom = self.calibration.bbox_to_zoom(bbox, self.target_fill_pct)
+        
+        PTZ_LOGGER.debug(
+            "[COORD_CALC] Pixel center=(%.0f, %.0f) -> PTZ target: pan=%.3f, tilt=%.3f, zoom=%.3f",
+            center_x, center_y, target_pan, target_tilt, target_zoom
+        )
         
         # Apply smoothing
         self._target_pan = self._target_pan * self.smoothing + target_pan * (1 - self.smoothing)
@@ -442,11 +557,26 @@ class PTZTracker:
         # Only move if offset is significant
         if offset_magnitude < self.min_move_threshold:
             # Object is centered enough, stop movement
+            PTZ_LOGGER.debug(
+                "[DEADZONE] Target in center zone, offset=%.3f < threshold=%.3f, no move needed",
+                offset_magnitude, self.min_move_threshold
+            )
+            self._log_decision('deadzone', {
+                'species': best.species,
+                'track_id': getattr(best, 'track_id', None),
+                'offset_magnitude': round(offset_magnitude, 4),
+                'threshold': self.min_move_threshold,
+            })
             try:
                 self.onvif_client.ptz_stop(self.profile_token)
             except Exception:
                 pass
             return False
+        
+        PTZ_LOGGER.debug(
+            "[OFFSET] Target offset: x=%.3f (%.1f%% from center), y=%.3f, magnitude=%.3f",
+            offset_x, abs(offset_x) * 100, offset_y, offset_magnitude
+        )
         
         # Non-linear velocity curve:
         # - Small offset (< 0.1): slow tracking to maintain center
@@ -492,7 +622,36 @@ class PTZTracker:
             pan_velocity, tilt_velocity, zoom_velocity, current_fill * 100
         )
         
+        PTZ_LOGGER.info(
+            "[MOVE] %s (track=%s): vel=(pan=%.2f, tilt=%.2f, zoom=%.2f) | "
+            "offset=(%.1f%%, %.1f%%) | fill=%.0f%% (target=%.0f%%)",
+            best.species, getattr(best, 'track_id', 'N/A'),
+            pan_velocity, tilt_velocity, zoom_velocity,
+            offset_x * 100, offset_y * 100, 
+            current_fill * 100, self.target_fill_pct * 100
+        )
+        
         try:
+            PTZ_LOGGER.debug(
+                "[ONVIF_CMD] ContinuousMove: profile=%s, pan=%.3f, tilt=%.3f, zoom=%.3f",
+                self.profile_token, pan_velocity, tilt_velocity, zoom_velocity
+            )
+            self._log_decision('move', {
+                'species': best.species,
+                'track_id': getattr(best, 'track_id', None),
+                'confidence': round(best.confidence, 3),
+                'velocity': {
+                    'pan': round(pan_velocity, 3),
+                    'tilt': round(tilt_velocity, 3),
+                    'zoom': round(zoom_velocity, 3),
+                },
+                'offset': {
+                    'x': round(offset_x, 3),
+                    'y': round(offset_y, 3),
+                    'magnitude': round(offset_magnitude, 3),
+                },
+                'fill_pct': round(current_fill * 100, 1),
+            })
             self.onvif_client.ptz_move(
                 self.profile_token,
                 pan_velocity,
@@ -501,6 +660,11 @@ class PTZTracker:
             )
             return True
         except Exception as e:
+            PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
+            self._log_decision('error', {
+                'command': 'ContinuousMove',
+                'error': str(e),
+            })
             LOGGER.error("PTZ tracking error: %s", e)
             return False
     

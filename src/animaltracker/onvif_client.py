@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -11,6 +12,7 @@ except ImportError:  # pragma: no cover
     ONVIFCamera = None  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
+PTZ_LOGGER = logging.getLogger('ptz.decisions')
 
 
 @dataclass
@@ -61,6 +63,7 @@ class OnvifClient:
     def ptz_move(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        start_time = time.time()
         ptz_service = self._camera.create_ptz_service()
         request = ptz_service.create_type("ContinuousMove")
         request.ProfileToken = profile_token
@@ -69,10 +72,16 @@ class OnvifClient:
             "Zoom": {"x": zoom},
         }
         ptz_service.ContinuousMove(request)
+        elapsed = (time.time() - start_time) * 1000
+        PTZ_LOGGER.debug(
+            "[ONVIF] ContinuousMove sent: pan=%.3f, tilt=%.3f, zoom=%.3f (%.1fms)",
+            pan, tilt, zoom, elapsed
+        )
 
     def ptz_move_absolute(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+        start_time = time.time()
         ptz_service = self._camera.create_ptz_service()
         
         # Get status to find range (optional, but good for debugging)
@@ -85,6 +94,11 @@ class OnvifClient:
             "Zoom": {"x": zoom},
         }
         ptz_service.AbsoluteMove(request)
+        elapsed = (time.time() - start_time) * 1000
+        PTZ_LOGGER.debug(
+            "[ONVIF] AbsoluteMove sent: pan=%.3f, tilt=%.3f, zoom=%.3f (%.1fms)",
+            pan, tilt, zoom, elapsed
+        )
 
     def ptz_move_relative(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
         """Move PTZ by a relative amount from current position.

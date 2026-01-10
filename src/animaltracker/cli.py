@@ -39,6 +39,13 @@ def _load_secrets(config_path: str) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     _load_secrets(args.config)
+    
+    # Enable PTZ decision logging if requested
+    if getattr(args, 'ptz_debug', False):
+        ptz_logger = logging.getLogger('ptz.decisions')
+        ptz_logger.setLevel(logging.DEBUG)
+        LOGGER.info("PTZ decision logging enabled (ptz.decisions)")
+    
     runtime = load_runtime_config(args.config)
     orchestrator = PipelineOrchestrator(
         runtime=runtime,
@@ -276,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--camera",
         action="append",
         help="Camera id to run (repeatable); default=all",
+    )
+    run_cmd.add_argument(
+        "--ptz-debug",
+        action="store_true",
+        help="Enable detailed PTZ decision logging (ptz.decisions logger)",
     )
     run_cmd.set_defaults(func=cmd_run)
 

@@ -365,15 +365,22 @@ class PTZTracker:
         # Preset-based patrol
         if self._preset_tokens:
             time_at_preset = now - self._preset_arrival_time
-            PTZ_LOGGER.debug(
-                "[PATROL] Preset mode: at preset %d/%d, time=%.1fs (dwell=%.1fs)",
-                self._current_preset_index + 1, len(self._preset_tokens),
-                time_at_preset, self.patrol_dwell_time
-            )
+            # Log every 5 seconds to avoid spam
+            if int(time_at_preset) % 5 == 0 and int(time_at_preset) > 0:
+                LOGGER.debug(
+                    "Patrol: at preset %d/%d for %.0fs (dwell=%.0fs)",
+                    self._current_preset_index + 1, len(self._preset_tokens),
+                    time_at_preset, self.patrol_dwell_time
+                )
             # Check if dwell time has elapsed
             if time_at_preset > self.patrol_dwell_time:
                 # Move to next preset
+                old_index = self._current_preset_index
                 self._current_preset_index = (self._current_preset_index + 1) % len(self._preset_tokens)
+                LOGGER.info(
+                    "Patrol advancing: preset %d -> %d (was at preset for %.1fs)",
+                    old_index + 1, self._current_preset_index + 1, time_at_preset
+                )
                 self._goto_current_preset()
             return
         
@@ -548,6 +555,7 @@ class PTZTracker:
                     self._patrol_reverse_time = time.time()
             
             if self._mode == PTZMode.PATROL:
+                LOGGER.debug("PTZ update: calling _do_patrol(), presets=%d", len(self._preset_tokens) if self._preset_tokens else 0)
                 self._do_patrol()
                 return True
             

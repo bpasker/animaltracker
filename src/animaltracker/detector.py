@@ -68,7 +68,17 @@ class YoloDetector(BaseDetector):
     def backend_name(self) -> str:
         return "yolo"
 
-    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5) -> List[Detection]:
+    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5, generic_confidence: float = None) -> List[Detection]:
+        """Run YOLO inference on a frame.
+        
+        Args:
+            frame: Input image as numpy array
+            conf_threshold: Minimum confidence threshold
+            generic_confidence: Ignored for YOLO (only used by SpeciesNet)
+            
+        Returns:
+            List of Detection objects
+        """
         results = self.model.predict(source=frame, conf=conf_threshold, verbose=False)
         detections: List[Detection] = []
         

@@ -42,17 +42,17 @@ class DetectorSettings(BaseModel):
     """Configuration for the detection backend.
     
     Supports split-model architecture for optimal performance:
-    - realtime_backend: Fast detector for live PTZ tracking (default: YOLO)
+    - realtime_backend: Fast detector for live PTZ tracking (default: megadetector)
     - postprocess_backend: Accurate detector for clip analysis (default: SpeciesNet)
     
     The legacy 'backend' field is still supported for backwards compatibility.
     """
     # Legacy single-backend setting (deprecated, use realtime/postprocess instead)
-    backend: str = Field(default="yolo", pattern="^(yolo|speciesnet)$")
+    backend: str = Field(default="megadetector", pattern="^(yolo|speciesnet|megadetector)$")
     
     # Split-model architecture (recommended)
-    realtime_backend: str = Field(default="yolo", pattern="^(yolo|speciesnet)$", description="Fast detector for live streaming/PTZ tracking")
-    postprocess_backend: str = Field(default="speciesnet", pattern="^(yolo|speciesnet)$", description="Accurate detector for post-clip analysis")
+    realtime_backend: str = Field(default="megadetector", pattern="^(yolo|speciesnet|megadetector)$", description="Fast detector for live streaming/PTZ tracking (megadetector recommended)")
+    postprocess_backend: str = Field(default="speciesnet", pattern="^(yolo|speciesnet|megadetector)$", description="Accurate detector for post-clip analysis")
     
     # YOLO settings
     model_path: str = "yolov8n.pt"

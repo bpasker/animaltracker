@@ -15,6 +15,7 @@ LOGGER = logging.getLogger(__name__)
 class DetectorBackend(str, Enum):
     YOLO = "yolo"
     SPECIESNET = "speciesnet"
+    MEGADETECTOR = "megadetector"  # SpeciesNet detect-only mode (fast)
 
 
 @dataclass
@@ -95,6 +96,147 @@ class YoloDetector(BaseDetector):
                     species=species, 
                     confidence=conf, 
                     bbox=bbox
+                ))
+        
+        return detections
+
+
+# ============================================================================
+# MegaDetector Backend (SpeciesNet detect-only mode)
+# ============================================================================
+
+class MegaDetectorBackend(BaseDetector):
+    """MegaDetector via SpeciesNet's detect-only mode.
+    
+    Uses SpeciesNet's detection component (MegaDetector v5) without the
+    slower species classification step. Ideal for real-time PTZ tracking
+    where you need fast bounding boxes but don't need species labels.
+    
+    MegaDetector categories:
+        1 = animal
+        2 = person  
+        3 = vehicle
+    
+    Performance: ~100-150ms per frame (vs ~300-500ms for full SpeciesNet)
+    """
+    
+    # MegaDetector category mapping
+    CATEGORY_MAP = {
+        1: "animal",
+        2: "person",
+        3: "vehicle",
+    }
+    
+    def __init__(
+        self,
+        model_version: str = "v4.0.2a",
+        cache_dir: Optional[str] = None,
+    ) -> None:
+        """Initialize MegaDetector backend.
+        
+        Args:
+            model_version: Model version (v4.0.2a or v4.0.2b)
+            cache_dir: Directory for model weights cache
+        """
+        try:
+            from speciesnet import SpeciesNet  # type: ignore
+        except ImportError:
+            raise RuntimeError(
+                "SpeciesNet not installed - run: pip install speciesnet"
+            )
+        
+        self.model_version = model_version
+        
+        # Initialize SpeciesNet model
+        LOGGER.info(f"Loading MegaDetector (SpeciesNet {model_version} detect-only)...")
+        model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
+        self._model = SpeciesNet(model_name)
+        LOGGER.info("MegaDetector loaded (detect-only mode for fast real-time tracking)")
+    
+    @property
+    def backend_name(self) -> str:
+        return "megadetector"
+
+    def infer(
+        self, 
+        frame: np.ndarray, 
+        conf_threshold: float = 0.5, 
+        generic_confidence: float = None,  # Ignored for MegaDetector
+    ) -> List[Detection]:
+        """Run MegaDetector inference on a frame.
+        
+        Args:
+            frame: Input image as numpy array
+            conf_threshold: Minimum confidence threshold
+            generic_confidence: Ignored (MegaDetector only outputs "animal")
+        
+        Returns:
+            List of Detection objects with species="animal" and bounding boxes
+        """
+        import tempfile
+        import cv2
+        import os
+        
+        # SpeciesNet expects file paths, write to temp file
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+            cv2.imwrite(tmp_path, frame)
+        
+        try:
+            # Run detect-only (skips slow classification)
+            result = self._model.detect(
+                filepaths=[tmp_path],
+                run_mode='multi_thread',
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+        
+        detections: List[Detection] = []
+        
+        if result is None:
+            return detections
+        
+        predictions_list = result.get("predictions", [])
+        
+        for pred in predictions_list:
+            if not isinstance(pred, dict):
+                continue
+            
+            raw_detections = pred.get("detections", [])
+            h, w = frame.shape[:2]
+            
+            for det in raw_detections:
+                conf = det.get("conf", 0.0)
+                if conf < conf_threshold:
+                    continue
+                
+                category = det.get("category", 1)
+                species = self.CATEGORY_MAP.get(category, "animal")
+                
+                # Skip non-animal detections for wildlife tracking
+                if species != "animal":
+                    continue
+                
+                # Convert bbox from normalized [x, y, w, h] to pixel [x1, y1, x2, y2]
+                bbox_norm = det.get("bbox", [0, 0, 1, 1])
+                if len(bbox_norm) == 4:
+                    bx, by, bw, bh = bbox_norm
+                    bbox = [
+                        bx * w,
+                        by * h,
+                        (bx + bw) * w,
+                        (by + bh) * h
+                    ]
+                else:
+                    bbox = [0, 0, w, h]
+                
+                detections.append(Detection(
+                    species=species,
+                    confidence=conf,
+                    bbox=bbox,
                 ))
         
         return detections
@@ -592,12 +734,15 @@ def create_detector(
     """Factory function to create a detector instance.
     
     Args:
-        backend: Which detection backend to use ("yolo" or "speciesnet")
+        backend: Which detection backend to use ("yolo", "speciesnet", or "megadetector")
         **kwargs: Backend-specific configuration
         
     YOLO kwargs:
         - model_path: Path to YOLO weights (default: "yolov8n.pt")
         - class_map: Optional class ID to name mapping
+        
+    MegaDetector kwargs:
+        - model_version: "v4.0.2a" (crop) or "v4.0.2b" (full-image)
         
     SpeciesNet kwargs:
         - model_version: "v4.0.2a" (crop) or "v4.0.2b" (full-image)
@@ -618,6 +763,12 @@ def create_detector(
         return YoloDetector(
             model_path=kwargs.get("model_path", "yolov8n.pt"),
             class_map=kwargs.get("class_map"),
+        )
+    
+    elif backend == DetectorBackend.MEGADETECTOR:
+        return MegaDetectorBackend(
+            model_version=kwargs.get("model_version", "v4.0.2a"),
+            cache_dir=kwargs.get("cache_dir"),
         )
     
     elif backend == DetectorBackend.SPECIESNET:
@@ -697,6 +848,7 @@ __all__ = [
     "DetectorBackend", 
     "BaseDetector",
     "YoloDetector",
+    "MegaDetectorBackend",
     "SpeciesNetDetector",
     "create_detector",
     "create_realtime_detector",

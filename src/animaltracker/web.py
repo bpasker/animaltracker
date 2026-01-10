@@ -8983,6 +8983,11 @@ class WebServer:
                 tracker._current_preset_index = 0
                 if preset_tokens:
                     LOGGER.info(f"Restored patrol presets for {cam_id}: {preset_tokens}")
+                    # Initialize patrol if it's already active - move to first preset
+                    from .ptz_tracker import PTZMode
+                    if tracker._mode == PTZMode.PATROL or tracker._patrol_active:
+                        tracker._goto_current_preset()
+                        LOGGER.info(f"Started patrol for {cam_id} - moving to first preset")
             
             # Restore patrol return delay
             if 'patrol_return_delay' in cam_state:

@@ -142,7 +142,12 @@ class PTZMode(Enum):
 
 @dataclass
 class PTZTracker:
-    """Auto-tracking controller that moves PTZ to follow detections."""
+    """Auto-tracking controller that moves PTZ to follow detections.
+    
+    Optimized for split-model architecture where YOLO provides fast detections
+    for real-time tracking (~50-150ms inference). Default values are tuned for
+    responsive tracking with minimal latency.
+    """
     
     onvif_client: 'OnvifClient'
     profile_token: str
@@ -151,15 +156,16 @@ class PTZTracker:
     # Tracking behavior
     target_fill_pct: float = 0.6  # Target 60% frame fill
     min_move_threshold: float = 0.05  # Don't move if offset < 5% of range
-    smoothing: float = 0.3  # Movement smoothing (0=instant, 1=no movement)
-    update_interval: float = 0.2  # Seconds between PTZ updates
+    # Optimized defaults for real-time tracking with YOLO
+    smoothing: float = 0.15  # Lower = faster response (was 0.3)
+    update_interval: float = 0.1  # 10 updates/sec for responsive tracking (was 0.2)
     
     # Patrol settings
     patrol_enabled: bool = True  # Enable patrol when no detections
     patrol_speed: float = 0.15  # Patrol pan speed (slow sweep)
     patrol_tilt: float = 0.0    # Tilt position during patrol
     patrol_zoom: float = 0.0    # Zoom level during patrol (wide)
-    patrol_return_delay: float = 3.0  # Seconds after losing object before returning to patrol
+    patrol_return_delay: float = 2.0  # Faster return to patrol (was 3.0)
     
     # Preset-based patrol
     patrol_presets: list = field(default_factory=list)  # List of preset tokens
@@ -725,6 +731,9 @@ def create_ptz_tracker(
 ) -> PTZTracker:
     """Create a PTZ tracker with optional configuration.
     
+    Default values are optimized for split-model architecture where YOLO
+    provides fast detections (~50-150ms) for responsive real-time tracking.
+    
     Args:
         onvif_client: ONVIF client for PTZ control
         profile_token: ONVIF profile token
@@ -732,10 +741,11 @@ def create_ptz_tracker(
             - pan_scale: PTZ pan range as fraction of wide-angle FOV
             - tilt_scale: PTZ tilt range as fraction of wide-angle FOV
             - target_fill_pct: Target object fill percentage (default 0.6)
-            - smoothing: Movement smoothing factor (default 0.3)
+            - smoothing: Movement smoothing factor (default 0.15 for fast response)
+            - update_interval: Seconds between PTZ updates (default 0.1 = 10/sec)
             - patrol_enabled: Enable patrol mode when no detections (default True)
             - patrol_speed: Patrol sweep speed (default 0.15)
-            - patrol_return_delay: Seconds to wait before returning to patrol (default 3.0)
+            - patrol_return_delay: Seconds to wait before returning to patrol (default 2.0)
             - patrol_presets: List of preset tokens/names for patrol (default [])
             - patrol_dwell_time: Seconds to stay at each preset (default 10.0)
             
@@ -756,11 +766,11 @@ def create_ptz_tracker(
         profile_token=profile_token,
         calibration=calibration,
         target_fill_pct=config.get('target_fill_pct', 0.6),
-        smoothing=config.get('smoothing', 0.3),
-        update_interval=config.get('update_interval', 0.2),
+        smoothing=config.get('smoothing', 0.15),  # Fast response (was 0.3)
+        update_interval=config.get('update_interval', 0.1),  # 10 updates/sec (was 0.2)
         patrol_enabled=config.get('patrol_enabled', True),
         patrol_speed=config.get('patrol_speed', 0.15),
-        patrol_return_delay=config.get('patrol_return_delay', 3.0),
+        patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
     )

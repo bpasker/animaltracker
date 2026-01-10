@@ -16,11 +16,18 @@ general:
     tracking_enabled: true       # Uses ByteTrack to assign persistent IDs
   # Detector backend configuration
   detector:
-    # Options: "yolo" (fast, general objects) or "speciesnet" (2000+ wildlife species)
+    # SPLIT-MODEL ARCHITECTURE (recommended for PTZ tracking):
+    # - realtime_backend: Fast detector for live streaming/PTZ tracking
+    # - postprocess_backend: Accurate detector for clip analysis
+    realtime_backend: yolo        # YOLO: ~50-150ms inference (fast for tracking)
+    postprocess_backend: speciesnet  # SpeciesNet: ~200-500ms (accurate species ID)
+    
+    # Legacy single-backend setting (overridden by split-model settings above)
     backend: yolo
-    # YOLO settings (used when backend: yolo)
+    
+    # YOLO settings (used when backend/realtime_backend: yolo)
     model_path: yolov8n.pt
-    # SpeciesNet settings (used when backend: speciesnet)
+    # SpeciesNet settings (used when backend/postprocess_backend: speciesnet)
     speciesnet_version: v4.0.2a  # v4.0.2a (crop) or v4.0.2b (full-image)
     # Location priors for better species accuracy (filters out impossible species)
     country: USA                  # ISO 3166-1 alpha-3 code (e.g., USA, CAN, GBR)
@@ -69,6 +76,18 @@ cameras:
     thresholds:
       confidence: 0.5
       min_frames: 3
+    # PTZ auto-tracking: follow detected animals with PTZ camera
+    # Optimized defaults for split-model architecture (YOLO realtime)
+    ptz_tracking:
+      enabled: false              # Enable PTZ auto-tracking
+      self_track: false           # Camera centers on its own detections
+      target_fill_pct: 0.6        # Target 60% frame fill
+      # Optimized for YOLO's ~50-150ms inference
+      update_interval: 0.1        # 10 PTZ updates/sec (fast response)
+      smoothing: 0.15             # Low smoothing for quick movement
+      patrol_return_delay: 2.0    # Quick return to patrol when animal lost
+      patrol_enabled: true        # Sweep when no detections
+      patrol_speed: 0.08          # Slow patrol for detection
     include_species:
       - deer
       - bear

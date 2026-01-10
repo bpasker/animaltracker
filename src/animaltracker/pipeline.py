@@ -15,7 +15,7 @@ import numpy as np
 from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
-from .detector import Detection, BaseDetector, create_detector
+from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector
 from .ebird import EBirdClient, create_ebird_client
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
@@ -605,7 +605,9 @@ class StreamWorker:
         use_unified_processor = getattr(self.runtime.general.clip, 'unified_post_processing', False)
         
         # Capture detector reference for unified processor
+        # For split-model architecture, post-processor will create its own SpeciesNet detector
         detector = self.detector
+        detector_cfg = self.runtime.general.detector  # Pass config so post-processor can create SpeciesNet
         storage_root = self.storage.storage_root
         
         # Capture web_base_url for notification links
@@ -636,8 +638,13 @@ class StreamWorker:
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
         
-        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions):
-            """Finalize event with optional post-clip species analysis."""
+        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions, detector_config):
+            """Finalize event with optional post-clip species analysis.
+            
+            Split-model architecture:
+            - Real-time: YOLO was used for fast detection/PTZ tracking
+            - Post-processing: SpeciesNet is used for accurate species identification
+            """
             final_species = ctx_base['species']
             final_confidence = ctx_base['confidence']
             tracks_count = 1  # Default assumption
@@ -668,9 +675,17 @@ class StreamWorker:
                 self.storage.save_detection_thumbnails(clip_path, species_key_frames)
             
             # Step 5: Run UNIFIED post-processor if enabled (NEW approach - analyze saved file)
+            # Uses SpeciesNet for accurate species identification (split-model architecture)
             if use_unified_processor:
                 try:
                     from .postprocess import ClipPostProcessor, ProcessingSettings
+                    from .detector import create_postprocess_detector
+                    
+                    # Create SpeciesNet detector for post-processing (split-model architecture)
+                    # This gives accurate species ID while YOLO handles real-time tracking
+                    postprocess_detector = create_postprocess_detector(detector_config)
+                    LOGGER.debug("Post-processing with %s detector", postprocess_detector.backend_name)
+                    
                     # Use settings from config
                     clip_cfg = self.runtime.general.clip
                     settings = ProcessingSettings(
@@ -689,7 +704,7 @@ class StreamWorker:
                         thumbnail_cropped=getattr(clip_cfg, 'thumbnail_cropped', True),
                     )
                     processor = ClipPostProcessor(
-                        detector=detector,
+                        detector=postprocess_detector,
                         storage_root=storage_root,
                         settings=settings,
                     )
@@ -705,7 +720,8 @@ class StreamWorker:
                         # Update clip_path if file was renamed
                         if result.new_path:
                             clip_path = result.new_path
-                        LOGGER.info("Unified post-processing complete: %s (%.1f%%, %d tracks)", 
+                        LOGGER.info("Post-processing complete (%s): %s (%.1f%%, %d tracks)", 
+                                   postprocess_detector.backend_name,
                                    final_species, final_confidence * 100, tracks_count)
                 except Exception as e:
                     LOGGER.error("Unified post-processing failed: %s", e)
@@ -820,6 +836,7 @@ class StreamWorker:
             self.camera.notification.sound,
             species_key_frames,
             ptz_log,
+            detector_cfg,  # Pass detector config for split-model post-processing
         )
         
         self.event_state = None
@@ -1083,19 +1100,31 @@ class PipelineOrchestrator:
         self.runtime = runtime
         self.config_path = config_path
         
-        # Create detector from config settings
+        # Split-model architecture:
+        # - realtime_detector: YOLO for fast streaming/PTZ tracking (~50-150ms)
+        # - postprocess_detector: SpeciesNet for accurate clip analysis (~200-500ms)
         detector_cfg = runtime.general.detector
-        self.detector = create_detector(
-            backend=detector_cfg.backend,
-            model_path=model_path or detector_cfg.model_path,
-            model_version=detector_cfg.speciesnet_version,
-            country=detector_cfg.country,
-            admin1_region=detector_cfg.admin1_region,
-            latitude=detector_cfg.latitude,
-            longitude=detector_cfg.longitude,
-            generic_confidence=detector_cfg.generic_confidence,
-        )
-        LOGGER.info(f"Using {self.detector.backend_name} detector backend")
+        
+        # Override model path if provided
+        if model_path:
+            detector_cfg.model_path = model_path
+        
+        # Create realtime detector (YOLO by default for speed)
+        self.detector = create_realtime_detector(detector_cfg)
+        LOGGER.info(f"Realtime detector: {self.detector.backend_name} (for streaming/PTZ)")
+        
+        # Store detector config for post-processor to create its own SpeciesNet instance
+        # This avoids loading SpeciesNet at startup if not needed immediately
+        self.detector_cfg = detector_cfg
+        
+        # Log the split-model configuration
+        realtime_backend = getattr(detector_cfg, 'realtime_backend', detector_cfg.backend)
+        postprocess_backend = getattr(detector_cfg, 'postprocess_backend', detector_cfg.backend)
+        if realtime_backend != postprocess_backend:
+            LOGGER.info(
+                "Split-model architecture: %s (realtime) + %s (post-processing)",
+                realtime_backend, postprocess_backend
+            )
         
         # Create eBird client if configured
         ebird_cfg = runtime.general.ebird

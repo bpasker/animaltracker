@@ -39,8 +39,21 @@ class ClipSettings(BaseModel):
 
 
 class DetectorSettings(BaseModel):
-    """Configuration for the detection backend."""
+    """Configuration for the detection backend.
+    
+    Supports split-model architecture for optimal performance:
+    - realtime_backend: Fast detector for live PTZ tracking (default: YOLO)
+    - postprocess_backend: Accurate detector for clip analysis (default: SpeciesNet)
+    
+    The legacy 'backend' field is still supported for backwards compatibility.
+    """
+    # Legacy single-backend setting (deprecated, use realtime/postprocess instead)
     backend: str = Field(default="yolo", pattern="^(yolo|speciesnet)$")
+    
+    # Split-model architecture (recommended)
+    realtime_backend: str = Field(default="yolo", pattern="^(yolo|speciesnet)$", description="Fast detector for live streaming/PTZ tracking")
+    postprocess_backend: str = Field(default="speciesnet", pattern="^(yolo|speciesnet)$", description="Accurate detector for post-clip analysis")
+    
     # YOLO settings
     model_path: str = "yolov8n.pt"
     # SpeciesNet settings
@@ -108,22 +121,29 @@ class ThresholdSettings(BaseModel):
 
 
 class PTZTrackingSettings(BaseModel):
-    """Settings for PTZ auto-tracking (follow detected objects with zoom camera)."""
+    """Settings for PTZ auto-tracking (follow detected objects with zoom camera).
+    
+    Optimized defaults for real-time tracking with split-model architecture:
+    - update_interval: 0.1s (10 updates/sec) for responsive tracking
+    - smoothing: 0.15 for faster response with minimal jitter
+    - patrol_return_delay: 2.0s for quicker return to patrol
+    """
     enabled: bool = Field(default=False, description="Enable PTZ auto-tracking")
     target_camera_id: Optional[str] = Field(default=None, description="Camera ID to send PTZ commands to (for linked cameras)")
     self_track: bool = Field(default=False, description="Enable self-tracking (camera centers on its own detections)")
     target_fill_pct: float = Field(default=0.6, ge=0.1, le=0.95, description="Target object fill percentage (0.6 = 60%)")
     pan_scale: float = Field(default=0.8, ge=0.1, le=2.0, description="PTZ pan range as fraction of wide-angle FOV")
     tilt_scale: float = Field(default=0.6, ge=0.1, le=2.0, description="PTZ tilt range as fraction of wide-angle FOV")
-    smoothing: float = Field(default=0.3, ge=0.0, le=0.9, description="Movement smoothing (0=instant, 0.9=very smooth)")
-    update_interval: float = Field(default=0.2, ge=0.1, le=2.0, description="Seconds between PTZ updates")
+    # Optimized for real-time tracking with YOLO backend (~50-150ms inference)
+    smoothing: float = Field(default=0.15, ge=0.0, le=0.9, description="Movement smoothing (0=instant, 0.9=very smooth). Lower = faster response")
+    update_interval: float = Field(default=0.1, ge=0.05, le=2.0, description="Seconds between PTZ updates (0.1 = 10 updates/sec)")
     # Calibration offsets (where PTZ 0,0 appears on wide-angle, as fraction)
     pan_center_x: float = Field(default=0.5, ge=0.0, le=1.0, description="X position where PTZ center appears on wide-angle")
     tilt_center_y: float = Field(default=0.5, ge=0.0, le=1.0, description="Y position where PTZ center appears on wide-angle")
     # Patrol mode settings (scan for objects)
     patrol_enabled: bool = Field(default=True, description="Enable patrol sweep when no objects detected")
     patrol_speed: float = Field(default=0.08, ge=0.02, le=1.0, description="Patrol sweep speed (0.08 = slow for detection)")
-    patrol_return_delay: float = Field(default=3.0, ge=0.5, le=30.0, description="Seconds to wait after losing object before returning to patrol")
+    patrol_return_delay: float = Field(default=2.0, ge=0.5, le=30.0, description="Seconds to wait after losing object before returning to patrol")
     # Track mode settings (follow detected objects)
     track_enabled: bool = Field(default=True, description="Enable tracking of detected objects")
     # Preset-based patrol (instead of continuous sweep)

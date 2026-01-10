@@ -625,6 +625,62 @@ def create_detector(
         raise ValueError(f"Unknown detector backend: {backend}")
 
 
+def create_realtime_detector(detector_cfg) -> BaseDetector:
+    """Create detector optimized for real-time streaming and PTZ tracking.
+    
+    Uses the realtime_backend setting (default: YOLO for speed).
+    Falls back to legacy 'backend' setting if realtime_backend not specified.
+    
+    Args:
+        detector_cfg: DetectorSettings from config
+        
+    Returns:
+        Fast detector for real-time use (~50-150ms inference)
+    """
+    backend = getattr(detector_cfg, 'realtime_backend', None) or detector_cfg.backend
+    
+    LOGGER.info(f"Creating realtime detector: {backend}")
+    
+    return create_detector(
+        backend=backend,
+        model_path=detector_cfg.model_path,
+        model_version=detector_cfg.speciesnet_version,
+        country=detector_cfg.country,
+        admin1_region=detector_cfg.admin1_region,
+        latitude=detector_cfg.latitude,
+        longitude=detector_cfg.longitude,
+        generic_confidence=detector_cfg.generic_confidence,
+    )
+
+
+def create_postprocess_detector(detector_cfg) -> BaseDetector:
+    """Create detector optimized for post-clip species identification.
+    
+    Uses the postprocess_backend setting (default: SpeciesNet for accuracy).
+    Falls back to legacy 'backend' setting if postprocess_backend not specified.
+    
+    Args:
+        detector_cfg: DetectorSettings from config
+        
+    Returns:
+        Accurate detector for post-processing (~200-500ms inference)
+    """
+    backend = getattr(detector_cfg, 'postprocess_backend', None) or detector_cfg.backend
+    
+    LOGGER.info(f"Creating postprocess detector: {backend}")
+    
+    return create_detector(
+        backend=backend,
+        model_path=detector_cfg.model_path,
+        model_version=detector_cfg.speciesnet_version,
+        country=detector_cfg.country,
+        admin1_region=detector_cfg.admin1_region,
+        latitude=detector_cfg.latitude,
+        longitude=detector_cfg.longitude,
+        generic_confidence=detector_cfg.generic_confidence,
+    )
+
+
 # Keep backward compatibility
 __all__ = [
     "Detection",
@@ -633,4 +689,6 @@ __all__ = [
     "YoloDetector",
     "SpeciesNetDetector",
     "create_detector",
+    "create_realtime_detector",
+    "create_postprocess_detector",
 ]

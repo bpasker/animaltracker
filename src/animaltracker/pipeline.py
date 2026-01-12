@@ -733,9 +733,36 @@ class StreamWorker:
                         # Update clip_path if file was renamed
                         if result.new_path:
                             clip_path = result.new_path
-                        LOGGER.info("Post-processing complete (%s): %s (%.1f%%, %d tracks)", 
+                        LOGGER.info("Post-processing complete (%s): %s (%.1f%%, %d tracks, %d raw detections)", 
                                    postprocess_detector.backend_name,
-                                   final_species, final_confidence * 100, tracks_count)
+                                   final_species, final_confidence * 100, tracks_count, result.raw_detections)
+                        
+                        # Check if post-processing found NO animal (false positive from real-time detector)
+                        # If delete_if_no_animal is enabled, clean up and skip notification
+                        delete_if_no_animal = getattr(clip_cfg, 'delete_if_no_animal', True)
+                        if delete_if_no_animal and result.raw_detections == 0:
+                            LOGGER.info(
+                                "Post-processing found NO animal in clip for %s - deleting false positive and skipping notification",
+                                camera_id
+                            )
+                            # Delete the clip file and any associated files
+                            try:
+                                if clip_path.exists():
+                                    clip_path.unlink()
+                                    LOGGER.debug("Deleted false positive clip: %s", clip_path)
+                                # Delete associated thumbnails
+                                thumb_pattern = clip_path.stem + "_thumb*.jpg"
+                                for thumb_file in clip_path.parent.glob(thumb_pattern):
+                                    thumb_file.unlink()
+                                    LOGGER.debug("Deleted thumbnail: %s", thumb_file)
+                                # Delete processing log
+                                log_file = clip_path.with_suffix('.log.json')
+                                if log_file.exists():
+                                    log_file.unlink()
+                                    LOGGER.debug("Deleted log file: %s", log_file)
+                            except Exception as e:
+                                LOGGER.warning("Failed to clean up false positive clip files: %s", e)
+                            return  # Skip notification - no animal detected
                 except Exception as e:
                     LOGGER.error("Unified post-processing failed: %s", e)
             

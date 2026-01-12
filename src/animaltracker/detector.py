@@ -320,6 +320,7 @@ class SpeciesNetDetector(BaseDetector):
         latitude: Optional[float] = None,
         longitude: Optional[float] = None,
         generic_confidence: float = 0.9,
+        detection_threshold: float = 0.1,  # MegaDetector threshold inside SpeciesNet
         cache_dir: Optional[str] = None,
     ) -> None:
         """Initialize SpeciesNet detector.
@@ -331,6 +332,8 @@ class SpeciesNetDetector(BaseDetector):
             latitude: Camera latitude for species range filtering (-90 to 90)
             longitude: Camera longitude for species range filtering (-180 to 180)
             generic_confidence: Higher threshold for generic categories (animal, bird)
+            detection_threshold: MegaDetector confidence threshold for initial detection
+                                (lower = more sensitive, may catch distant/small animals)
             cache_dir: Directory for model weights cache
         """
         try:
@@ -345,6 +348,7 @@ class SpeciesNetDetector(BaseDetector):
         self.latitude = latitude
         self.longitude = longitude
         self.generic_confidence = generic_confidence
+        self.detection_threshold = detection_threshold
         self.model_version = model_version
         
         # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
@@ -361,7 +365,7 @@ class SpeciesNetDetector(BaseDetector):
             location_info.append(f"coords=({latitude:.4f}, {longitude:.4f})")
         
         loc_str = ", ".join(location_info) if location_info else "no location priors"
-        LOGGER.info(f"SpeciesNet loaded ({loc_str}, generic_conf={generic_confidence})")
+        LOGGER.info(f"SpeciesNet loaded ({loc_str}, generic_conf={generic_confidence}, det_thresh={detection_threshold})")
     
     @property
     def backend_name(self) -> str:
@@ -408,11 +412,13 @@ class SpeciesNetDetector(BaseDetector):
         
         try:
             # Build prediction request with location priors
-            # Note: Python API only supports country/admin1_region, not lat/long directly
+            # Pass detection_threshold to make MegaDetector more sensitive
+            # Default is 0.2, but for distant/small animals we use lower (0.1)
             result = self._model.predict(
                 filepaths=[tmp_path],
                 country=self.country,
                 admin1_region=self.admin1_region,
+                detection_threshold=self.detection_threshold,
             )
         finally:
             # Clean up temp file
@@ -768,6 +774,8 @@ def create_detector(
         - latitude: Camera latitude for species range filtering
         - longitude: Camera longitude for species range filtering
         - generic_confidence: Higher threshold for generic categories (default 0.9)
+        - detection_threshold: MegaDetector confidence for initial detection (default 0.1)
+                              Lower values catch more distant/small animals
         - cache_dir: Model weights cache directory
     
     Returns:
@@ -796,6 +804,7 @@ def create_detector(
             latitude=kwargs.get("latitude"),
             longitude=kwargs.get("longitude"),
             generic_confidence=kwargs.get("generic_confidence", 0.9),
+            detection_threshold=kwargs.get("detection_threshold", 0.1),  # Lower = more sensitive
             cache_dir=kwargs.get("cache_dir"),
         )
     
@@ -847,6 +856,10 @@ def create_postprocess_detector(detector_cfg) -> BaseDetector:
     
     LOGGER.info(f"Creating postprocess detector: {backend}")
     
+    # Use a lower detection threshold for post-processing to catch distant/small animals
+    # that might be missed with default threshold. Real-time uses higher threshold for speed.
+    detection_threshold = getattr(detector_cfg, 'detection_threshold', 0.1)
+    
     return create_detector(
         backend=backend,
         model_path=detector_cfg.model_path,
@@ -856,6 +869,7 @@ def create_postprocess_detector(detector_cfg) -> BaseDetector:
         latitude=detector_cfg.latitude,
         longitude=detector_cfg.longitude,
         generic_confidence=detector_cfg.generic_confidence,
+        detection_threshold=detection_threshold,
     )
 
 

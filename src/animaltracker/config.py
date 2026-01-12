@@ -26,6 +26,8 @@ class ClipSettings(BaseModel):
     # Note: post_analysis_frames is auto-calculated as 1 frame per second of clip duration
     post_analysis_confidence: float = Field(default=0.3, ge=0, le=1, description="Confidence threshold for post-analysis (lower catches more)")
     post_analysis_generic_confidence: float = Field(default=0.5, ge=0, le=1, description="Generic category threshold for post-analysis")
+    # False positive cleanup: delete clips where post-processing finds no animal
+    delete_if_no_animal: bool = Field(default=True, description="Delete clip and skip notification if post-processing finds no animal (reduces false positives)")
     sample_rate: int = Field(default=3, ge=1, le=30, description="Analyze every Nth frame (lower = more thorough)")
     tracking_enabled: bool = Field(default=True, description="Enable object tracking to identify same animal across frames")
     track_merge_gap: int = Field(default=120, ge=10, le=500, description="Max frame gap to merge same-species tracks")
@@ -67,6 +69,8 @@ class DetectorSettings(BaseModel):
     # Generic categories (animal, bird, mammalia) require higher confidence
     # Specific species (cardinal, blue_jay) use the camera's normal threshold
     generic_confidence: Optional[float] = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
+    # MegaDetector detection threshold inside SpeciesNet (lower = more sensitive for small/distant animals)
+    detection_threshold: Optional[float] = Field(default=0.1, ge=0, le=1, description="MegaDetector threshold in SpeciesNet (lower catches more distant animals)")
 
 
 class EBirdSettings(BaseModel):

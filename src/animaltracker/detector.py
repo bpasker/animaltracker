@@ -162,6 +162,7 @@ class MegaDetectorBackend(BaseDetector):
         frame: np.ndarray, 
         conf_threshold: float = 0.5, 
         generic_confidence: float = None,  # Ignored for MegaDetector
+        return_filtered: bool = False,  # For API compatibility with SpeciesNetBackend
     ) -> List[Detection]:
         """Run MegaDetector inference on a frame.
         
@@ -169,9 +170,12 @@ class MegaDetectorBackend(BaseDetector):
             frame: Input image as numpy array
             conf_threshold: Minimum confidence threshold
             generic_confidence: Ignored (MegaDetector only outputs "animal")
+            return_filtered: If True, returns (detections, filtered_list) tuple.
+                            MegaDetector doesn't filter, so filtered_list is always empty.
         
         Returns:
-            List of Detection objects with species="animal" and bounding boxes
+            List of Detection objects with species="animal" and bounding boxes,
+            or tuple (detections, []) if return_filtered=True
         """
         import tempfile
         import cv2
@@ -197,6 +201,8 @@ class MegaDetectorBackend(BaseDetector):
         detections: List[Detection] = []
         
         if result is None:
+            if return_filtered:
+                return detections, []
             return detections
         
         predictions_list = result.get("predictions", [])
@@ -239,6 +245,8 @@ class MegaDetectorBackend(BaseDetector):
                     bbox=bbox,
                 ))
         
+        if return_filtered:
+            return detections, []  # MegaDetector doesn't filter species
         return detections
 
 

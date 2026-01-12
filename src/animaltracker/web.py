@@ -4873,11 +4873,19 @@ class WebServer:
         if not full_path.exists():
             return web.Response(status=404, text="Clip not found")
         
-        # Get detector from first worker (they all share the same one)
-        if not self.workers:
-            return web.Response(status=500, text="No workers available")
-        
-        detector = next(iter(self.workers.values())).detector
+        # Create postprocess detector (SpeciesNet for accurate species ID)
+        # This uses the split-model architecture: MegaDetector for real-time, SpeciesNet for post-processing
+        from .detector import create_postprocess_detector
+        detector_cfg = self.runtime.general.detector if self.runtime else None
+        if detector_cfg:
+            detector = create_postprocess_detector(detector_cfg)
+            LOGGER.info("Reprocess using %s detector (postprocess_backend)", detector.backend_name)
+        else:
+            # Fallback to worker's detector if no config available
+            if not self.workers:
+                return web.Response(status=500, text="No workers available")
+            detector = next(iter(self.workers.values())).detector
+            LOGGER.warning("No detector config, falling back to worker detector: %s", detector.backend_name)
         
         # Prevent duplicate processing - check if already in progress
         job_key = clip_path

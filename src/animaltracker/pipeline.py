@@ -428,6 +428,15 @@ class StreamWorker:
         # PTZ auto-tracking: always call update (handles patrol when no detections)
         if self.ptz_tracker:
             frame_h, frame_w = frame.shape[:2]
+            # Debug: log what we're sending to PTZ tracker
+            if filtered:
+                LOGGER.info(
+                    "PTZ update: %s sending %d detections (track=%s, patrol=%s, mode=%s)",
+                    self.camera.id, len(filtered),
+                    self.ptz_tracker.is_track_enabled(),
+                    self.ptz_tracker.is_patrol_enabled(),
+                    self.ptz_tracker.get_mode()
+                )
             await loop.run_in_executor(
                 None,
                 self.ptz_tracker.update,

@@ -287,10 +287,20 @@ class ClipPostProcessor:
         finally:
             cap.release()
         
-        LOGGER.info(
-            "Analysis: %d raw detections, %d filtered out, %d valid species",
-            raw_detection_count, filtered_count, len(species_results)
-        )
+        # Count how many frames had no animal detected (blank frames)
+        blank_frame_count = sum(1 for entry in processing_log 
+                                if entry.event == "detector_filtered" and entry.reason == "no_animal_detected")
+        
+        if raw_detection_count == 0 and blank_frame_count > 0:
+            LOGGER.info(
+                "Analysis: %d raw detections (SpeciesNet found no animals in %d/%d sampled frames)",
+                raw_detection_count, blank_frame_count, frames_analyzed
+            )
+        else:
+            LOGGER.info(
+                "Analysis: %d raw detections, %d filtered out, %d valid species",
+                raw_detection_count, filtered_count, len(species_results)
+            )
         
         # Determine best species classification
         new_species, confidence = self._select_best_species(species_results)
@@ -365,6 +375,11 @@ class ClipPostProcessor:
         
         log_path = clip_path.with_suffix('.log.json')
         
+        # Calculate summary statistics from processing log
+        blank_frames = sum(1 for e in processing_log if e.event == "detector_filtered" and e.reason == "no_animal_detected")
+        detection_frames = sum(1 for e in processing_log if e.event in ("tracked", "detection"))
+        filtered_frames = sum(1 for e in processing_log if e.event == "detector_filtered" and e.reason != "no_animal_detected")
+        
         try:
             log_data = {
                 "clip": str(clip_path.name),
@@ -372,6 +387,13 @@ class ClipPostProcessor:
                 "settings": self.settings.to_dict(),  # Full settings object
                 "detector_type": type(self.detector).__name__,
                 "video": video_metadata or {},
+                "analysis_summary": {
+                    "frames_analyzed": video_metadata.get("frames_to_analyze", 0) if video_metadata else 0,
+                    "frames_with_detections": detection_frames,
+                    "frames_with_no_animal": blank_frames,
+                    "frames_filtered_other": filtered_frames,
+                    "detection_rate_pct": round(100 * detection_frames / max(1, video_metadata.get("frames_to_analyze", 1)), 1) if video_metadata else 0,
+                },
                 "tracking_summary": tracking_summary,
                 "log_entries": [asdict(entry) for entry in processing_log],
             }

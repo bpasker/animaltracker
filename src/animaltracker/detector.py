@@ -461,8 +461,18 @@ class SpeciesNetDetector(BaseDetector):
                 [(p.get("prediction", "?"), p.get("score", 0)) for p in top_k[:3]] if top_k else "none"
             )
             
-            # Determine if this is a generic or specific classification
+            # Track blank/empty frames for debugging (MegaDetector found no animals)
             species_clean = species.lower().strip(";").split(";")[-1].strip().replace(" ", "_")
+            if species_clean in ("blank", "unknown", "empty", "", "no_cv_result") or "no cv result" in species.lower():
+                # Log at debug level that this frame had no detection
+                if det_count == 0:
+                    LOGGER.debug("SpeciesNet: No animal detected in frame (blank prediction)")
+                if return_filtered:
+                    # Count blank frames as filtered with special reason so caller knows why
+                    filtered_detections.append((Detection(
+                        species="blank", confidence=0.0, bbox=[0, 0, 1, 1], taxonomy=""
+                    ), "no_animal_detected"))
+                continue
             
             # Check if any part of the taxonomy is generic (not just the final label)
             taxonomy_parts = [p.lower().strip() for p in species.split(";") if p.strip()]
@@ -478,9 +488,8 @@ class SpeciesNetDetector(BaseDetector):
                                 species_clean, score, required_conf)
                 continue
             
-            # Skip blanks or non-animal categories
-            skip_terms = ("blank", "unknown", "empty", "vehicle", "", "no_cv_result", "no cv result")
-            if species_clean in skip_terms or "no cv result" in species.lower():
+            # Skip vehicle detections (already handled blank/unknown above)
+            if species_clean == "vehicle":
                 continue
             
             # Extract bounding box from detections if available

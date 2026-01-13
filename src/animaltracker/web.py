@@ -87,6 +87,7 @@ class WebServer:
         self.app.router.add_post('/ptz/{camera_id}/goto_preset', self.handle_ptz_goto_preset)
         self.app.router.add_post('/ptz/{camera_id}/save_preset', self.handle_ptz_save_preset)
         self.app.router.add_post('/ptz/calibrate', self.handle_ptz_calibrate)
+        self.app.router.add_post('/ptz/zoom-fov-calibrate', self.handle_zoom_fov_calibrate)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
@@ -750,6 +751,52 @@ class WebServer:
                         btn.disabled = false;
                         btn.textContent = 'Auto-Calibrate PTZ';
                     }
+
+                    async function runZoomFovCalibration(wideCamId, zoomCamId) {
+                        const btn = document.getElementById('zoom-fov-btn-' + wideCamId);
+                        const status = document.getElementById('zoom-fov-status-' + wideCamId);
+
+                        btn.disabled = true;
+                        btn.textContent = 'Calibrating...';
+                        status.textContent = 'Moving zoom to 0%, 50%, 100% and capturing...';
+                        status.style.color = '#ffa500';
+
+                        try {
+                            const response = await fetch('/ptz/zoom-fov-calibrate', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    wide_camera_id: wideCamId,
+                                    zoom_camera_id: zoomCamId,
+                                    zoom_levels: '0.0,0.5,1.0',
+                                    settle_time: 2.0
+                                })
+                            });
+
+                            const result = await response.json();
+
+                            if (result.error) {
+                                status.textContent = 'Error: ' + result.error;
+                                status.style.color = '#f44336';
+                            } else {
+                                let pointsHtml = result.points.map(p =>
+                                    `${p.zoom_pct}: ${p.fov_size} (conf: ${p.confidence.toFixed(2)})`
+                                ).join('<br>');
+                                status.innerHTML = `
+                                    <strong>Zoom FOV Calibration Complete!</strong><br>
+                                    ${pointsHtml}<br>
+                                    <span style="font-size: 10px; color: #888;">Saved to config/zoom_fov_calibration.json</span>
+                                `;
+                                status.style.color = '#4CAF50';
+                            }
+                        } catch (e) {
+                            status.textContent = 'Error: ' + e;
+                            status.style.color = '#f44336';
+                        }
+
+                        btn.disabled = false;
+                        btn.textContent = 'Calibrate Zoom FOV';
+                    }
                 </script>
             </head>
             <body>
@@ -781,6 +828,12 @@ class WebServer:
                                 <button id="calibrate-btn-{cam_id}" onclick="runCalibration('{cam_id}', '{target_cam_id}')">Auto-Calibrate PTZ</button>
                                 <div id="calibrate-status-{cam_id}" class="ptz-calibrate-status">
                                     Calibrates PTZ mapping between wide-angle and zoom cameras
+                                </div>
+                                <button id="zoom-fov-btn-{cam_id}" onclick="runZoomFovCalibration('{cam_id}', '{target_cam_id}')" style="margin-top: 8px;">
+                                    Calibrate Zoom FOV
+                                </button>
+                                <div id="zoom-fov-status-{cam_id}" class="ptz-calibrate-status">
+                                    Maps what area of wide view is visible at each zoom level
                                 </div>
                             </div>
                     """
@@ -1270,6 +1323,96 @@ class WebServer:
             
         except Exception as e:
             LOGGER.error(f"PTZ calibration error: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def handle_zoom_fov_calibrate(self, request):
+        """Run zoom FOV calibration to map what area of wide cam is visible at each zoom level."""
+        from .ptz_calibration import ZoomFOVCalibrator
+        import json
+        from pathlib import Path
+
+        try:
+            data = await request.json()
+            wide_camera_id = data.get('wide_camera_id')
+            zoom_camera_id = data.get('zoom_camera_id')
+            zoom_levels_str = data.get('zoom_levels', '0.0,0.5,1.0')
+            settle_time = float(data.get('settle_time', 2.0))
+
+            zoom_levels = [float(x.strip()) for x in zoom_levels_str.split(',')]
+
+            wide_worker = self.workers.get(wide_camera_id)
+            zoom_worker = self.workers.get(zoom_camera_id)
+
+            if not wide_worker:
+                return web.json_response({'error': f'Wide camera {wide_camera_id} not found'}, status=400)
+            if not zoom_worker:
+                return web.json_response({'error': f'Zoom camera {zoom_camera_id} not found'}, status=400)
+
+            if not zoom_worker.onvif_client:
+                return web.json_response({'error': 'Zoom camera has no ONVIF client'}, status=400)
+
+            if not zoom_worker.onvif_profile_token:
+                return web.json_response({'error': 'Zoom camera has no ONVIF profile token'}, status=400)
+
+            if wide_worker.latest_frame is None:
+                return web.json_response({'error': 'Wide camera has no frames - is it streaming?'}, status=400)
+
+            if zoom_worker.latest_frame is None:
+                return web.json_response({'error': 'Zoom camera has no frames - is it streaming?'}, status=400)
+
+            # Create calibrator
+            calibrator = ZoomFOVCalibrator(
+                onvif_client=zoom_worker.onvif_client,
+                profile_token=zoom_worker.onvif_profile_token,
+            )
+
+            def get_wide_frame():
+                return wide_worker.latest_frame.copy() if wide_worker.latest_frame is not None else None
+
+            def get_zoom_frame():
+                return zoom_worker.latest_frame.copy() if zoom_worker.latest_frame is not None else None
+
+            # Run calibration (this blocks but moves the PTZ)
+            LOGGER.info(f"Starting zoom FOV calibration: wide={wide_camera_id}, zoom={zoom_camera_id}")
+            result = calibrator.calibrate_zoom_fov(
+                get_wide_frame=get_wide_frame,
+                get_zoom_frame=get_zoom_frame,
+                zoom_levels=zoom_levels,
+                settle_time=settle_time,
+            )
+
+            if result.error:
+                return web.json_response({'error': result.error}, status=400)
+
+            # Save to config directory
+            output_path = Path(self.storage_root).parent / 'config' / 'zoom_fov_calibration.json'
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(output_path, 'w') as f:
+                json.dump(result.to_dict(), f, indent=2)
+
+            # Format results for response
+            points_info = []
+            for p in result.points:
+                points_info.append({
+                    'zoom_level': p.zoom_level,
+                    'zoom_pct': f"{p.zoom_level * 100:.0f}%",
+                    'fov_bounds': f"({p.x1:.2f}, {p.y1:.2f}) to ({p.x2:.2f}, {p.y2:.2f})",
+                    'fov_size': f"{p.width * 100:.1f}% x {p.height * 100:.1f}%",
+                    'confidence': p.confidence,
+                })
+
+            return web.json_response({
+                'success': True,
+                'message': f'Calibration complete. Saved to {output_path}',
+                'wide_frame_size': f"{result.wide_frame_width}x{result.wide_frame_height}",
+                'points': points_info,
+            })
+
+        except Exception as e:
+            LOGGER.error(f"Zoom FOV calibration error: {e}")
             import traceback
             traceback.print_exc()
             return web.json_response({'error': str(e)}, status=500)

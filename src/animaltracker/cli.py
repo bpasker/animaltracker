@@ -179,6 +179,147 @@ def cmd_cleanup(args: argparse.Namespace) -> None:
         LOGGER.info("Deleted %d old clips", len(deleted))
 
 
+def cmd_zoom_calibrate(args: argparse.Namespace) -> None:
+    """Calibrate zoom FOV mapping between wide and zoom cameras."""
+    import json
+    import cv2
+    from pathlib import Path
+    from .ptz_calibration import ZoomFOVCalibrator, ZoomFOVCalibration
+
+    _load_secrets(args.config)
+    runtime = load_runtime_config(args.config)
+
+    # Find both cameras
+    wide_cam = None
+    zoom_cam = None
+    for cam in runtime.cameras:
+        if cam.id == args.wide_camera:
+            wide_cam = cam
+        if cam.id == args.zoom_camera:
+            zoom_cam = cam
+
+    if not wide_cam:
+        LOGGER.error("Wide camera %s not found in config", args.wide_camera)
+        return
+    if not zoom_cam:
+        LOGGER.error("Zoom camera %s not found in config", args.zoom_camera)
+        return
+
+    # Get ONVIF client for zoom camera
+    username, password = zoom_cam.onvif.credentials()
+    if not username or not password:
+        LOGGER.error("Zoom camera %s missing ONVIF credentials", args.zoom_camera)
+        return
+
+    onvif_client = OnvifClient(zoom_cam.onvif.host, zoom_cam.onvif.port, username, password)
+
+    # Find PTZ profile token
+    profile_token = zoom_cam.onvif.ptz_profile
+    if not profile_token:
+        profiles = onvif_client.get_profiles()
+        if profiles:
+            profile_token = profiles[0].metadata.get('token')
+
+    if not profile_token:
+        LOGGER.error("No PTZ profile found for zoom camera")
+        return
+
+    LOGGER.info("Using PTZ profile: %s", profile_token)
+
+    # Open RTSP streams
+    LOGGER.info("Opening camera streams...")
+    wide_cap = cv2.VideoCapture(wide_cam.rtsp.uri)
+    zoom_cap = cv2.VideoCapture(zoom_cam.rtsp.uri)
+
+    if not wide_cap.isOpened():
+        LOGGER.error("Failed to open wide camera stream: %s", wide_cam.rtsp.uri)
+        return
+    if not zoom_cap.isOpened():
+        LOGGER.error("Failed to open zoom camera stream: %s", zoom_cam.rtsp.uri)
+        wide_cap.release()
+        return
+
+    # Let streams stabilize
+    import time
+    LOGGER.info("Waiting for streams to stabilize...")
+    time.sleep(2.0)
+
+    # Read a few frames to clear buffers
+    for _ in range(10):
+        wide_cap.read()
+        zoom_cap.read()
+
+    # Frame getters
+    def get_wide_frame():
+        ret, frame = wide_cap.read()
+        return frame if ret else None
+
+    def get_zoom_frame():
+        ret, frame = zoom_cap.read()
+        return frame if ret else None
+
+    # Parse zoom levels
+    zoom_levels = [float(x) for x in args.zoom_levels.split(',')]
+    LOGGER.info("Calibrating at zoom levels: %s", zoom_levels)
+
+    # Run calibration
+    calibrator = ZoomFOVCalibrator(
+        onvif_client=onvif_client,
+        profile_token=profile_token,
+    )
+
+    wide_frame = get_wide_frame()
+    if wide_frame is None:
+        LOGGER.error("Could not capture wide frame")
+        wide_cap.release()
+        zoom_cap.release()
+        return
+
+    result = calibrator.calibrate_zoom_fov(
+        get_wide_frame=get_wide_frame,
+        get_zoom_frame=get_zoom_frame,
+        zoom_levels=zoom_levels,
+        settle_time=args.settle_time,
+    )
+
+    # Cleanup
+    wide_cap.release()
+    zoom_cap.release()
+
+    if result.error:
+        LOGGER.error("Calibration failed: %s", result.error)
+        return
+
+    # Print results
+    LOGGER.info("\n" + "=" * 60)
+    LOGGER.info("ZOOM FOV CALIBRATION RESULTS")
+    LOGGER.info("=" * 60)
+    LOGGER.info("Wide frame: %dx%d", result.wide_frame_width, result.wide_frame_height)
+    LOGGER.info("\nMeasured FOV at each zoom level:")
+
+    for point in result.points:
+        LOGGER.info(
+            "  Zoom %.0f%%: FOV covers (%.1f%%, %.1f%%) to (%.1f%%, %.1f%%) "
+            "[%.1f%% x %.1f%% of wide view] confidence=%.2f",
+            point.zoom_level * 100,
+            point.x1 * 100, point.y1 * 100,
+            point.x2 * 100, point.y2 * 100,
+            point.width * 100, point.height * 100,
+            point.confidence,
+        )
+
+    # Save to file
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, 'w') as f:
+        json.dump(result.to_dict(), f, indent=2)
+
+    LOGGER.info("\nCalibration saved to: %s", output_path)
+    LOGGER.info("\nTo use this calibration, load it with:")
+    LOGGER.info("  ZoomFOVCalibration.from_dict(json.load(open('%s')))", output_path)
+
+
 def cmd_reprocess(args: argparse.Namespace) -> None:
     """Reprocess clips to improve species classifications."""
     from .detector import create_detector
@@ -334,6 +475,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Don't regenerate detection thumbnails",
     )
     reprocess_cmd.set_defaults(func=cmd_reprocess)
+
+    zoom_cal_cmd = sub.add_parser(
+        "zoom-calibrate",
+        help="Calibrate zoom FOV mapping between wide and zoom cameras"
+    )
+    zoom_cal_cmd.add_argument(
+        "--wide-camera", "-w",
+        required=True,
+        help="Camera ID for wide-angle camera (cam1)"
+    )
+    zoom_cal_cmd.add_argument(
+        "--zoom-camera", "-z",
+        required=True,
+        help="Camera ID for zoom camera (cam2)"
+    )
+    zoom_cal_cmd.add_argument(
+        "--zoom-levels",
+        default="0.0,0.5,1.0",
+        help="Comma-separated zoom levels to calibrate (default: 0.0,0.5,1.0)"
+    )
+    zoom_cal_cmd.add_argument(
+        "--settle-time",
+        type=float,
+        default=2.0,
+        help="Seconds to wait after zoom change before capturing (default: 2.0)"
+    )
+    zoom_cal_cmd.add_argument(
+        "--output", "-o",
+        default="config/zoom_fov_calibration.json",
+        help="Output file path (default: config/zoom_fov_calibration.json)"
+    )
+    zoom_cal_cmd.set_defaults(func=cmd_zoom_calibrate)
 
     return parser
 

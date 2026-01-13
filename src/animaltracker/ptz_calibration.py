@@ -668,7 +668,7 @@ class ZoomFOVCalibrator:
         self,
         onvif_client: 'OnvifClient',
         profile_token: str,
-        min_match_confidence: float = 0.15,  # Lowered for better compatibility
+        min_match_confidence: float = 0.08,  # Lowered for outdoor scenes with less texture
     ):
         self.onvif_client = onvif_client
         self.profile_token = profile_token
@@ -699,6 +699,18 @@ class ZoomFOVCalibrator:
         # Convert to grayscale
         wide_gray = cv2.cvtColor(wide_frame, cv2.COLOR_BGR2GRAY)
         zoom_gray = cv2.cvtColor(zoom_frame, cv2.COLOR_BGR2GRAY)
+
+        # If zoom frame is higher resolution than wide, resize wide up for better matching
+        # This handles cases where cam1 uses substream and cam2 uses main stream
+        if zoom_frame.shape[0] > wide_frame.shape[0] or zoom_frame.shape[1] > wide_frame.shape[1]:
+            # Scale wide frame up to match zoom resolution
+            scale_up = max(zoom_frame.shape[0] / wide_frame.shape[0],
+                          zoom_frame.shape[1] / wide_frame.shape[1])
+            wide_gray = cv2.resize(wide_gray, None, fx=scale_up, fy=scale_up,
+                                  interpolation=cv2.INTER_LINEAR)
+            LOGGER.info("Upscaled wide frame from %dx%d to %dx%d for matching",
+                       wide_frame.shape[1], wide_frame.shape[0],
+                       wide_gray.shape[1], wide_gray.shape[0])
 
         # Try different scale factors since zoom view may be various sizes
         # More scale factors for better matching across different zoom levels

@@ -633,14 +633,26 @@ class StreamWorker:
         if self.ptz_tracker:
             event_start = self.event_state.start_ts
             event_end = ts  # Current time (event closing)
+            window_start = event_start - self.runtime.general.clip.pre_seconds
             # Add buffer for pre-event decisions that may be relevant
             ptz_log = self.ptz_tracker.get_decisions_in_window(
-                event_start - self.runtime.general.clip.pre_seconds,
+                window_start,
                 event_end
             )
             if ptz_log:
-                LOGGER.debug("Captured %d PTZ decisions for event (window: %.1fs)", 
-                            len(ptz_log), event_end - event_start)
+                LOGGER.info("Captured %d PTZ decisions for event (window: %.1fs to %.1fs)",
+                            len(ptz_log), window_start, event_end)
+            else:
+                # Log why no decisions were captured - helps debug PTZ issues
+                total_decisions = len(self.ptz_tracker._decision_log)
+                LOGGER.info(
+                    "No PTZ decisions in event window [%.1f - %.1f] for %s "
+                    "(tracker has %d total decisions, track_enabled=%s, mode=%s)",
+                    window_start, event_end, self.camera.id,
+                    total_decisions,
+                    self.ptz_tracker.is_track_enabled(),
+                    self.ptz_tracker.get_mode()
+                )
         
         # Capture exclusion lists for post-processing check
         # (species may be reclassified by post-processor to an excluded species)

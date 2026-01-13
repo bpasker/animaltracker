@@ -6025,13 +6025,17 @@ class WebServer:
                         const moves = decisions.filter(d => d.event === 'move').length;
                         const deadzones = decisions.filter(d => d.event === 'deadzone').length;
                         const errors = decisions.filter(d => d.event === 'error').length;
-                        
+                        const trackDisabled = decisions.filter(d => d.event === 'track_disabled').length;
+
                         html += '<div class="ptz-summary">';
                         html += '<h4>🎥 PTZ Summary</h4>';
                         html += '<div class="ptz-summary-row"><span>Total Decisions</span><span>' + decisions.length + '</span></div>';
                         html += '<div class="ptz-summary-row"><span>Mode Changes</span><span>' + modeChanges + '</span></div>';
                         html += '<div class="ptz-summary-row"><span>Move Commands</span><span>' + moves + '</span></div>';
                         html += '<div class="ptz-summary-row"><span>In Deadzone</span><span>' + deadzones + '</span></div>';
+                        if (trackDisabled > 0) {{
+                            html += '<div class="ptz-summary-row"><span style="color: #FF9800;">Track Disabled</span><span style="color: #FF9800;">' + trackDisabled + '</span></div>';
+                        }}
                         if (errors > 0) {{
                             html += '<div class="ptz-summary-row"><span style="color: #F44336;">Errors</span><span style="color: #F44336;">' + errors + '</span></div>';
                         }}
@@ -6080,6 +6084,8 @@ class WebServer:
                                     html += 'In center zone (offset: ' + (entry.details.offset_magnitude * 100).toFixed(1) + '% < ' + (entry.details.threshold * 100).toFixed(0) + '%)';
                                 }} else if (entry.event === 'error') {{
                                     html += '<span style="color: #F44336;">' + (entry.details.error || 'Unknown error') + '</span>';
+                                }} else if (entry.event === 'track_disabled') {{
+                                    html += '<span style="color: #FF9800;">Tracking disabled - ' + entry.details.detection_count + ' detection(s) of ' + (entry.details.species || 'unknown') + ' ignored</span>';
                                 }} else {{
                                     html += JSON.stringify(entry.details);
                                 }}

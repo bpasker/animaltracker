@@ -484,10 +484,23 @@ class PTZTracker:
             return self._do_tracking(detections, frame_width, frame_height)
         else:
             # No detections or tracking disabled
-            PTZ_LOGGER.debug(
-                "[NO_DETECTION] detections=%d, track_active=%s, mode=%s",
-                len(detections) if detections else 0, self._track_active, self._mode.value
-            )
+            if detections and not self._track_active:
+                # Detections exist but tracking is disabled - log this prominently
+                PTZ_LOGGER.warning(
+                    "[TRACK_DISABLED] %d detections ignored - tracking not enabled (track_active=%s)",
+                    len(detections), self._track_active
+                )
+                # Log this as a decision so it shows in the web UI
+                self._log_decision('track_disabled', {
+                    'detection_count': len(detections),
+                    'species': detections[0].species if detections else None,
+                    'reason': 'tracking not enabled in config',
+                })
+            else:
+                PTZ_LOGGER.debug(
+                    "[NO_DETECTION] detections=%d, track_active=%s, mode=%s",
+                    len(detections) if detections else 0, self._track_active, self._mode.value
+                )
             
             if self._mode == PTZMode.TRACKING:
                 # Was tracking, check if we should return to patrol

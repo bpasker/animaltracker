@@ -813,28 +813,29 @@ class ZoomFOVCalibrator:
         frame_height, frame_width = wide_frame.shape[:2]
 
         # Get current pan/tilt position - we'll keep these fixed
+        # For zoom-only calibration, we don't need to move pan/tilt at all
+        current_pan = 0.0
+        current_tilt = 0.0
         try:
             current_pos = self.onvif_client.ptz_get_position(self.profile_token)
-            current_pan = current_pos.get('pan', 0.0)
-            current_tilt = current_pos.get('tilt', 0.0)
+            if current_pos:
+                # Handle None values - use 0.0 as default
+                pan_val = current_pos.get('pan')
+                tilt_val = current_pos.get('tilt')
+                current_pan = pan_val if pan_val is not None else 0.0
+                current_tilt = tilt_val if tilt_val is not None else 0.0
             LOGGER.info("Zoom FOV calibration starting at pan=%.2f, tilt=%.2f",
                        current_pan, current_tilt)
         except Exception as e:
-            LOGGER.warning("Could not get PTZ position: %s", e)
-            current_pan = 0.0
-            current_tilt = 0.0
+            LOGGER.warning("Could not get PTZ position, using defaults: %s", e)
 
         for zoom in zoom_levels:
             LOGGER.info("Calibrating zoom level %.1f%%", zoom * 100)
 
             try:
-                # Move to zoom level (keep pan/tilt fixed)
-                self.onvif_client.ptz_move_absolute(
-                    self.profile_token,
-                    current_pan,
-                    current_tilt,
-                    zoom
-                )
+                # Move to zoom level only (don't change pan/tilt)
+                # Use zoom-only method for better camera compatibility
+                self.onvif_client.ptz_set_zoom(self.profile_token, zoom)
 
                 # Wait for zoom to settle
                 time.sleep(settle_time)
@@ -872,14 +873,9 @@ class ZoomFOVCalibrator:
             except Exception as e:
                 LOGGER.error("Error calibrating zoom %.0f%%: %s", zoom * 100, e)
 
-        # Return to original zoom
+        # Return to wide zoom
         try:
-            self.onvif_client.ptz_move_absolute(
-                self.profile_token,
-                current_pan,
-                current_tilt,
-                0.0  # Return to wide
-            )
+            self.onvif_client.ptz_set_zoom(self.profile_token, 0.0)
         except Exception:
             pass
 

@@ -83,10 +83,10 @@ class OnvifClient:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
         start_time = time.time()
         ptz_service = self._camera.create_ptz_service()
-        
+
         # Get status to find range (optional, but good for debugging)
         # status = ptz_service.GetStatus({'ProfileToken': profile_token})
-        
+
         request = ptz_service.create_type("AbsoluteMove")
         request.ProfileToken = profile_token
         request.Position = {
@@ -99,6 +99,61 @@ class OnvifClient:
             "[ONVIF] AbsoluteMove sent: pan=%.3f, tilt=%.3f, zoom=%.3f (%.1fms)",
             pan, tilt, zoom, elapsed
         )
+
+    def ptz_set_zoom(self, profile_token: str, zoom: float) -> None:
+        """Set only the zoom level without changing pan/tilt.
+
+        Some cameras don't support combined pan/tilt/zoom absolute moves,
+        so this uses zoom-only absolute move or falls back to continuous zoom.
+        """
+        if ONVIFCamera is None:
+            raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
+
+        start_time = time.time()
+        ptz_service = self._camera.create_ptz_service()
+
+        # Try absolute zoom-only first
+        try:
+            request = ptz_service.create_type("AbsoluteMove")
+            request.ProfileToken = profile_token
+            # Only set Zoom, not PanTilt
+            request.Position = {"Zoom": {"x": zoom}}
+            ptz_service.AbsoluteMove(request)
+            elapsed = (time.time() - start_time) * 1000
+            PTZ_LOGGER.debug("[ONVIF] AbsoluteZoom sent: zoom=%.3f (%.1fms)", zoom, elapsed)
+            return
+        except Exception as e:
+            PTZ_LOGGER.debug("[ONVIF] AbsoluteZoom failed, trying continuous: %s", e)
+
+        # Fallback: use continuous zoom with timing
+        try:
+            # Get current zoom
+            current_pos = self.ptz_get_position(profile_token)
+            current_zoom = 0.0
+            if current_pos:
+                z = current_pos.get('zoom')
+                current_zoom = z if z is not None else 0.0
+
+            diff = zoom - current_zoom
+            if abs(diff) < 0.02:
+                return  # Close enough to target
+
+            # Use continuous zoom
+            zoom_speed = 0.5 if diff > 0 else -0.5
+            duration = abs(diff) * 3.0  # Rough timing
+
+            request = ptz_service.create_type("ContinuousMove")
+            request.ProfileToken = profile_token
+            request.Velocity = {"Zoom": {"x": zoom_speed}}
+            ptz_service.ContinuousMove(request)
+
+            time.sleep(min(duration, 4.0))  # Cap at 4 seconds
+            self.ptz_stop(profile_token)
+
+            elapsed = (time.time() - start_time) * 1000
+            PTZ_LOGGER.debug("[ONVIF] ContinuousZoom used: target=%.3f (%.1fms)", zoom, elapsed)
+        except Exception as e:
+            LOGGER.warning("Failed to set zoom: %s", e)
 
     def ptz_move_relative(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
         """Move PTZ by a relative amount from current position.

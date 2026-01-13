@@ -1413,11 +1413,32 @@ class WebServer:
                 profile_token=zoom_worker.onvif_profile_token,
             )
 
+            # Track frame timestamps to ensure we get fresh frames after zoom changes
+            import time as time_module
+
+            def get_fresh_frame(worker, max_wait=3.0):
+                """Wait for a fresh frame that's newer than when this function was called."""
+                start_time = time_module.time()
+                initial_ts = worker.latest_detection_ts
+
+                # Wait for a frame with a newer timestamp
+                while time_module.time() - start_time < max_wait:
+                    if worker.latest_detection_ts > initial_ts and worker.latest_frame is not None:
+                        LOGGER.debug("Got fresh frame: ts=%.3f (was %.3f)",
+                                    worker.latest_detection_ts, initial_ts)
+                        return worker.latest_frame.copy()
+                    time_module.sleep(0.1)
+
+                # Fallback to current frame if no new frame arrived
+                LOGGER.warning("Timeout waiting for fresh frame from %s (waited %.1fs)",
+                              worker.camera.id, max_wait)
+                return worker.latest_frame.copy() if worker.latest_frame is not None else None
+
             def get_wide_frame():
-                return wide_worker.latest_frame.copy() if wide_worker.latest_frame is not None else None
+                return get_fresh_frame(wide_worker)
 
             def get_zoom_frame():
-                return zoom_worker.latest_frame.copy() if zoom_worker.latest_frame is not None else None
+                return get_fresh_frame(zoom_worker)
 
             # Run calibration (this blocks but moves the PTZ)
             LOGGER.info(f"Starting zoom FOV calibration: wide={wide_camera_id}, zoom={zoom_camera_id}")

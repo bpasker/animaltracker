@@ -185,7 +185,9 @@ class PTZTracker:
     _patrol_direction: int = field(default=1, init=False)  # 1 = right, -1 = left
     _last_detection_time: float = field(default=0.0, init=False)
     _patrol_reverse_time: float = field(default=0.0, init=False)
-    
+    _tracking_lost_logged_at: float = field(default=0.0, init=False)  # When we last logged "tracking lost"
+    _last_tracked_species: str = field(default="", init=False)  # Species we were tracking when lost
+
     # Decision log buffer (for storing with clips)
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
     _decision_log_max_entries: int = field(default=1000, init=False)  # Prevent unbounded growth
@@ -454,7 +456,9 @@ class PTZTracker:
         if detections and self._track_active:
             # We have detections and tracking is enabled - switch to tracking mode
             self._last_detection_time = now
-            
+            self._tracking_lost_logged_at = 0.0  # Reset - we have detections again
+            self._last_tracked_species = detections[0].species  # Remember what we're tracking
+
             PTZ_LOGGER.debug(
                 "[DETECTIONS] %d objects detected, track_active=%s",
                 len(detections), self._track_active
@@ -462,7 +466,7 @@ class PTZTracker:
             for i, det in enumerate(detections):
                 PTZ_LOGGER.debug(
                     "  [DET %d] species=%s conf=%.1f%% bbox=[%.0f,%.0f,%.0f,%.0f] track_id=%s",
-                    i, det.species, det.confidence * 100, 
+                    i, det.species, det.confidence * 100,
                     det.bbox[0], det.bbox[1], det.bbox[2], det.bbox[3],
                     getattr(det, 'track_id', 'N/A')
                 )
@@ -505,29 +509,47 @@ class PTZTracker:
             if self._mode == PTZMode.TRACKING:
                 # Was tracking, check if we should return to patrol
                 time_since_detection = now - self._last_detection_time
-                
-                PTZ_LOGGER.debug(
-                    "[TRACKING_LOST] Time since last detection: %.2fs (return_delay=%.2fs)",
-                    time_since_detection, self.patrol_return_delay
-                )
-                
+
+                # Log when object is FIRST lost (not every frame)
+                if self._tracking_lost_logged_at == 0.0:
+                    self._tracking_lost_logged_at = now
+                    PTZ_LOGGER.info(
+                        "[TRACKING_LOST] Lost %s - no detections. Waiting %.1fs before returning to patrol",
+                        self._last_tracked_species or "object", self.patrol_return_delay
+                    )
+                    LOGGER.info(
+                        "PTZ lost %s - holding position for %.1fs before returning to patrol",
+                        self._last_tracked_species or "object", self.patrol_return_delay
+                    )
+                    self._log_decision('tracking_lost', {
+                        'species': self._last_tracked_species,
+                        'return_delay': self.patrol_return_delay,
+                        'action': 'waiting',
+                    })
+
                 if time_since_detection > self.patrol_return_delay or not self._track_active:
                     # Object lost for long enough (or tracking disabled), return to patrol
                     if self._patrol_active:
+                        reason = "tracking disabled" if not self._track_active else f"no detections for {time_since_detection:.1f}s (> {self.patrol_return_delay}s delay)"
                         PTZ_LOGGER.info(
-                            "[MODE_CHANGE] TRACKING -> PATROL (object lost for %.1fs)",
-                            time_since_detection
+                            "[MODE_CHANGE] TRACKING -> PATROL (%s was lost, %s)",
+                            self._last_tracked_species or "object", reason
                         )
                         self._log_decision('mode_change', {
                             'from': 'tracking',
                             'to': 'patrol',
-                            'reason': 'object_lost',
+                            'reason': 'object_lost' if self._track_active else 'tracking_disabled',
+                            'species': self._last_tracked_species,
                             'time_since_detection': round(time_since_detection, 2),
+                            'return_delay': self.patrol_return_delay,
                         })
                         self._mode = PTZMode.PATROL
+                        self._tracking_lost_logged_at = 0.0  # Reset for next tracking session
                         if self._track_active:
-                            LOGGER.info("PTZ returning to PATROL mode - object lost for %.1fs", 
-                                       time_since_detection)
+                            LOGGER.info(
+                                "PTZ returning to PATROL - %s lost for %.1fs (exceeded %.1fs delay)",
+                                self._last_tracked_species or "object", time_since_detection, self.patrol_return_delay
+                            )
                         else:
                             LOGGER.info("PTZ returning to PATROL mode - tracking disabled")
                     else:
@@ -537,17 +559,20 @@ class PTZTracker:
                             'from': 'tracking',
                             'to': 'idle',
                             'reason': 'patrol_disabled',
+                            'species': self._last_tracked_species,
                         })
                         self._mode = PTZMode.IDLE
+                        self._tracking_lost_logged_at = 0.0
                         try:
                             self.onvif_client.ptz_stop(self.profile_token)
                         except Exception:
                             pass
                 else:
                     # Still within delay, stop and wait for object to reappear
+                    time_remaining = self.patrol_return_delay - time_since_detection
                     PTZ_LOGGER.debug(
-                        "[WAITING] Holding position, %.2fs until patrol return",
-                        self.patrol_return_delay - time_since_detection
+                        "[WAITING] Holding position for %s, %.1fs remaining before patrol",
+                        self._last_tracked_species or "object", time_remaining
                     )
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)

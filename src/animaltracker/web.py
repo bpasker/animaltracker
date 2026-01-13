@@ -6024,6 +6024,7 @@ class WebServer:
                         const modeChanges = decisions.filter(d => d.event === 'mode_change').length;
                         const moves = decisions.filter(d => d.event === 'move').length;
                         const deadzones = decisions.filter(d => d.event === 'deadzone').length;
+                        const trackingLost = decisions.filter(d => d.event === 'tracking_lost').length;
                         const errors = decisions.filter(d => d.event === 'error').length;
                         const trackDisabled = decisions.filter(d => d.event === 'track_disabled').length;
 
@@ -6033,6 +6034,9 @@ class WebServer:
                         html += '<div class="ptz-summary-row"><span>Mode Changes</span><span>' + modeChanges + '</span></div>';
                         html += '<div class="ptz-summary-row"><span>Move Commands</span><span>' + moves + '</span></div>';
                         html += '<div class="ptz-summary-row"><span>In Deadzone</span><span>' + deadzones + '</span></div>';
+                        if (trackingLost > 0) {{
+                            html += '<div class="ptz-summary-row"><span style="color: #2196F3;">Tracking Lost</span><span style="color: #2196F3;">' + trackingLost + '</span></div>';
+                        }}
                         if (trackDisabled > 0) {{
                             html += '<div class="ptz-summary-row"><span style="color: #FF9800;">Track Disabled</span><span style="color: #FF9800;">' + trackDisabled + '</span></div>';
                         }}
@@ -6086,6 +6090,8 @@ class WebServer:
                                     html += '<span style="color: #F44336;">' + (entry.details.error || 'Unknown error') + '</span>';
                                 }} else if (entry.event === 'track_disabled') {{
                                     html += '<span style="color: #FF9800;">Tracking disabled - ' + entry.details.detection_count + ' detection(s) of ' + (entry.details.species || 'unknown') + ' ignored</span>';
+                                }} else if (entry.event === 'tracking_lost') {{
+                                    html += '<span style="color: #2196F3;">Lost ' + (entry.details.species || 'object') + ' - waiting ' + entry.details.return_delay + 's before patrol</span>';
                                 }} else {{
                                     html += JSON.stringify(entry.details);
                                 }}

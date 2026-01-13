@@ -321,7 +321,7 @@ class StreamWorker:
         
         # Frame skipping counter
         frame_count = 0
-        skip_factor = self.camera.rtsp.frame_skip
+        skip_factor = max(1, self.camera.rtsp.frame_skip)  # Treat 0 as 1 (no skipping)
         
         # Track if inference is in progress (for non-blocking detection)
         inference_task: Optional[asyncio.Task] = None

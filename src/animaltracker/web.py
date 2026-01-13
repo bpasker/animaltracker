@@ -88,6 +88,8 @@ class WebServer:
         self.app.router.add_post('/ptz/{camera_id}/save_preset', self.handle_ptz_save_preset)
         self.app.router.add_post('/ptz/calibrate', self.handle_ptz_calibrate)
         self.app.router.add_post('/ptz/zoom-fov-calibrate', self.handle_zoom_fov_calibrate)
+        self.app.router.add_get('/ptz/debug', self.handle_get_ptz_debug)
+        self.app.router.add_post('/ptz/debug', self.handle_set_ptz_debug)
         self.app.router.add_get('/recordings', self.handle_recordings)
         self.app.router.add_get('/recording/{path:.*}', self.handle_recording_detail)
         self.app.router.add_delete('/recordings', self.handle_delete_recording)
@@ -797,6 +799,39 @@ class WebServer:
                         btn.disabled = false;
                         btn.textContent = 'Calibrate Zoom FOV';
                     }
+
+                    async function togglePtzDebug(enabled) {
+                        try {
+                            const response = await fetch('/ptz/debug', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({enabled: enabled})
+                            });
+                            const result = await response.json();
+                            if (result.error) {
+                                console.error('Failed to toggle PTZ debug:', result.error);
+                            }
+                        } catch (e) {
+                            console.error('Error toggling PTZ debug:', e);
+                        }
+                    }
+
+                    // Load PTZ debug state on page load
+                    async function loadPtzDebugState() {
+                        try {
+                            const response = await fetch('/ptz/debug');
+                            const result = await response.json();
+                            // Update all debug toggles
+                            document.querySelectorAll('[id^="ptz-debug-toggle-"]').forEach(toggle => {
+                                toggle.checked = result.enabled;
+                            });
+                        } catch (e) {
+                            console.error('Error loading PTZ debug state:', e);
+                        }
+                    }
+
+                    // Call on page load
+                    document.addEventListener('DOMContentLoaded', loadPtzDebugState);
                 </script>
             </head>
             <body>
@@ -870,6 +905,16 @@ class WebServer:
                                 </div>
                                 <div style="font-size: 11px; color: #888; margin-bottom: 12px;">
                                     Follow detected objects automatically
+                                </div>
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <span>Debug Logging</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="ptz-debug-toggle-{cam_id}" onchange="togglePtzDebug(this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div style="font-size: 11px; color: #888; margin-bottom: 12px;">
+                                    Show detailed PTZ decisions in logs
                                 </div>
                                 <div style="margin-bottom: 12px; padding-top: 8px; border-top: 1px solid #444;">
                                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
@@ -1415,6 +1460,36 @@ class WebServer:
             LOGGER.error(f"Zoom FOV calibration error: {e}")
             import traceback
             traceback.print_exc()
+            return web.json_response({'error': str(e)}, status=500)
+
+    async def handle_get_ptz_debug(self, request):
+        """Get current PTZ debug logging state."""
+        import logging
+        ptz_logger = logging.getLogger('ptz.decisions')
+        is_enabled = ptz_logger.level <= logging.DEBUG
+        return web.json_response({'enabled': is_enabled})
+
+    async def handle_set_ptz_debug(self, request):
+        """Enable or disable PTZ debug logging."""
+        import logging
+        try:
+            data = await request.json()
+            enabled = data.get('enabled', False)
+
+            ptz_logger = logging.getLogger('ptz.decisions')
+            if enabled:
+                ptz_logger.setLevel(logging.DEBUG)
+                # Also ensure the root logger can show debug
+                logging.getLogger('animaltracker.ptz_tracker').setLevel(logging.DEBUG)
+                LOGGER.info("PTZ debug logging ENABLED")
+            else:
+                ptz_logger.setLevel(logging.INFO)
+                logging.getLogger('animaltracker.ptz_tracker').setLevel(logging.INFO)
+                LOGGER.info("PTZ debug logging DISABLED")
+
+            return web.json_response({'enabled': enabled, 'success': True})
+        except Exception as e:
+            LOGGER.error(f"Error setting PTZ debug: {e}")
             return web.json_response({'error': str(e)}, status=500)
 
     def _scan_recordings(self):

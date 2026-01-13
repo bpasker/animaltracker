@@ -224,11 +224,19 @@ class StreamWorker:
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
         self.latest_detections: List[Detection] = []  # Current detections for live view overlay
-        
+        self.latest_detection_ts: float = 0.0  # Timestamp of latest detections
+        self.latest_frame_size: tuple = (0, 0)  # (width, height) of latest frame
+
         # Initialize ONVIF client if configured (with timeout to prevent blocking)
         self.onvif_client: Optional[OnvifClient] = None
         self.onvif_profile_token: Optional[str] = None
         self.ptz_tracker: Optional[PTZTracker] = None
+
+        # Multi-camera PTZ tracking: shared detection cache for cameras that contribute
+        # to the same PTZ tracker. Maps camera_id -> worker (for accessing detections)
+        self._ptz_detection_sources: Optional[Dict[str, 'StreamWorker']] = None
+        self._ptz_source_camera_id: Optional[str] = None  # Source camera (wide-angle)
+        self._ptz_target_camera_id: Optional[str] = None  # Target camera (PTZ/zoom)
         
         if camera.onvif and camera.onvif.host:
             user, password = camera.onvif.credentials()
@@ -421,13 +429,15 @@ class StreamWorker:
             )
         )
         filtered = self._filter_detections(detections)
-        
+
         # Store for live view overlay
+        frame_h, frame_w = frame.shape[:2]
         self.latest_detections = filtered
+        self.latest_detection_ts = ts
+        self.latest_frame_size = (frame_w, frame_h)
 
         # PTZ auto-tracking: always call update (handles patrol when no detections)
         if self.ptz_tracker:
-            frame_h, frame_w = frame.shape[:2]
             # Debug: log what we're sending to PTZ tracker
             if filtered:
                 LOGGER.info(
@@ -437,11 +447,47 @@ class StreamWorker:
                     self.ptz_tracker.is_patrol_enabled(),
                     self.ptz_tracker.get_mode()
                 )
-            await loop.run_in_executor(
-                None,
-                self.ptz_tracker.update,
-                filtered, frame_w, frame_h
-            )
+
+            # Check if we should use multi-camera tracking
+            if (self._ptz_detection_sources
+                and self._ptz_source_camera_id
+                and self._ptz_target_camera_id):
+                # Build detection dict from all contributing cameras
+                camera_detections = {}
+
+                for cam_id, worker in self._ptz_detection_sources.items():
+                    # Only use recent detections (within 1 second)
+                    if ts - worker.latest_detection_ts < 1.0:
+                        w, h = worker.latest_frame_size
+                        if w > 0 and h > 0:
+                            camera_detections[cam_id] = (
+                                worker.latest_detections,
+                                w,
+                                h
+                            )
+
+                if camera_detections:
+                    await loop.run_in_executor(
+                        None,
+                        self.ptz_tracker.update_multi_camera,
+                        camera_detections,
+                        self._ptz_source_camera_id,
+                        self._ptz_target_camera_id
+                    )
+                else:
+                    # No recent detections from any camera
+                    await loop.run_in_executor(
+                        None,
+                        self.ptz_tracker.update,
+                        [], frame_w, frame_h
+                    )
+            else:
+                # Single-camera tracking mode
+                await loop.run_in_executor(
+                    None,
+                    self.ptz_tracker.update,
+                    filtered, frame_w, frame_h
+                )
             # Periodically trim old decisions to prevent unbounded memory growth
             # Keep last 5 minutes of decisions (enough for any reasonable clip)
             cutoff = ts - 300  # 5 minutes
@@ -1352,6 +1398,44 @@ class PipelineOrchestrator:
                     LOGGER.info(
                         "PTZ self-tracking enabled: %s shares tracker (cam2 detections will also trigger tracking)",
                         worker.camera.id
+                    )
+
+        # Third pass: set up multi-camera detection sources for PTZ tracking
+        # This allows cam2 (target) detections to take over tracking from cam1 (source)
+        for worker in workers:
+            ptz_cfg = worker.camera.ptz_tracking
+            # Only set up multi-camera for cross-camera tracking (not self-track)
+            # and only if multi_camera_tracking is enabled in config
+            if (ptz_cfg.enabled
+                and ptz_cfg.target_camera_id
+                and ptz_cfg.multi_camera_tracking
+                and worker.ptz_tracker):
+                source_id = worker.camera.id  # e.g., cam1
+                target_id = ptz_cfg.target_camera_id  # e.g., cam2
+                target_worker = worker_map.get(target_id)
+
+                if target_worker:
+                    # Set up detection sources - both source and target cameras contribute
+                    detection_sources = {
+                        source_id: worker,
+                        target_id: target_worker,
+                    }
+
+                    # Configure source worker for multi-camera tracking
+                    worker._ptz_detection_sources = detection_sources
+                    worker._ptz_source_camera_id = source_id
+                    worker._ptz_target_camera_id = target_id
+
+                    # Also configure target worker if it has the shared tracker
+                    if target_worker.ptz_tracker is worker.ptz_tracker:
+                        target_worker._ptz_detection_sources = detection_sources
+                        target_worker._ptz_source_camera_id = source_id
+                        target_worker._ptz_target_camera_id = target_id
+
+                    LOGGER.info(
+                        "Multi-camera PTZ tracking enabled: %s (source) + %s (target) -> PTZ "
+                        "(target camera can take over for fine tracking)",
+                        source_id, target_id
                     )
 
         # Start web server

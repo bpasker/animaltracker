@@ -124,7 +124,7 @@ class ThresholdSettings(BaseModel):
 
 class PTZTrackingSettings(BaseModel):
     """Settings for PTZ auto-tracking (follow detected objects with zoom camera).
-    
+
     Optimized defaults for real-time tracking with split-model architecture:
     - update_interval: 0.1s (10 updates/sec) for responsive tracking
     - smoothing: 0.15 for faster response with minimal jitter
@@ -133,6 +133,8 @@ class PTZTrackingSettings(BaseModel):
     enabled: bool = Field(default=False, description="Enable PTZ auto-tracking")
     target_camera_id: Optional[str] = Field(default=None, description="Camera ID to send PTZ commands to (for linked cameras)")
     self_track: bool = Field(default=False, description="Enable self-tracking (camera centers on its own detections)")
+    # Multi-camera tracking: allow target camera's detections to take over tracking
+    multi_camera_tracking: bool = Field(default=True, description="When enabled, target camera (cam2) detections can take over tracking for finer control")
     target_fill_pct: float = Field(default=0.6, ge=0.1, le=0.95, description="Target object fill percentage (0.6 = 60%)")
     pan_scale: float = Field(default=0.8, ge=0.1, le=2.0, description="PTZ pan range as fraction of wide-angle FOV")
     tilt_scale: float = Field(default=0.6, ge=0.1, le=2.0, description="PTZ tilt range as fraction of wide-angle FOV")

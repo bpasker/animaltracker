@@ -60,16 +60,27 @@ The system uses a two-stage detection approach:
 
 ### Multi-Camera PTZ Tracking
 
-Cam1 (wide-angle) detects animals and controls cam2 (zoom) PTZ movements:
+Cam1 (wide-angle) detects animals and controls cam2 (zoom) PTZ movements. With `multi_camera_tracking` enabled (default), cam2 can take over tracking once the object is in its frame for finer control:
 
 ```yaml
 cameras:
   - id: cam1
     ptz_tracking:
-      target_camera_id: cam2  # cam1 detections drive cam2's PTZ
+      enabled: true
+      target_camera_id: cam2          # cam1 detections drive cam2's PTZ
+      multi_camera_tracking: true     # cam2 can take over tracking (default: true)
+  - id: cam2
+    ptz_tracking:
+      self_track: true                # Allows cam2 to contribute to tracking
 ```
 
-Both cameras share pan/tilt hardware but cam2 has zoom control. The `PTZTracker` converts pixel coordinates from cam1's frame to PTZ commands for cam2.
+**How it works:**
+1. cam1 (wide-angle) detects an object and moves cam2's PTZ to point at it
+2. Once the object is in cam2's frame, cam2 detects it too
+3. cam2's detections take priority for fine tracking (since they show exactly where the object is in cam2's view)
+4. If cam2 loses the object but cam1 still sees it, cam1 repositions the PTZ
+
+Both cameras share pan/tilt hardware but cam2 has zoom control. The `PTZTracker` converts pixel coordinates from cam1's frame to PTZ commands for cam2, and uses `update_multi_camera()` when both cameras contribute detections.
 
 ### Key Data Flow
 
@@ -99,6 +110,7 @@ ptz_tracking:
 
 ## Key Classes
 
+- `PTZTracker` (ptz_tracker.py) - Auto-tracking controller with `update()` for single-camera and `update_multi_camera()` for multi-camera tracking
 - `PTZCalibration` (ptz_tracker.py) - Stores pan/tilt/zoom mapping parameters
 - `PTZAutoCalibrator` (ptz_calibration.py) - Finds zoom view within wide frame using ORB features
 - `ZoomFOVCalibration` (ptz_calibration.py) - Maps what area of cam1 is visible in cam2 at different zoom levels

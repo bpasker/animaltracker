@@ -174,6 +174,10 @@ class PTZTracker:
     _current_preset_index: int = field(default=0, init=False)
     _preset_arrival_time: float = field(default=0.0, init=False)
     
+    # Multi-camera tracking: secondary cameras that can contribute detections
+    # When the target camera (cam2) detects an object, use those detections for fine tracking
+    secondary_cameras: list = field(default_factory=list)  # Camera IDs that can contribute
+
     # State
     _last_update: float = field(default=0.0, init=False)
     _target_pan: float = field(default=0.0, init=False)
@@ -187,6 +191,7 @@ class PTZTracker:
     _patrol_reverse_time: float = field(default=0.0, init=False)
     _tracking_lost_logged_at: float = field(default=0.0, init=False)  # When we last logged "tracking lost"
     _last_tracked_species: str = field(default="", init=False)  # Species we were tracking when lost
+    _last_detection_source: str = field(default="", init=False)  # Which camera provided the detection
 
     # Decision log buffer (for storing with clips)
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
@@ -596,9 +601,324 @@ class PTZTracker:
                 LOGGER.debug("PTZ update: calling _do_patrol(), presets=%d", len(self._preset_tokens) if self._preset_tokens else 0)
                 self._do_patrol()
                 return True
-            
+
             return False
-    
+
+    def update_multi_camera(
+        self,
+        camera_detections: Dict[str, Tuple[List['Detection'], int, int]],
+        source_camera_id: str,
+        target_camera_id: str,
+    ) -> bool:
+        """Process detections from multiple cameras for PTZ tracking.
+
+        This method enables cam2 (the zoom/PTZ camera) to take over tracking
+        once it can see the object. Logic:
+        1. If target camera (cam2) has detections → use those for fine tracking
+        2. Else if source camera (cam1) has detections → use those to reposition
+        3. Else → no detections, handle patrol/idle transition
+
+        Args:
+            camera_detections: Dict mapping camera_id -> (detections, frame_width, frame_height)
+            source_camera_id: ID of the wide-angle source camera (typically 'cam1')
+            target_camera_id: ID of the PTZ target camera (typically 'cam2')
+
+        Returns:
+            True if PTZ was moved, False otherwise
+        """
+        # Need at least one of patrol or track enabled
+        if not self._patrol_active and not self._track_active:
+            return False
+
+        # Rate limit updates
+        now = time.time()
+        if now - self._last_update < self.update_interval:
+            return False
+
+        self._last_update = now
+
+        # Extract detections from each camera
+        source_data = camera_detections.get(source_camera_id)
+        target_data = camera_detections.get(target_camera_id)
+
+        source_detections = source_data[0] if source_data else []
+        target_detections = target_data[0] if target_data else []
+
+        # Log what we have
+        PTZ_LOGGER.debug(
+            "[MULTI_CAM] source(%s)=%d dets, target(%s)=%d dets",
+            source_camera_id, len(source_detections),
+            target_camera_id, len(target_detections)
+        )
+
+        # Determine which detections to use
+        # Priority: target camera (cam2) > source camera (cam1)
+        if target_detections and self._track_active:
+            # Target camera can see the object - use its detections for fine tracking
+            frame_width, frame_height = target_data[1], target_data[2]
+
+            PTZ_LOGGER.info(
+                "[CAM_TAKEOVER] %s has %d detections - using for fine tracking",
+                target_camera_id, len(target_detections)
+            )
+
+            self._last_detection_time = now
+            self._tracking_lost_logged_at = 0.0
+            self._last_tracked_species = target_detections[0].species
+            self._last_detection_source = target_camera_id
+
+            if self._mode != PTZMode.TRACKING:
+                PTZ_LOGGER.info(
+                    "[MODE_CHANGE] %s -> TRACKING (detected by %s: %s at %.1f%%)",
+                    self._mode.value, target_camera_id,
+                    target_detections[0].species, target_detections[0].confidence * 100
+                )
+                self._log_decision('mode_change', {
+                    'from': self._mode.value,
+                    'to': 'tracking',
+                    'trigger': f"{target_detections[0].species} ({target_detections[0].confidence*100:.1f}%)",
+                    'detection_count': len(target_detections),
+                    'source_camera': target_camera_id,
+                })
+                self._mode = PTZMode.TRACKING
+
+            # Use target camera's detections - these are most accurate since
+            # they show where the object is in the PTZ camera's current view
+            return self._do_tracking_from_target(target_detections, frame_width, frame_height)
+
+        elif source_detections and self._track_active:
+            # Only source camera sees the object - need to reposition PTZ
+            frame_width, frame_height = source_data[1], source_data[2]
+
+            PTZ_LOGGER.info(
+                "[SOURCE_TRACKING] Only %s sees object - repositioning PTZ",
+                source_camera_id
+            )
+
+            self._last_detection_time = now
+            self._tracking_lost_logged_at = 0.0
+            self._last_tracked_species = source_detections[0].species
+            self._last_detection_source = source_camera_id
+
+            if self._mode != PTZMode.TRACKING:
+                PTZ_LOGGER.info(
+                    "[MODE_CHANGE] %s -> TRACKING (detected by %s: %s at %.1f%%)",
+                    self._mode.value, source_camera_id,
+                    source_detections[0].species, source_detections[0].confidence * 100
+                )
+                self._log_decision('mode_change', {
+                    'from': self._mode.value,
+                    'to': 'tracking',
+                    'trigger': f"{source_detections[0].species} ({source_detections[0].confidence*100:.1f}%)",
+                    'detection_count': len(source_detections),
+                    'source_camera': source_camera_id,
+                })
+                self._mode = PTZMode.TRACKING
+
+            # Use the original tracking method for source camera detections
+            return self._do_tracking(source_detections, frame_width, frame_height)
+
+        else:
+            # No detections from either camera
+            return self._handle_no_detections(now)
+
+    def _do_tracking_from_target(
+        self, detections: List['Detection'], frame_width: int, frame_height: int
+    ) -> bool:
+        """Execute tracking using detections from the target/PTZ camera itself.
+
+        When the target camera (cam2) sees the object, we use its detections
+        for precise centering. The object's position in cam2's frame directly
+        tells us how to move the PTZ.
+        """
+        PTZ_LOGGER.info(
+            "[DO_TRACKING_TARGET] Called with %d detections from PTZ camera, frame=%dx%d",
+            len(detections), frame_width, frame_height
+        )
+
+        # Find best detection to track (highest confidence)
+        best = max(detections, key=lambda d: d.confidence)
+        bbox = best.bbox
+
+        PTZ_LOGGER.info(
+            "[TARGET_SELECT] Selected %s (%.1f%%) bbox=[%.0f,%.0f,%.0f,%.0f]",
+            best.species, best.confidence * 100,
+            bbox[0], bbox[1], bbox[2], bbox[3]
+        )
+
+        # Calculate bbox center in target camera's frame
+        center_x = (bbox[0] + bbox[2]) / 2
+        center_y = (bbox[1] + bbox[3]) / 2
+
+        # For target camera tracking, the offset from center directly tells us
+        # how to move the PTZ to center the object
+        norm_center_x = center_x / frame_width
+        norm_center_y = center_y / frame_height
+
+        # How far from center? (0.5, 0.5) = centered
+        offset_x = norm_center_x - 0.5  # Positive = object is right of center
+        offset_y = 0.5 - norm_center_y  # Positive = object is above center (inverted Y)
+
+        offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
+
+        PTZ_LOGGER.info(
+            "[TARGET_OFFSET] center=(%.0f, %.0f), norm=(%.3f, %.3f), offset=(%.3f, %.3f), mag=%.3f",
+            center_x, center_y, norm_center_x, norm_center_y, offset_x, offset_y, offset_magnitude
+        )
+
+        # Only move if offset is significant
+        if offset_magnitude < self.min_move_threshold:
+            PTZ_LOGGER.info(
+                "[DEADZONE] Target centered in cam2 - offset=%.3f < threshold=%.3f",
+                offset_magnitude, self.min_move_threshold
+            )
+            self._log_decision('deadzone', {
+                'species': best.species,
+                'track_id': getattr(best, 'track_id', None),
+                'offset_magnitude': round(offset_magnitude, 4),
+                'threshold': self.min_move_threshold,
+                'source': 'target_camera',
+            })
+            try:
+                self.onvif_client.ptz_stop(self.profile_token)
+            except Exception:
+                pass
+            return False
+
+        # Non-linear velocity curve for smooth tracking
+        def velocity_curve(offset: float) -> float:
+            abs_offset = abs(offset)
+            if abs_offset < 0.1:
+                speed = abs_offset * 3.0
+            elif abs_offset < 0.25:
+                speed = 0.3 + (abs_offset - 0.1) * 3.0
+            else:
+                speed = 0.75 + (abs_offset - 0.25) * 1.0
+            return max(-1.0, min(1.0, speed if offset >= 0 else -speed))
+
+        pan_velocity = velocity_curve(offset_x)
+        tilt_velocity = velocity_curve(offset_y)
+
+        # Calculate zoom velocity based on current vs target fill
+        bbox_width = bbox[2] - bbox[0]
+        bbox_height = bbox[3] - bbox[1]
+        current_fill = max(bbox_width / frame_width, bbox_height / frame_height)
+
+        if current_fill > 0:
+            fill_error = self.target_fill_pct - current_fill
+            zoom_velocity = fill_error * 1.5
+            zoom_velocity = max(-0.3, min(0.3, zoom_velocity))
+        else:
+            zoom_velocity = 0.0
+
+        PTZ_LOGGER.info(
+            "[MOVE_TARGET] %s: vel=(pan=%.2f, tilt=%.2f, zoom=%.2f) | "
+            "offset=(%.1f%%, %.1f%%) | fill=%.0f%% (target=%.0f%%)",
+            best.species, pan_velocity, tilt_velocity, zoom_velocity,
+            offset_x * 100, offset_y * 100,
+            current_fill * 100, self.target_fill_pct * 100
+        )
+
+        try:
+            self._log_decision('move', {
+                'species': best.species,
+                'track_id': getattr(best, 'track_id', None),
+                'confidence': round(best.confidence, 3),
+                'velocity': {
+                    'pan': round(pan_velocity, 3),
+                    'tilt': round(tilt_velocity, 3),
+                    'zoom': round(zoom_velocity, 3),
+                },
+                'offset': {
+                    'x': round(offset_x, 3),
+                    'y': round(offset_y, 3),
+                    'magnitude': round(offset_magnitude, 3),
+                },
+                'fill_pct': round(current_fill * 100, 1),
+                'source': 'target_camera',
+            })
+            self.onvif_client.ptz_move(
+                self.profile_token,
+                pan_velocity,
+                tilt_velocity,
+                zoom_velocity
+            )
+            return True
+        except Exception as e:
+            PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
+            return False
+
+    def _handle_no_detections(self, now: float) -> bool:
+        """Handle case when no detections from any camera."""
+        PTZ_LOGGER.debug(
+            "[NO_DETECTION] No detections from any camera, mode=%s",
+            self._mode.value
+        )
+
+        if self._mode == PTZMode.TRACKING:
+            time_since_detection = now - self._last_detection_time
+
+            if self._tracking_lost_logged_at == 0.0:
+                self._tracking_lost_logged_at = now
+                PTZ_LOGGER.info(
+                    "[TRACKING_LOST] Lost %s (last seen by %s) - waiting %.1fs before patrol",
+                    self._last_tracked_species or "object",
+                    self._last_detection_source or "unknown",
+                    self.patrol_return_delay
+                )
+                self._log_decision('tracking_lost', {
+                    'species': self._last_tracked_species,
+                    'last_source': self._last_detection_source,
+                    'return_delay': self.patrol_return_delay,
+                })
+
+            if time_since_detection > self.patrol_return_delay or not self._track_active:
+                if self._patrol_active:
+                    PTZ_LOGGER.info(
+                        "[MODE_CHANGE] TRACKING -> PATROL (%s lost for %.1fs)",
+                        self._last_tracked_species or "object", time_since_detection
+                    )
+                    self._log_decision('mode_change', {
+                        'from': 'tracking',
+                        'to': 'patrol',
+                        'reason': 'object_lost',
+                        'species': self._last_tracked_species,
+                        'time_since_detection': round(time_since_detection, 2),
+                    })
+                    self._mode = PTZMode.PATROL
+                    self._tracking_lost_logged_at = 0.0
+                    if self._preset_tokens:
+                        self._goto_current_preset()
+                else:
+                    self._mode = PTZMode.IDLE
+                    self._tracking_lost_logged_at = 0.0
+                    try:
+                        self.onvif_client.ptz_stop(self.profile_token)
+                    except Exception:
+                        pass
+            else:
+                # Still within delay, hold position
+                try:
+                    self.onvif_client.ptz_stop(self.profile_token)
+                except Exception:
+                    pass
+                return False
+
+        # Start patrol if enabled
+        if self._patrol_active and self._mode != PTZMode.PATROL:
+            self._mode = PTZMode.PATROL
+            if self._preset_tokens:
+                self._current_preset_index = 0
+                self._goto_current_preset()
+            else:
+                self._patrol_reverse_time = time.time()
+
+        if self._mode == PTZMode.PATROL:
+            self._do_patrol()
+            return True
+
+        return False
+
     def _do_tracking(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
         """Execute object tracking logic."""
         PTZ_LOGGER.info(
@@ -806,10 +1126,10 @@ def create_ptz_tracker(
     config: Optional[Dict] = None
 ) -> PTZTracker:
     """Create a PTZ tracker with optional configuration.
-    
+
     Default values are optimized for split-model architecture where YOLO
     provides fast detections (~50-150ms) for responsive real-time tracking.
-    
+
     Args:
         onvif_client: ONVIF client for PTZ control
         profile_token: ONVIF profile token
@@ -824,19 +1144,21 @@ def create_ptz_tracker(
             - patrol_return_delay: Seconds to wait before returning to patrol (default 2.0)
             - patrol_presets: List of preset tokens/names for patrol (default [])
             - patrol_dwell_time: Seconds to stay at each preset (default 10.0)
-            
+            - secondary_cameras: List of camera IDs that can contribute detections
+              for multi-camera tracking (e.g., ['cam2'] when cam2 is the PTZ camera)
+
     Returns:
         Configured PTZTracker instance
     """
     config = config or {}
-    
+
     calibration = PTZCalibration(
         pan_scale=config.get('pan_scale', 0.8),
         tilt_scale=config.get('tilt_scale', 0.6),
         pan_center_x=config.get('pan_center_x', 0.5),
         tilt_center_y=config.get('tilt_center_y', 0.5),
     )
-    
+
     tracker = PTZTracker(
         onvif_client=onvif_client,
         profile_token=profile_token,
@@ -849,6 +1171,7 @@ def create_ptz_tracker(
         patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
+        secondary_cameras=config.get('secondary_cameras', []),
     )
-    
+
     return tracker

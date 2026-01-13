@@ -601,29 +601,40 @@ class PTZTracker:
     
     def _do_tracking(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
         """Execute object tracking logic."""
+        PTZ_LOGGER.info(
+            "[DO_TRACKING] Called with %d detections, frame=%dx%d",
+            len(detections), frame_width, frame_height
+        )
+
         # Update calibration with actual frame size
         self.calibration.frame_width = frame_width
         self.calibration.frame_height = frame_height
-        
+
         # Find best detection to track (highest confidence)
         best = max(detections, key=lambda d: d.confidence)
         bbox = best.bbox
-        
-        PTZ_LOGGER.debug(
-            "[TARGET_SELECT] Selected %s (%.1f%%) from %d candidates, track_id=%s",
-            best.species, best.confidence * 100, len(detections),
+
+        PTZ_LOGGER.info(
+            "[TARGET_SELECT] Selected %s (%.1f%%) bbox=[%.0f,%.0f,%.0f,%.0f] track_id=%s",
+            best.species, best.confidence * 100,
+            bbox[0], bbox[1], bbox[2], bbox[3],
             getattr(best, 'track_id', 'N/A')
         )
         
         # Calculate bbox center
         center_x = (bbox[0] + bbox[2]) / 2
         center_y = (bbox[1] + bbox[3]) / 2
-        
+
+        PTZ_LOGGER.info(
+            "[BBOX_CENTER] center=(%.0f, %.0f) in frame %dx%d",
+            center_x, center_y, frame_width, frame_height
+        )
+
         # Convert to PTZ coordinates
         target_pan, target_tilt = self.calibration.pixel_to_ptz(center_x, center_y)
         target_zoom = self.calibration.bbox_to_zoom(bbox, self.target_fill_pct)
-        
-        PTZ_LOGGER.debug(
+
+        PTZ_LOGGER.info(
             "[COORD_CALC] Pixel center=(%.0f, %.0f) -> PTZ target: pan=%.3f, tilt=%.3f, zoom=%.3f",
             center_x, center_y, target_pan, target_tilt, target_zoom
         )
@@ -643,12 +654,17 @@ class PTZTracker:
         
         # Calculate offset magnitude
         offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
-        
+
+        PTZ_LOGGER.info(
+            "[OFFSET_CALC] offset_x=%.3f, offset_y=%.3f, magnitude=%.3f, threshold=%.3f",
+            offset_x, offset_y, offset_magnitude, self.min_move_threshold
+        )
+
         # Only move if offset is significant
         if offset_magnitude < self.min_move_threshold:
             # Object is centered enough, stop movement
-            PTZ_LOGGER.debug(
-                "[DEADZONE] Target in center zone, offset=%.3f < threshold=%.3f, no move needed",
+            PTZ_LOGGER.info(
+                "[DEADZONE] Target centered - offset=%.3f < threshold=%.3f, stopping PTZ",
                 offset_magnitude, self.min_move_threshold
             )
             self._log_decision('deadzone', {
@@ -662,10 +678,10 @@ class PTZTracker:
             except Exception:
                 pass
             return False
-        
-        PTZ_LOGGER.debug(
-            "[OFFSET] Target offset: x=%.3f (%.1f%% from center), y=%.3f, magnitude=%.3f",
-            offset_x, abs(offset_x) * 100, offset_y, offset_magnitude
+
+        PTZ_LOGGER.info(
+            "[WILL_MOVE] Target NOT centered - offset=%.3f >= threshold=%.3f, will send MOVE command",
+            offset_magnitude, self.min_move_threshold
         )
         
         # Non-linear velocity curve:

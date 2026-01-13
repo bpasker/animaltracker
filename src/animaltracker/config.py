@@ -69,8 +69,6 @@ class DetectorSettings(BaseModel):
     # Generic categories (animal, bird, mammalia) require higher confidence
     # Specific species (cardinal, blue_jay) use the camera's normal threshold
     generic_confidence: Optional[float] = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
-    # MegaDetector detection threshold inside SpeciesNet (lower = more sensitive for small/distant animals)
-    detection_threshold: Optional[float] = Field(default=0.1, ge=0, le=1, description="MegaDetector threshold in SpeciesNet (lower catches more distant animals)")
 
 
 class EBirdSettings(BaseModel):

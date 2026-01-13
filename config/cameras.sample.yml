@@ -39,9 +39,6 @@ general:
     # Tiered confidence: generic categories (animal, bird) need higher confidence
     # Specific species (cardinal, blue_jay) use camera's normal threshold
     generic_confidence: 0.9       # Threshold for generic labels (0.0-1.0)
-    # MegaDetector sensitivity inside SpeciesNet (for post-processing)
-    # Lower = catches more distant/small animals but may have more false positives
-    detection_threshold: 0.1      # Default 0.1 (SpeciesNet default is 0.2)
   # eBird integration for seasonal bird filtering (optional)
   ebird:
     enabled: false                # Set to true and add API key to secrets.env

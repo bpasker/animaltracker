@@ -3213,7 +3213,7 @@ class WebServer:
                             
                             // Selected date
                             const date = params.get('date');
-                            if (date && /^\d{{4}}-\d{{2}}-\d{{2}}$/.test(date)) {{
+                            if (date && /^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(date)) {{
                                 this.state.selectedDate = date;
                             }}
                             
@@ -3774,7 +3774,7 @@ class WebServer:
                                 // Parse hour from time string (e.g., "08:23:43" or "8:23 AM")
                                 let hour = 0;
                                 if (clip.time) {{
-                                    const match = clip.time.match(/^(\d{{1,2}})/);
+                                    const match = clip.time.match(/^(\\d{{1,2}})/);
                                     if (match) {{
                                         hour = parseInt(match[1], 10);
                                         // Handle 12-hour format with PM
@@ -7286,7 +7286,7 @@ class WebServer:
                     const LOG_FILTERS = {
                         'all': null,
                         'no-http': {
-                            exclude: [/GET \//i, /POST \//i, /DELETE \//i, /PUT \//i, /HTTP\/\d/i, /\d{3} \d+ bytes/i, /aiohttp/i]
+                            exclude: [/GET \\//i, /POST \\//i, /DELETE \\//i, /PUT \\//i, /HTTP\\/\\d/i, /\\d{3} \\d+ bytes/i, /aiohttp/i]
                         },
                         'detection': {
                             include: [/detect/i, /species/i, /confidence/i, /infer/i, /YOLO/i, /SpeciesNet/i]

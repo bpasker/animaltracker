@@ -668,14 +668,14 @@ class ZoomFOVCalibrator:
         self,
         onvif_client: 'OnvifClient',
         profile_token: str,
-        min_match_confidence: float = 0.25,
+        min_match_confidence: float = 0.15,  # Lowered for better compatibility
     ):
         self.onvif_client = onvif_client
         self.profile_token = profile_token
         self.min_match_confidence = min_match_confidence
 
-        # Feature detector for image matching
-        self.orb = cv2.ORB_create(nfeatures=1000)
+        # Feature detector for image matching - increased features for better matching
+        self.orb = cv2.ORB_create(nfeatures=2000)
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
     def find_zoom_bounds_in_wide(
@@ -701,10 +701,17 @@ class ZoomFOVCalibrator:
         zoom_gray = cv2.cvtColor(zoom_frame, cv2.COLOR_BGR2GRAY)
 
         # Try different scale factors since zoom view may be various sizes
-        scale_factors = [0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6]
+        # More scale factors for better matching across different zoom levels
+        scale_factors = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8]
 
         best_result = None
         best_confidence = 0
+        total_matches_tried = 0
+
+        LOGGER.info("Matching zoom frame (%dx%d) in wide frame (%dx%d) using %d scales",
+                   zoom_frame.shape[1], zoom_frame.shape[0],
+                   wide_frame.shape[1], wide_frame.shape[0],
+                   len(scale_factors))
 
         for scale in scale_factors:
             scaled_zoom = cv2.resize(
@@ -720,22 +727,33 @@ class ZoomFOVCalibrator:
             kp_zoom, desc_zoom = self.orb.detectAndCompute(scaled_zoom, None)
 
             if desc_wide is None or desc_zoom is None:
+                LOGGER.debug("Scale %.2f: No descriptors found", scale)
                 continue
             if len(kp_wide) < 10 or len(kp_zoom) < 10:
+                LOGGER.debug("Scale %.2f: Too few keypoints (wide=%d, zoom=%d)",
+                            scale, len(kp_wide), len(kp_zoom))
                 continue
+
+            LOGGER.debug("Scale %.2f: Found %d wide keypoints, %d zoom keypoints",
+                        scale, len(kp_wide), len(kp_zoom))
 
             # Match features
             try:
                 matches = self.bf.match(desc_zoom, desc_wide)
-            except cv2.error:
+            except cv2.error as e:
+                LOGGER.debug("Scale %.2f: Match error: %s", scale, e)
                 continue
 
             if len(matches) < 4:
+                LOGGER.debug("Scale %.2f: Too few matches (%d)", scale, len(matches))
                 continue
 
             # Sort by distance (quality)
             matches = sorted(matches, key=lambda x: x.distance)
             good_matches = matches[:min(100, len(matches))]
+
+            LOGGER.debug("Scale %.2f: %d total matches, using %d best",
+                        scale, len(matches), len(good_matches))
 
             if len(good_matches) < 4:
                 continue
@@ -756,6 +774,10 @@ class ZoomFOVCalibrator:
             # Calculate inlier ratio as confidence
             inliers = mask.ravel().sum() if mask is not None else 0
             confidence = inliers / len(good_matches)
+
+            LOGGER.info("Scale %.2f: %d matches, %d inliers, conf=%.3f",
+                       scale, len(good_matches), inliers, confidence)
+            total_matches_tried += 1
 
             if confidence > best_confidence:
                 # Transform zoom frame corners to get bounding box in wide frame
@@ -779,8 +801,18 @@ class ZoomFOVCalibrator:
                     best_result = (x1, y1, x2, y2, confidence)
                     best_confidence = confidence
 
-        if best_result and best_result[4] >= self.min_match_confidence:
-            return best_result
+        LOGGER.info("Matching complete: tried %d scales, best_conf=%.3f",
+                   total_matches_tried, best_confidence)
+
+        if best_result:
+            LOGGER.info("Best match: conf=%.3f (min required=%.3f)",
+                       best_result[4], self.min_match_confidence)
+            if best_result[4] >= self.min_match_confidence:
+                return best_result
+            LOGGER.warning("Best match confidence %.3f below threshold %.3f",
+                          best_result[4], self.min_match_confidence)
+        else:
+            LOGGER.warning("No valid matches found at any scale factor")
         return None
 
     def calibrate_zoom_fov(
@@ -851,11 +883,26 @@ class ZoomFOVCalibrator:
                 LOGGER.info("Captured frames: wide=%s, zoom=%s",
                            wide_frame.shape, zoom_frame.shape)
 
+                # Save debug frames for troubleshooting
+                try:
+                    import os
+                    debug_dir = "/tmp/zoom_calibration"
+                    os.makedirs(debug_dir, exist_ok=True)
+                    zoom_pct = int(zoom * 100)
+                    cv2.imwrite(f"{debug_dir}/wide_z{zoom_pct}.jpg", wide_frame)
+                    cv2.imwrite(f"{debug_dir}/zoom_z{zoom_pct}.jpg", zoom_frame)
+                    LOGGER.info("Saved debug frames to %s/wide_z%d.jpg and zoom_z%d.jpg",
+                               debug_dir, zoom_pct, zoom_pct)
+                except Exception as e:
+                    LOGGER.warning("Could not save debug frames: %s", e)
+
                 # Find zoom view bounds in wide frame
                 result = self.find_zoom_bounds_in_wide(wide_frame, zoom_frame)
 
                 if result:
                     x1, y1, x2, y2, confidence = result
+                    LOGGER.info("Match found! bounds=(%.3f,%.3f)-(%.3f,%.3f) conf=%.3f",
+                               x1, y1, x2, y2, confidence)
                     points.append(ZoomFOVPoint(
                         zoom_level=zoom,
                         x1=x1, y1=y1, x2=x2, y2=y2,

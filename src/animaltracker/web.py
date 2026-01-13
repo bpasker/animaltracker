@@ -6452,25 +6452,33 @@ class WebServer:
         log_type = request.query.get('type', 'all')  # all, no-http, detection, tracking, events, clips, errors
         
         # Server-side filter patterns (match client-side)
+        # Patterns to exclude HTTP access logs from all filters
+        HTTP_EXCLUDE_PATTERNS = [r'GET /', r'POST /', r'DELETE /', r'PUT /', r'HTTP/\d', r'\d{3} \d+ bytes', r'aiohttp']
+
         LOG_TYPE_FILTERS = {
             'all': None,
             'no-http': {
-                'exclude': [r'GET /', r'POST /', r'DELETE /', r'PUT /', r'HTTP/\d', r'\d{3} \d+ bytes', r'aiohttp']
+                'exclude': HTTP_EXCLUDE_PATTERNS
             },
             'detection': {
-                'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet']
+                'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet'],
+                'exclude': HTTP_EXCLUDE_PATTERNS  # Exclude HTTP traffic that happens to contain "detect" in URL
             },
             'tracking': {
-                'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge']
+                'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge'],
+                'exclude': HTTP_EXCLUDE_PATTERNS
             },
             'events': {
-                'include': [r'event', r'started tracking', r'closed', r'clip at']
+                'include': [r'event', r'started tracking', r'closed', r'clip at'],
+                'exclude': HTTP_EXCLUDE_PATTERNS
             },
             'clips': {
-                'include': [r'clip', r'recording', r'write_clip', r'storage', r'\.mp4']
+                'include': [r'clip', r'recording', r'write_clip', r'storage', r'\.mp4'],
+                'exclude': HTTP_EXCLUDE_PATTERNS
             },
             'errors': {
-                'include': [r'error', r'warning', r'failed', r'exception', r'traceback']
+                'include': [r'error', r'warning', r'failed', r'exception', r'traceback'],
+                'exclude': HTTP_EXCLUDE_PATTERNS
             }
         }
         
@@ -6479,19 +6487,24 @@ class WebServer:
             filter_config = LOG_TYPE_FILTERS.get(filter_type)
             if not filter_config:
                 return True
-            
+
+            # Always check exclusions first (e.g., exclude HTTP traffic)
             if 'exclude' in filter_config:
                 for pattern in filter_config['exclude']:
                     if regex.search(pattern, message, regex.IGNORECASE):
                         return False
+
+            # If only exclusions defined, pass everything not excluded
+            if 'exclude' in filter_config and 'include' not in filter_config:
                 return True
-            
+
+            # Check inclusions - must match at least one pattern
             if 'include' in filter_config:
                 for pattern in filter_config['include']:
                     if regex.search(pattern, message, regex.IGNORECASE):
                         return True
                 return False
-            
+
             return True
         
         logs = []
@@ -6897,7 +6910,7 @@ class WebServer:
                         border-radius: 6px;
                         font-size: 0.85em;
                     }
-                    .refresh-logs-btn {
+                    .refresh-logs-btn, .copy-logs-btn {
                         background: #333;
                         color: #fff;
                         border: none;
@@ -6906,7 +6919,9 @@ class WebServer:
                         cursor: pointer;
                         font-size: 0.85em;
                     }
-                    .refresh-logs-btn:hover { background: #444; }
+                    .refresh-logs-btn:hover, .copy-logs-btn:hover { background: #444; }
+                    .copy-logs-btn { background: #2a5a2a; }
+                    .copy-logs-btn:hover { background: #3a6a3a; }
                     /* Reprocessing jobs */
                     .reprocessing-list {
                         display: flex;
@@ -7114,8 +7129,13 @@ class WebServer:
                             <option value="30" selected>Last 30 min</option>
                             <option value="60">Last 1 hour</option>
                             <option value="120">Last 2 hours</option>
+                            <option value="360">Last 6 hours</option>
+                            <option value="720">Last 12 hours</option>
+                            <option value="1440">Last 24 hours</option>
+                            <option value="2880">Last 48 hours</option>
                         </select>
                         <button class="refresh-logs-btn" onclick="loadLogs()">↻ Refresh</button>
+                        <button class="copy-logs-btn" onclick="copyLogs()">📋 Copy</button>
                     </div>
                     <div class="log-info" id="logInfo">Loading...</div>
                     <div class="log-container" id="logContainer">
@@ -7392,6 +7412,60 @@ class WebServer:
                             logInfo.textContent = 'Error loading logs';
                             logContainer.innerHTML = '<div class="log-empty">Failed to load logs: ' + e + '</div>';
                         }
+                    }
+
+                    function copyLogs() {
+                        const logContainer = document.getElementById('logContainer');
+                        const logEntries = logContainer.querySelectorAll('.log-entry');
+
+                        if (logEntries.length === 0) {
+                            alert('No logs to copy');
+                            return;
+                        }
+
+                        // Build plain text version of logs
+                        let text = '';
+                        logEntries.forEach(entry => {
+                            const time = entry.querySelector('.log-time')?.textContent || '';
+                            const camera = entry.querySelector('.log-camera')?.textContent || '';
+                            const level = entry.querySelector('.log-level')?.textContent || '';
+                            const message = entry.querySelector('.log-message')?.textContent || '';
+                            text += `${time} ${camera ? '[' + camera + '] ' : ''}${level}: ${message}\n`;
+                        });
+
+                        // Copy to clipboard
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(text).then(() => {
+                                // Brief visual feedback
+                                const btn = document.querySelector('.copy-logs-btn');
+                                const originalText = btn.textContent;
+                                btn.textContent = '✓ Copied!';
+                                setTimeout(() => btn.textContent = originalText, 1500);
+                            }).catch(err => {
+                                fallbackCopy(text);
+                            });
+                        } else {
+                            fallbackCopy(text);
+                        }
+                    }
+
+                    function fallbackCopy(text) {
+                        const textarea = document.createElement('textarea');
+                        textarea.value = text;
+                        textarea.style.position = 'fixed';
+                        textarea.style.opacity = '0';
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        try {
+                            document.execCommand('copy');
+                            const btn = document.querySelector('.copy-logs-btn');
+                            const originalText = btn.textContent;
+                            btn.textContent = '✓ Copied!';
+                            setTimeout(() => btn.textContent = originalText, 1500);
+                        } catch (err) {
+                            alert('Failed to copy logs');
+                        }
+                        document.body.removeChild(textarea);
                     }
                     
                     function escapeHtml(text) {

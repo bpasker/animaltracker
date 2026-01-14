@@ -8270,7 +8270,23 @@ class WebServer:
                                            onchange="updateGlobalValue('clip', 'post_seconds', parseFloat(this.value))">
                                     <div class="setting-description">Seconds of video to record after detection ends</div>
                                 </div>
-                                
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Max Concurrent Post-Processing</label>
+                                    <input type="number" min="1" max="8" step="1"
+                                           value="${g.clip.max_concurrent_postprocess || 1}"
+                                           onchange="updateGlobalValue('clip', 'max_concurrent_postprocess', parseInt(this.value))">
+                                    <div class="setting-description">Concurrent post-processing jobs (lower = less RAM usage, requires restart)</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Max Event Duration (seconds)</label>
+                                    <input type="number" min="30" max="600" step="10"
+                                           value="${g.clip.max_event_seconds || 300}"
+                                           onchange="updateGlobalValue('clip', 'max_event_seconds', parseFloat(this.value))">
+                                    <div class="setting-description">Force-close events after this duration (prevents memory leak)</div>
+                                </div>
+
                                 <div class="setting-row">
                                     <label class="setting-label">Post-Analysis Enabled</label>
                                     <label class="toggle-switch">
@@ -8920,6 +8936,8 @@ class WebServer:
             'clip': {
                 'pre_seconds': clip_cfg.pre_seconds,
                 'post_seconds': clip_cfg.post_seconds,
+                'max_event_seconds': getattr(clip_cfg, 'max_event_seconds', 300),
+                'max_concurrent_postprocess': getattr(clip_cfg, 'max_concurrent_postprocess', 1),
                 'post_analysis': getattr(clip_cfg, 'post_analysis', True),
                 'post_analysis_confidence': getattr(clip_cfg, 'post_analysis_confidence', 0.3),
                 'post_analysis_generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
@@ -9099,6 +9117,11 @@ class WebServer:
                     runtime.general.clip.pre_seconds = float(clip['pre_seconds'])
                 if 'post_seconds' in clip:
                     runtime.general.clip.post_seconds = float(clip['post_seconds'])
+                if 'max_event_seconds' in clip:
+                    runtime.general.clip.max_event_seconds = float(clip['max_event_seconds'])
+                if 'max_concurrent_postprocess' in clip:
+                    runtime.general.clip.max_concurrent_postprocess = int(clip['max_concurrent_postprocess'])
+                    # Note: requires restart to take effect (semaphore is initialized at startup)
                 if 'post_analysis' in clip:
                     runtime.general.clip.post_analysis = bool(clip['post_analysis'])
                 if 'post_analysis_confidence' in clip:
@@ -9203,6 +9226,10 @@ class WebServer:
                     config['general']['clip']['pre_seconds'] = clip['pre_seconds']
                 if 'post_seconds' in clip:
                     config['general']['clip']['post_seconds'] = clip['post_seconds']
+                if 'max_event_seconds' in clip:
+                    config['general']['clip']['max_event_seconds'] = clip['max_event_seconds']
+                if 'max_concurrent_postprocess' in clip:
+                    config['general']['clip']['max_concurrent_postprocess'] = clip['max_concurrent_postprocess']
                 if 'post_analysis' in clip:
                     config['general']['clip']['post_analysis'] = clip['post_analysis']
                 if 'post_analysis_confidence' in clip:

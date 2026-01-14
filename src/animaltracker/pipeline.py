@@ -201,8 +201,23 @@ class EventState:
 class StreamWorker:
     # Class-level semaphore to limit concurrent post-processing across ALL cameras
     # This prevents RAM explosion when multiple clips finish simultaneously
-    # Default: 2 concurrent jobs (balances throughput vs memory usage)
-    _postprocess_semaphore = threading.Semaphore(2)
+    # Initialized by PipelineOrchestrator based on config (default: 1 concurrent job)
+    _postprocess_semaphore: threading.Semaphore = None
+    _postprocess_limit: int = 1
+
+    @classmethod
+    def set_postprocess_limit(cls, limit: int) -> None:
+        """Set the maximum concurrent post-processing jobs (called by PipelineOrchestrator)."""
+        cls._postprocess_limit = max(1, min(8, limit))
+        cls._postprocess_semaphore = threading.Semaphore(cls._postprocess_limit)
+        LOGGER.info("Post-processing concurrency limit set to %d", cls._postprocess_limit)
+
+    @classmethod
+    def _ensure_postprocess_semaphore(cls) -> threading.Semaphore:
+        """Ensure semaphore is initialized (fallback if not set by orchestrator)."""
+        if cls._postprocess_semaphore is None:
+            cls._postprocess_semaphore = threading.Semaphore(cls._postprocess_limit)
+        return cls._postprocess_semaphore
 
     def __init__(
         self,
@@ -758,7 +773,7 @@ class StreamWorker:
             """
             # Acquire semaphore to limit concurrent post-processing (prevents RAM explosion)
             # This will block if too many clips are already being processed
-            with StreamWorker._postprocess_semaphore:
+            with StreamWorker._ensure_postprocess_semaphore():
                 LOGGER.debug("Post-processing started for %s (%d frames)",
                             camera_id, len(frames))
 
@@ -1301,7 +1316,11 @@ class PipelineOrchestrator:
 
     async def run(self) -> None:
         stop_event = asyncio.Event()
-        
+
+        # Initialize post-processing concurrency limit from config
+        postprocess_limit = getattr(self.runtime.general.clip, 'max_concurrent_postprocess', 1)
+        StreamWorker.set_postprocess_limit(postprocess_limit)
+
         # Check if tracking is enabled in config
         tracking_enabled = getattr(self.runtime.general.clip, 'tracking_enabled', True)
         if tracking_enabled:

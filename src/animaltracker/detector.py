@@ -1,6 +1,7 @@
 """Detection backends: YOLO and SpeciesNet."""
 from __future__ import annotations
 
+import gc
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -10,6 +11,22 @@ from typing import List, Optional
 import numpy as np
 
 LOGGER = logging.getLogger(__name__)
+
+
+def cleanup_gpu_memory() -> None:
+    """Release unused GPU memory back to the system.
+
+    Call this periodically to prevent VRAM accumulation, especially after
+    batch processing or when models are no longer needed.
+    """
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            LOGGER.debug("GPU memory cache cleared")
+    except ImportError:
+        pass  # torch not installed, skip GPU cleanup
 
 
 class DetectorBackend(str, Enum):
@@ -872,7 +889,7 @@ def create_postprocess_detector(detector_cfg) -> BaseDetector:
 # Keep backward compatibility
 __all__ = [
     "Detection",
-    "DetectorBackend", 
+    "DetectorBackend",
     "BaseDetector",
     "YoloDetector",
     "MegaDetectorBackend",
@@ -880,4 +897,5 @@ __all__ = [
     "create_detector",
     "create_realtime_detector",
     "create_postprocess_detector",
+    "cleanup_gpu_memory",
 ]

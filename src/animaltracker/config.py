@@ -17,6 +17,7 @@ def _load_yaml(path: Path) -> dict:
 class ClipSettings(BaseModel):
     pre_seconds: float = Field(default=5.0, ge=0)
     post_seconds: float = Field(default=5.0, ge=0)
+    max_event_seconds: float = Field(default=300.0, ge=30, description="Maximum event duration in seconds (prevents memory leak from endless events)")
     format: str = "mp4"
     codec: str = "h264"
     # Thumbnail settings

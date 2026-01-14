@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
-from .detector import BaseDetector, Detection, create_detector
+from .detector import BaseDetector, Detection, create_detector, cleanup_gpu_memory
 from .tracker import ObjectTracker, create_tracker
 
 LOGGER = logging.getLogger(__name__)
@@ -1548,7 +1548,8 @@ def process_all_clips(
     )
     
     results = []
-    
+    clips_processed = 0
+
     # Find all clip files
     for clip_path in clips_dir.rglob('*.mp4'):
         # Skip if camera filter is set and this camera isn't included
@@ -1558,14 +1559,23 @@ def process_all_clips(
             camera_id = rel_path.parts[0] if rel_path.parts else None
             if camera_id and camera_id not in camera_filter:
                 continue
-        
+
         result = processor.process_clip(
             clip_path,
             update_filename=update_filenames,
             regenerate_thumbnails=regenerate_thumbnails,
         )
         results.append(result)
+        clips_processed += 1
+
+        # Periodically clear GPU memory to prevent VRAM accumulation
+        if clips_processed % 10 == 0:
+            cleanup_gpu_memory()
+            LOGGER.debug("GPU memory cleaned after %d clips", clips_processed)
     
+    # Final GPU cleanup after batch processing
+    cleanup_gpu_memory()
+
     # Summary
     successful = sum(1 for r in results if r.success)
     updated = sum(1 for r in results if r.new_path is not None)
@@ -1573,5 +1583,5 @@ def process_all_clips(
         "Post-processing complete: %d/%d clips processed, %d updated",
         successful, len(results), updated
     )
-    
+
     return results

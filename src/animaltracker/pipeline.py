@@ -15,7 +15,7 @@ import numpy as np
 from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
-from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector
+from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector, cleanup_gpu_memory
 from .ebird import EBirdClient, create_ebird_client
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
@@ -237,6 +237,11 @@ class StreamWorker:
         self._ptz_detection_sources: Optional[Dict[str, 'StreamWorker']] = None
         self._ptz_source_camera_id: Optional[str] = None  # Source camera (wide-angle)
         self._ptz_target_camera_id: Optional[str] = None  # Target camera (PTZ/zoom)
+
+        # Cached post-process detector (lazy initialization to avoid loading if not needed)
+        # This prevents creating a new SpeciesNet model for every clip (VRAM leak fix)
+        self._postprocess_detector: Optional[BaseDetector] = None
+        self._postprocess_detector_lock = threading.Lock()
         
         if camera.onvif and camera.onvif.host:
             user, password = camera.onvif.credentials()
@@ -284,6 +289,23 @@ class StreamWorker:
                             LOGGER.info(f"ONVIF {camera.id}: Using first profile '{self.onvif_profile_token}'")
                 except Exception as e:
                     LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
+
+    def _get_postprocess_detector(self) -> BaseDetector:
+        """Get or create the cached post-process detector (thread-safe).
+
+        This lazily initializes a SpeciesNet detector for post-processing clips.
+        The detector is cached to avoid loading a new model for every clip,
+        which would cause VRAM accumulation/leak on GPU.
+        """
+        if self._postprocess_detector is None:
+            with self._postprocess_detector_lock:
+                # Double-check after acquiring lock
+                if self._postprocess_detector is None:
+                    detector_cfg = self.runtime.general.detector
+                    LOGGER.info("Initializing cached post-process detector for %s", self.camera.id)
+                    self._postprocess_detector = create_postprocess_detector(detector_cfg)
+                    LOGGER.info("Post-process detector ready: %s", self._postprocess_detector.backend_name)
+        return self._postprocess_detector
 
     def save_manual_clip(self) -> Optional[str]:
         """Save the last 30 seconds of video buffer as a manual clip."""
@@ -383,7 +405,17 @@ class StreamWorker:
                     # Capture every frame for active events (even if inference is skipped)
                     if self.event_state is not None:
                         self.event_state.frames.append((frame_ts, frame))
-                    
+
+                        # Force-close events that exceed max duration (prevents memory leak)
+                        max_duration = self.runtime.general.clip.max_event_seconds
+                        event_elapsed = frame_ts - self.event_state.start_ts
+                        if event_elapsed > max_duration:
+                            LOGGER.warning(
+                                "Event for %s exceeded max duration (%.1fs > %.1fs, %d frames) - force closing to prevent memory leak",
+                                self.camera.id, event_elapsed, max_duration, len(self.event_state.frames)
+                            )
+                            await self._close_event(frame_ts)
+
                     # Skip inference on some frames to save CPU
                     frame_count += 1
                     if frame_count % skip_factor != 0:
@@ -750,12 +782,10 @@ class StreamWorker:
             if use_unified_processor:
                 try:
                     from .postprocess import ClipPostProcessor, ProcessingSettings
-                    from .detector import create_postprocess_detector
-                    
-                    # Create SpeciesNet detector for post-processing (split-model architecture)
-                    # This gives accurate species ID while YOLO handles real-time tracking
-                    postprocess_detector = create_postprocess_detector(detector_config)
-                    LOGGER.debug("Post-processing with %s detector", postprocess_detector.backend_name)
+
+                    # Use cached detector to avoid VRAM leak (was creating new model per clip)
+                    postprocess_detector = self._get_postprocess_detector()
+                    LOGGER.debug("Post-processing with %s detector (cached)", postprocess_detector.backend_name)
                     
                     # Use settings from config
                     clip_cfg = self.runtime.general.clip
@@ -823,7 +853,10 @@ class StreamWorker:
                             return  # Skip notification - no animal detected
                 except Exception as e:
                     LOGGER.error("Unified post-processing failed: %s", e)
-            
+                finally:
+                    # Periodically clear GPU memory to prevent VRAM accumulation
+                    cleanup_gpu_memory()
+
             # Step 5.5: Append PTZ decisions to the processing log if available
             if ptz_decisions:
                 try:

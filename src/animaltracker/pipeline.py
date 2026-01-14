@@ -199,6 +199,11 @@ class EventState:
 
 
 class StreamWorker:
+    # Class-level semaphore to limit concurrent post-processing across ALL cameras
+    # This prevents RAM explosion when multiple clips finish simultaneously
+    # Default: 2 concurrent jobs (balances throughput vs memory usage)
+    _postprocess_semaphore = threading.Semaphore(2)
+
     def __init__(
         self,
         camera: CameraConfig,
@@ -743,199 +748,208 @@ class StreamWorker:
         
         def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions, detector_config):
             """Finalize event with optional post-clip species analysis.
-            
+
             Split-model architecture:
             - Real-time: YOLO was used for fast detection/PTZ tracking
             - Post-processing: SpeciesNet is used for accurate species identification
+
+            Uses class-level semaphore to limit concurrent post-processing and prevent
+            RAM explosion when multiple clips finish simultaneously.
             """
-            final_species = ctx_base['species']
-            final_confidence = ctx_base['confidence']
-            tracks_count = 1  # Default assumption
-            
-            # Step 1: Run post-clip analysis if enabled (OLD approach - analyze in memory)
-            if post_analysis_enabled and not use_unified_processor:
-                refined_species, refined_confidence = self._analyze_clip_frames(
-                    frames, num_samples=post_analysis_frames
-                )
-                # Use refined species if we got a more specific identification
-                if refined_species:
-                    final_species = refined_species
-                    final_confidence = max(refined_confidence, ctx_base['confidence'])
-            
-            # Step 2: Build clip path with (potentially refined) species
-            clip_path = self.storage.build_clip_path(
-                camera_id,
-                final_species,
-                start_ts,
-                clip_format,
-            )
-            
-            # Step 3: Write the clip
-            self.storage.write_clip(frames, clip_path)
-            
-            # Step 4: Save detection thumbnails for each species (skip if unified processor will regenerate)
-            if species_key_frames and not use_unified_processor:
-                self.storage.save_detection_thumbnails(clip_path, species_key_frames)
-            
-            # Step 5: Run UNIFIED post-processor if enabled (NEW approach - analyze saved file)
-            # Uses SpeciesNet for accurate species identification (split-model architecture)
-            if use_unified_processor:
-                try:
-                    from .postprocess import ClipPostProcessor, ProcessingSettings
+            # Acquire semaphore to limit concurrent post-processing (prevents RAM explosion)
+            # This will block if too many clips are already being processed
+            with StreamWorker._postprocess_semaphore:
+                LOGGER.debug("Post-processing started for %s (%d frames)",
+                            camera_id, len(frames))
 
-                    # Use cached detector to avoid VRAM leak (was creating new model per clip)
-                    postprocess_detector = self._get_postprocess_detector()
-                    LOGGER.debug("Post-processing with %s detector (cached)", postprocess_detector.backend_name)
-                    
-                    # Use settings from config
-                    clip_cfg = self.runtime.general.clip
-                    settings = ProcessingSettings(
-                        sample_rate=getattr(clip_cfg, 'sample_rate', 3),
-                        confidence_threshold=getattr(clip_cfg, 'post_analysis_confidence', 0.3),
-                        generic_confidence=getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
-                        tracking_enabled=getattr(clip_cfg, 'tracking_enabled', True),
-                        merge_enabled=True,
-                        same_species_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
-                        spatial_merge_enabled=getattr(clip_cfg, 'spatial_merge_enabled', True),
-                        spatial_merge_iou=getattr(clip_cfg, 'spatial_merge_iou', 0.3),
-                        spatial_merge_gap=30,
-                        hierarchical_merge_enabled=getattr(clip_cfg, 'hierarchical_merge_enabled', True),
-                        hierarchical_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
-                        single_animal_mode=getattr(clip_cfg, 'single_animal_mode', False),
-                        thumbnail_cropped=getattr(clip_cfg, 'thumbnail_cropped', True),
-                    )
-                    processor = ClipPostProcessor(
-                        detector=postprocess_detector,
-                        storage_root=storage_root,
-                        settings=settings,
-                    )
-                    result = processor.process_clip(
-                        clip_path,
-                        update_filename=True,
-                        regenerate_thumbnails=True,
-                    )
-                    if result.success:
-                        final_species = result.new_species
-                        final_confidence = result.confidence
-                        tracks_count = result.tracks_detected
-                        # Update clip_path if file was renamed
-                        if result.new_path:
-                            clip_path = result.new_path
-                        LOGGER.info("Post-processing complete (%s): %s (%.1f%%, %d tracks, %d raw detections)", 
-                                   postprocess_detector.backend_name,
-                                   final_species, final_confidence * 100, tracks_count, result.raw_detections)
-                        
-                        # Check if post-processing found NO animal (false positive from real-time detector)
-                        # If delete_if_no_animal is enabled, clean up and skip notification
-                        delete_if_no_animal = getattr(clip_cfg, 'delete_if_no_animal', True)
-                        if delete_if_no_animal and result.raw_detections == 0:
-                            LOGGER.info(
-                                "Post-processing found NO animal in clip for %s - deleting false positive and skipping notification",
-                                camera_id
-                            )
-                            # Delete the clip file and any associated files
-                            try:
-                                if clip_path.exists():
-                                    clip_path.unlink()
-                                    LOGGER.debug("Deleted false positive clip: %s", clip_path)
-                                # Delete associated thumbnails
-                                thumb_pattern = clip_path.stem + "_thumb*.jpg"
-                                for thumb_file in clip_path.parent.glob(thumb_pattern):
-                                    thumb_file.unlink()
-                                    LOGGER.debug("Deleted thumbnail: %s", thumb_file)
-                                # Delete processing log
-                                log_file = clip_path.with_suffix('.log.json')
-                                if log_file.exists():
-                                    log_file.unlink()
-                                    LOGGER.debug("Deleted log file: %s", log_file)
-                            except Exception as e:
-                                LOGGER.warning("Failed to clean up false positive clip files: %s", e)
-                            return  # Skip notification - no animal detected
-                except Exception as e:
-                    LOGGER.error("Unified post-processing failed: %s", e)
-                finally:
-                    # Periodically clear GPU memory to prevent VRAM accumulation
-                    cleanup_gpu_memory()
+                final_species = ctx_base['species']
+                final_confidence = ctx_base['confidence']
+                tracks_count = 1  # Default assumption
 
-            # Step 5.5: Append PTZ decisions to the processing log if available
-            if ptz_decisions:
-                try:
-                    import json
-                    log_path = clip_path.with_suffix('.log.json')
-                    if log_path.exists():
-                        # Merge with existing log
-                        with open(log_path, 'r') as f:
-                            log_data = json.load(f)
-                        log_data['ptz_decisions'] = ptz_decisions
-                        with open(log_path, 'w') as f:
-                            json.dump(log_data, f, indent=2, default=str)
-                        LOGGER.debug("Added %d PTZ decisions to processing log", len(ptz_decisions))
-                    else:
-                        # Create new log file with just PTZ data
-                        log_data = {
-                            'clip': str(clip_path.name),
-                            'ptz_decisions': ptz_decisions,
-                        }
-                        with open(log_path, 'w') as f:
-                            json.dump(log_data, f, indent=2, default=str)
-                        LOGGER.debug("Created PTZ log with %d decisions", len(ptz_decisions))
-                except Exception as e:
-                    LOGGER.warning("Failed to save PTZ decisions: %s", e)
-            
-            # Step 6: Check if final species is excluded (post-processing may have reclassified)
-            # If excluded, delete the clip and skip notification
-            if all_excludes and species_matches_exclude(final_species, all_excludes):
-                LOGGER.info(
-                    "Post-processing identified excluded species '%s' for %s - deleting clip and skipping notification",
-                    final_species, camera_id
+                # Step 1: Run post-clip analysis if enabled (OLD approach - analyze in memory)
+                if post_analysis_enabled and not use_unified_processor:
+                    refined_species, refined_confidence = self._analyze_clip_frames(
+                        frames, num_samples=post_analysis_frames
+                    )
+                    # Use refined species if we got a more specific identification
+                    if refined_species:
+                        final_species = refined_species
+                        final_confidence = max(refined_confidence, ctx_base['confidence'])
+
+                # Step 2: Build clip path with (potentially refined) species
+                clip_path = self.storage.build_clip_path(
+                    camera_id,
+                    final_species,
+                    start_ts,
+                    clip_format,
                 )
-                # Delete the clip file and any associated thumbnails
+
+                # Step 3: Write the clip
+                self.storage.write_clip(frames, clip_path)
+
+                # Step 4: Save detection thumbnails for each species (skip if unified processor will regenerate)
+                if species_key_frames and not use_unified_processor:
+                    self.storage.save_detection_thumbnails(clip_path, species_key_frames)
+
+                # Step 5: Run UNIFIED post-processor if enabled (NEW approach - analyze saved file)
+                # Uses SpeciesNet for accurate species identification (split-model architecture)
+                if use_unified_processor:
+                    try:
+                        from .postprocess import ClipPostProcessor, ProcessingSettings
+
+                        # Use cached detector to avoid VRAM leak (was creating new model per clip)
+                        postprocess_detector = self._get_postprocess_detector()
+                        LOGGER.debug("Post-processing with %s detector (cached)", postprocess_detector.backend_name)
+
+                        # Use settings from config
+                        clip_cfg = self.runtime.general.clip
+                        settings = ProcessingSettings(
+                            sample_rate=getattr(clip_cfg, 'sample_rate', 3),
+                            confidence_threshold=getattr(clip_cfg, 'post_analysis_confidence', 0.3),
+                            generic_confidence=getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
+                            tracking_enabled=getattr(clip_cfg, 'tracking_enabled', True),
+                            merge_enabled=True,
+                            same_species_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
+                            spatial_merge_enabled=getattr(clip_cfg, 'spatial_merge_enabled', True),
+                            spatial_merge_iou=getattr(clip_cfg, 'spatial_merge_iou', 0.3),
+                            spatial_merge_gap=30,
+                            hierarchical_merge_enabled=getattr(clip_cfg, 'hierarchical_merge_enabled', True),
+                            hierarchical_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
+                            single_animal_mode=getattr(clip_cfg, 'single_animal_mode', False),
+                            thumbnail_cropped=getattr(clip_cfg, 'thumbnail_cropped', True),
+                        )
+                        processor = ClipPostProcessor(
+                            detector=postprocess_detector,
+                            storage_root=storage_root,
+                            settings=settings,
+                        )
+                        result = processor.process_clip(
+                            clip_path,
+                            update_filename=True,
+                            regenerate_thumbnails=True,
+                        )
+                        if result.success:
+                            final_species = result.new_species
+                            final_confidence = result.confidence
+                            tracks_count = result.tracks_detected
+                            # Update clip_path if file was renamed
+                            if result.new_path:
+                                clip_path = result.new_path
+                            LOGGER.info("Post-processing complete (%s): %s (%.1f%%, %d tracks, %d raw detections)",
+                                       postprocess_detector.backend_name,
+                                       final_species, final_confidence * 100, tracks_count, result.raw_detections)
+
+                            # Check if post-processing found NO animal (false positive from real-time detector)
+                            # If delete_if_no_animal is enabled, clean up and skip notification
+                            delete_if_no_animal = getattr(clip_cfg, 'delete_if_no_animal', True)
+                            if delete_if_no_animal and result.raw_detections == 0:
+                                LOGGER.info(
+                                    "Post-processing found NO animal in clip for %s - deleting false positive and skipping notification",
+                                    camera_id
+                                )
+                                # Delete the clip file and any associated files
+                                try:
+                                    if clip_path.exists():
+                                        clip_path.unlink()
+                                        LOGGER.debug("Deleted false positive clip: %s", clip_path)
+                                    # Delete associated thumbnails
+                                    thumb_pattern = clip_path.stem + "_thumb*.jpg"
+                                    for thumb_file in clip_path.parent.glob(thumb_pattern):
+                                        thumb_file.unlink()
+                                        LOGGER.debug("Deleted thumbnail: %s", thumb_file)
+                                    # Delete processing log
+                                    log_file = clip_path.with_suffix('.log.json')
+                                    if log_file.exists():
+                                        log_file.unlink()
+                                        LOGGER.debug("Deleted log file: %s", log_file)
+                                except Exception as e:
+                                    LOGGER.warning("Failed to clean up false positive clip files: %s", e)
+                                return  # Skip notification - no animal detected
+                    except Exception as e:
+                        LOGGER.error("Unified post-processing failed: %s", e)
+                    finally:
+                        # Periodically clear GPU memory to prevent VRAM accumulation
+                        cleanup_gpu_memory()
+
+                # Step 5.5: Append PTZ decisions to the processing log if available
+                if ptz_decisions:
+                    try:
+                        import json
+                        log_path = clip_path.with_suffix('.log.json')
+                        if log_path.exists():
+                            # Merge with existing log
+                            with open(log_path, 'r') as f:
+                                log_data = json.load(f)
+                            log_data['ptz_decisions'] = ptz_decisions
+                            with open(log_path, 'w') as f:
+                                json.dump(log_data, f, indent=2, default=str)
+                            LOGGER.debug("Added %d PTZ decisions to processing log", len(ptz_decisions))
+                        else:
+                            # Create new log file with just PTZ data
+                            log_data = {
+                                'clip': str(clip_path.name),
+                                'ptz_decisions': ptz_decisions,
+                            }
+                            with open(log_path, 'w') as f:
+                                json.dump(log_data, f, indent=2, default=str)
+                            LOGGER.debug("Created PTZ log with %d decisions", len(ptz_decisions))
+                    except Exception as e:
+                        LOGGER.warning("Failed to save PTZ decisions: %s", e)
+
+                # Step 6: Check if final species is excluded (post-processing may have reclassified)
+                # If excluded, delete the clip and skip notification
+                if all_excludes and species_matches_exclude(final_species, all_excludes):
+                    LOGGER.info(
+                        "Post-processing identified excluded species '%s' for %s - deleting clip and skipping notification",
+                        final_species, camera_id
+                    )
+                    # Delete the clip file and any associated thumbnails
+                    try:
+                        if clip_path.exists():
+                            clip_path.unlink()
+                            LOGGER.debug("Deleted excluded clip: %s", clip_path)
+                        # Delete associated thumbnails (same base name with _thumb*.jpg pattern)
+                        thumb_pattern = clip_path.stem + "_thumb*.jpg"
+                        for thumb_file in clip_path.parent.glob(thumb_pattern):
+                            thumb_file.unlink()
+                            LOGGER.debug("Deleted thumbnail: %s", thumb_file)
+                        # Delete processing log if it exists
+                        log_file = clip_path.with_suffix('.log.json')
+                        if log_file.exists():
+                            log_file.unlink()
+                            LOGGER.debug("Deleted log file: %s", log_file)
+                    except Exception as e:
+                        LOGGER.warning("Failed to clean up excluded clip files: %s", e)
+                    return  # Skip notification for excluded species
+
+                # Step 7: Find thumbnail for notification
+                thumbnail_path = None
                 try:
-                    if clip_path.exists():
-                        clip_path.unlink()
-                        LOGGER.debug("Deleted excluded clip: %s", clip_path)
-                    # Delete associated thumbnails (same base name with _thumb*.jpg pattern)
-                    thumb_pattern = clip_path.stem + "_thumb*.jpg"
-                    for thumb_file in clip_path.parent.glob(thumb_pattern):
-                        thumb_file.unlink()
-                        LOGGER.debug("Deleted thumbnail: %s", thumb_file)
-                    # Delete processing log if it exists
-                    log_file = clip_path.with_suffix('.log.json')
-                    if log_file.exists():
-                        log_file.unlink()
-                        LOGGER.debug("Deleted log file: %s", log_file)
+                    thumb_pattern = clip_path.stem + "_thumb_*.jpg"
+                    thumb_files = list(clip_path.parent.glob(thumb_pattern))
+                    if thumb_files:
+                        # Use the first thumbnail found (usually the main species)
+                        thumbnail_path = str(thumb_files[0])
+                        LOGGER.debug("Found thumbnail for notification: %s", thumbnail_path)
                 except Exception as e:
-                    LOGGER.warning("Failed to clean up excluded clip files: %s", e)
-                return  # Skip notification for excluded species
-            
-            # Step 7: Find thumbnail for notification
-            thumbnail_path = None
-            try:
-                thumb_pattern = clip_path.stem + "_thumb_*.jpg"
-                thumb_files = list(clip_path.parent.glob(thumb_pattern))
-                if thumb_files:
-                    # Use the first thumbnail found (usually the main species)
-                    thumbnail_path = str(thumb_files[0])
-                    LOGGER.debug("Found thumbnail for notification: %s", thumbnail_path)
-            except Exception as e:
-                LOGGER.warning("Failed to find thumbnail: %s", e)
-            
-            # Step 8: Send notification with refined info
-            ctx = NotificationContext(
-                species=final_species,
-                confidence=final_confidence,
-                camera_id=ctx_base['camera_id'],
-                camera_name=ctx_base['camera_name'],
-                clip_path=str(clip_path),
-                event_started_at=ctx_base['event_started_at'],
-                event_duration=ctx_base['event_duration'],
-                thumbnail_path=thumbnail_path,
-                storage_root=str(storage_root),
-                web_base_url=web_base_url,
-            )
-            self.notifier.send(ctx, priority=priority, sound=sound)
-            LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)", 
-                       ctx.camera_id, clip_path, final_species, tracks_count)
+                    LOGGER.warning("Failed to find thumbnail: %s", e)
+
+                # Step 8: Send notification with refined info
+                ctx = NotificationContext(
+                    species=final_species,
+                    confidence=final_confidence,
+                    camera_id=ctx_base['camera_id'],
+                    camera_name=ctx_base['camera_name'],
+                    clip_path=str(clip_path),
+                    event_started_at=ctx_base['event_started_at'],
+                    event_duration=ctx_base['event_duration'],
+                    thumbnail_path=thumbnail_path,
+                    storage_root=str(storage_root),
+                    web_base_url=web_base_url,
+                )
+                self.notifier.send(ctx, priority=priority, sound=sound)
+                LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)",
+                           ctx.camera_id, clip_path, final_species, tracks_count)
 
         # Use tracked species if available (more accurate than raw detections)
         tracked_species = self.event_state.get_tracked_species_label()

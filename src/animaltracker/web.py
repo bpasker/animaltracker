@@ -8236,19 +8236,29 @@ class WebServer:
                         const html = `
                             <div class="settings-card">
                                 <h2>🎯 Detector Settings</h2>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Backend</label>
-                                    <input type="text" value="${g.detector.backend}" disabled 
-                                           style="opacity: 0.6; cursor: not-allowed;">
-                                    <div class="setting-description">Detection backend (requires restart to change)</div>
+                                <div class="setting-description" style="margin-bottom: 16px; padding: 10px; background: rgba(76,175,80,0.1); border-radius: 6px;">
+                                    Split-model architecture: Fast detector for real-time streaming, accurate detector for post-processing clips. Edit cameras.yml to change (requires restart).
                                 </div>
-                                
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Real-time Detector</label>
+                                    <input type="text" value="${g.detector.realtime_backend || g.detector.backend}" disabled
+                                           style="opacity: 0.6; cursor: not-allowed;">
+                                    <div class="setting-description">Fast detector for live streaming and PTZ tracking (MegaDetector ~50-150ms)</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Post-Processing Detector</label>
+                                    <input type="text" value="${g.detector.postprocess_backend || 'speciesnet'}" disabled
+                                           style="opacity: 0.6; cursor: not-allowed;">
+                                    <div class="setting-description">Accurate detector for clip analysis after recording (SpeciesNet ~200-500ms)</div>
+                                </div>
+
                                 <div class="setting-row">
                                     <label class="setting-label">Location</label>
-                                    <input type="text" value="${g.detector.country || ''} ${g.detector.admin1_region || ''}" disabled 
+                                    <input type="text" value="${g.detector.country || ''} ${g.detector.admin1_region || ''}" disabled
                                            style="opacity: 0.6; cursor: not-allowed;">
-                                    <div class="setting-description">Geographic priors (edit cameras.yml to change)</div>
+                                    <div class="setting-description">Geographic priors for species filtering (e.g., USA MN)</div>
                                 </div>
                             </div>
                             
@@ -8311,14 +8321,24 @@ class WebServer:
                                 <div class="setting-row">
                                     <label class="setting-label">Post-Analysis Generic Confidence</label>
                                     <div class="slider-container">
-                                        <input type="range" min="0" max="100" step="5" 
+                                        <input type="range" min="0" max="100" step="5"
                                                value="${Math.round((g.clip.post_analysis_generic_confidence || 0.5) * 100)}"
                                                oninput="updateGlobalSlider(this, 'clip', 'post_analysis_generic_confidence')">
                                         <span class="slider-value" id="post_analysis_generic_confidence-value">${Math.round((g.clip.post_analysis_generic_confidence || 0.5) * 100)}%</span>
                                     </div>
                                     <div class="setting-description">Generic category threshold for post-analysis (animal, bird, etc.)</div>
                                 </div>
-                                
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Delete False Positives</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${g.clip.delete_if_no_animal !== false ? 'checked' : ''}
+                                               onchange="updateGlobalValue('clip', 'delete_if_no_animal', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Automatically delete clips where post-analysis finds no animal (reduces false positives from leaves, shadows)</div>
+                                </div>
+
                                 <div class="setting-row">
                                     <label class="setting-label">Sample Rate</label>
                                     <input type="number" min="1" max="30" step="1"
@@ -8428,58 +8448,6 @@ class WebServer:
                                 </div>
                             </div>
                             
-                            <div class="settings-card">
-                                <h2>🐦 eBird Integration</h2>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Enable eBird Filtering</label>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" ${g.ebird?.enabled ? 'checked' : ''}
-                                               onchange="updateGlobalValue('ebird', 'enabled', this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
-                                    <div class="setting-description">Filter/flag bird detections based on recent eBird sightings. Requires EBIRD_API_KEY env variable.</div>
-                                </div>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">eBird Region</label>
-                                    <input type="text" value="${g.ebird?.region || 'US-MN'}"
-                                           placeholder="US-MN"
-                                           onchange="updateGlobalValue('ebird', 'region', this.value)"
-                                           style="width: 150px;">
-                                    <div class="setting-description">Region code (e.g., US-MN, US-CA, CA-ON). See <a href="https://ebird.org/region/world" target="_blank">eBird regions</a></div>
-                                </div>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Days Back</label>
-                                    <input type="number" min="1" max="30" step="1"
-                                           value="${g.ebird?.days_back || 14}"
-                                           onchange="updateGlobalValue('ebird', 'days_back', parseInt(this.value))">
-                                    <div class="setting-description">How many days of recent sightings to check (1-30)</div>
-                                </div>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Filter Mode</label>
-                                    <select onchange="updateGlobalValue('ebird', 'filter_mode', this.value)">
-                                        <option value="flag" ${(g.ebird?.filter_mode || 'flag') === 'flag' ? 'selected' : ''}>Flag Only</option>
-                                        <option value="filter" ${(g.ebird?.filter_mode) === 'filter' ? 'selected' : ''}>Filter Out</option>
-                                        <option value="boost" ${(g.ebird?.filter_mode) === 'boost' ? 'selected' : ''}>Boost Priority</option>
-                                    </select>
-                                    <div class="setting-description">Flag: log unusual species. Filter: reject species not seen recently. Boost: prioritize common species.</div>
-                                </div>
-                                
-                                <div class="setting-row">
-                                    <label class="setting-label">Cache Hours</label>
-                                    <input type="number" min="1" max="168" step="1"
-                                           value="${g.ebird?.cache_hours || 24}"
-                                           onchange="updateGlobalValue('ebird', 'cache_hours', parseInt(this.value))">
-                                    <div class="setting-description">How long to cache eBird data before refreshing (hours)</div>
-                                </div>
-                                
-                                <div class="setting-description" style="margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
-                                    <small>Species data provided by <a href="https://ebird.org" target="_blank">eBird.org</a>. Free API key at <a href="https://ebird.org/api/keygen" target="_blank">ebird.org/api/keygen</a></small>
-                                </div>
-                            </div>
                         `;
                         document.getElementById('settingsContent').innerHTML = html;
                     }
@@ -8508,7 +8476,8 @@ class WebServer:
                         const recentDetections = cam.recent_detections || {};
                         const rtsp = cam.rtsp || {};
                         const notify = cam.notification || {};
-                        
+                        const ptz = cam.ptz_tracking || {};
+
                         const html = `
                             <div class="settings-card">
                                 <h2>🔍 Detection Settings</h2>
@@ -8646,7 +8615,60 @@ class WebServer:
                                     <div class="setting-description">Notification sound</div>
                                 </div>
                             </div>
-                            
+
+                            <div class="settings-card">
+                                <h2>🎯 PTZ Tracking</h2>
+                                <div class="setting-description" style="margin-bottom: 12px;">
+                                    Automatic pan-tilt-zoom tracking to follow detected animals. Configure in cameras.yml for full control.
+                                </div>
+
+                                <div class="setting-row">
+                                    <label class="setting-label">PTZ Tracking Enabled</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${ptz.enabled ? 'checked' : ''} disabled
+                                               style="opacity: 0.6;">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Enable PTZ auto-tracking (edit cameras.yml to change)</div>
+                                </div>
+
+                                ${ptz.enabled ? `
+                                <div class="setting-row">
+                                    <label class="setting-label">Target Camera</label>
+                                    <input type="text" value="${ptz.target_camera_id || 'self'}" disabled
+                                           style="opacity: 0.6; cursor: not-allowed;">
+                                    <div class="setting-description">Camera to control (self or another camera ID)</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Multi-Camera Tracking</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${ptz.multi_camera_tracking !== false ? 'checked' : ''} disabled
+                                               style="opacity: 0.6;">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Allow target camera detections to take over for finer control</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Target Fill</label>
+                                    <input type="text" value="${Math.round((ptz.target_fill_pct || 0.6) * 100)}%" disabled
+                                           style="opacity: 0.6; cursor: not-allowed; width: 80px;">
+                                    <div class="setting-description">How much of the frame the animal should fill</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <label class="setting-label">Patrol Mode</label>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${ptz.patrol_enabled !== false ? 'checked' : ''} disabled
+                                               style="opacity: 0.6;">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div class="setting-description">Sweep to scan for objects when nothing detected</div>
+                                </div>
+                                ` : ''}
+                            </div>
+
                             <div class="settings-card">
                                 <h2>✅ Include Species</h2>
                                 <div class="setting-description" style="margin-bottom: 12px;">
@@ -8916,6 +8938,15 @@ class WebServer:
                     'priority': getattr(cam.notification, 'priority', 0),
                     'sound': getattr(cam.notification, 'sound', 'pushover'),
                 },
+                'ptz_tracking': {
+                    'enabled': getattr(cam.ptz_tracking, 'enabled', False),
+                    'target_camera_id': getattr(cam.ptz_tracking, 'target_camera_id', None),
+                    'self_track': getattr(cam.ptz_tracking, 'self_track', False),
+                    'multi_camera_tracking': getattr(cam.ptz_tracking, 'multi_camera_tracking', True),
+                    'target_fill_pct': getattr(cam.ptz_tracking, 'target_fill_pct', 0.6),
+                    'patrol_enabled': getattr(cam.ptz_tracking, 'patrol_enabled', True),
+                    'patrol_return_delay': getattr(cam.ptz_tracking, 'patrol_return_delay', 2.0),
+                },
                 'recent_detections': recent_detections.get(cam_id, {}),
             }
         
@@ -8923,11 +8954,12 @@ class WebServer:
         detector_cfg = runtime.general.detector
         clip_cfg = runtime.general.clip
         retention_cfg = runtime.general.retention
-        ebird_cfg = runtime.general.ebird
-        
+
         global_settings = {
             'detector': {
                 'backend': detector_cfg.backend,
+                'realtime_backend': getattr(detector_cfg, 'realtime_backend', 'megadetector'),
+                'postprocess_backend': getattr(detector_cfg, 'postprocess_backend', 'speciesnet'),
                 'speciesnet_version': getattr(detector_cfg, 'speciesnet_version', 'v4.0.2a'),
                 'country': getattr(detector_cfg, 'country', None),
                 'admin1_region': getattr(detector_cfg, 'admin1_region', None),
@@ -8941,6 +8973,7 @@ class WebServer:
                 'post_analysis': getattr(clip_cfg, 'post_analysis', True),
                 'post_analysis_confidence': getattr(clip_cfg, 'post_analysis_confidence', 0.3),
                 'post_analysis_generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
+                'delete_if_no_animal': getattr(clip_cfg, 'delete_if_no_animal', True),
                 'sample_rate': getattr(clip_cfg, 'sample_rate', 3),
                 'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True),
                 'track_merge_gap': getattr(clip_cfg, 'track_merge_gap', 120),
@@ -8954,13 +8987,6 @@ class WebServer:
                 'min_days': retention_cfg.min_days,
                 'max_days': retention_cfg.max_days,
                 'max_utilization_pct': retention_cfg.max_utilization_pct,
-            },
-            'ebird': {
-                'enabled': getattr(ebird_cfg, 'enabled', False),
-                'region': getattr(ebird_cfg, 'region', 'US-MN'),
-                'days_back': getattr(ebird_cfg, 'days_back', 14),
-                'filter_mode': getattr(ebird_cfg, 'filter_mode', 'flag'),
-                'cache_hours': getattr(ebird_cfg, 'cache_hours', 24),
             },
             'exclusion_list': list(runtime.general.exclusion_list),
         }
@@ -9128,6 +9154,8 @@ class WebServer:
                     runtime.general.clip.post_analysis_confidence = float(clip['post_analysis_confidence'])
                 if 'post_analysis_generic_confidence' in clip:
                     runtime.general.clip.post_analysis_generic_confidence = float(clip['post_analysis_generic_confidence'])
+                if 'delete_if_no_animal' in clip:
+                    runtime.general.clip.delete_if_no_animal = bool(clip['delete_if_no_animal'])
                 if 'sample_rate' in clip:
                     runtime.general.clip.sample_rate = int(clip['sample_rate'])
                 if 'tracking_enabled' in clip:
@@ -9154,22 +9182,7 @@ class WebServer:
                 if 'max_utilization_pct' in ret:
                     runtime.general.retention.max_utilization_pct = int(ret['max_utilization_pct'])
                 updated_global = True
-            
-            # eBird settings
-            if 'ebird' in global_data:
-                ebird = global_data['ebird']
-                if 'enabled' in ebird:
-                    runtime.general.ebird.enabled = bool(ebird['enabled'])
-                if 'region' in ebird:
-                    runtime.general.ebird.region = str(ebird['region'])
-                if 'days_back' in ebird:
-                    runtime.general.ebird.days_back = int(ebird['days_back'])
-                if 'filter_mode' in ebird:
-                    runtime.general.ebird.filter_mode = str(ebird['filter_mode'])
-                if 'cache_hours' in ebird:
-                    runtime.general.ebird.cache_hours = int(ebird['cache_hours'])
-                updated_global = True
-            
+
             # Global exclusion list
             if 'exclusion_list' in global_data:
                 runtime.general.exclusion_list = list(global_data['exclusion_list'])
@@ -9236,6 +9249,8 @@ class WebServer:
                     config['general']['clip']['post_analysis_confidence'] = clip['post_analysis_confidence']
                 if 'post_analysis_generic_confidence' in clip:
                     config['general']['clip']['post_analysis_generic_confidence'] = clip['post_analysis_generic_confidence']
+                if 'delete_if_no_animal' in clip:
+                    config['general']['clip']['delete_if_no_animal'] = clip['delete_if_no_animal']
                 if 'sample_rate' in clip:
                     config['general']['clip']['sample_rate'] = clip['sample_rate']
                 if 'tracking_enabled' in clip:
@@ -9262,23 +9277,7 @@ class WebServer:
                     config['general']['retention']['max_days'] = ret['max_days']
                 if 'max_utilization_pct' in ret:
                     config['general']['retention']['max_utilization_pct'] = ret['max_utilization_pct']
-            
-            # eBird settings
-            if 'ebird' in global_data:
-                if 'ebird' not in config['general']:
-                    config['general']['ebird'] = {}
-                ebird = global_data['ebird']
-                if 'enabled' in ebird:
-                    config['general']['ebird']['enabled'] = ebird['enabled']
-                if 'region' in ebird:
-                    config['general']['ebird']['region'] = ebird['region']
-                if 'days_back' in ebird:
-                    config['general']['ebird']['days_back'] = ebird['days_back']
-                if 'filter_mode' in ebird:
-                    config['general']['ebird']['filter_mode'] = ebird['filter_mode']
-                if 'cache_hours' in ebird:
-                    config['general']['ebird']['cache_hours'] = ebird['cache_hours']
-            
+
             # Exclusion list
             if 'exclusion_list' in global_data:
                 config['general']['exclusion_list'] = global_data['exclusion_list']

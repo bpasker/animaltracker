@@ -16,7 +16,6 @@ from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector, cleanup_gpu_memory
-from .ebird import EBirdClient, create_ebird_client
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
@@ -226,7 +225,6 @@ class StreamWorker:
         detector: BaseDetector,
         notifier: PushoverNotifier,
         storage: StorageManager,
-        ebird_client: Optional[EBirdClient] = None,
         tracking_enabled: bool = True,
     ) -> None:
         self.camera = camera
@@ -234,7 +232,6 @@ class StreamWorker:
         self.detector = detector
         self.notifier = notifier
         self.storage = storage
-        self.ebird_client = ebird_client
         self.tracking_enabled = tracking_enabled
         # Ensure buffer is at least 30s for manual clips
         clip_seconds = max(30.0, runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds)
@@ -637,69 +634,25 @@ class StreamWorker:
         excludes = set(self._normalize_species(s) for s in self.camera.exclude_species)
         global_excludes = set(self._normalize_species(s) for s in self.runtime.general.exclusion_list)
         all_excludes = excludes | global_excludes
-        
-        # Get eBird filter mode if enabled
-        ebird_mode = None
-        if self.ebird_client and self.ebird_client.enabled:
-            ebird_mode = self.runtime.general.ebird.filter_mode
-        
+
         filtered: List[Detection] = []
         for det in detections:
             label = self._normalize_species(det.species)
-            
+
             # Check includes (if specified, only allow listed species)
             if includes and not any(
                 label == inc or label.startswith(inc + '_') or inc in label
                 for inc in includes
             ):
                 continue
-            
+
             # Check excludes (skip if matches any exclude pattern)
             if all_excludes and self._species_matches_exclude(det.species, all_excludes):
                 LOGGER.debug("Excluding detection: %s (matches exclude list)", det.species)
                 continue
-            
-            # Apply eBird filtering for bird species
-            if ebird_mode and self._is_bird_detection(det):
-                is_present = self.ebird_client.is_species_present(det.taxonomy or det.species)
-                
-                if ebird_mode == "filter" and not is_present:
-                    # Filter mode: skip species not recently seen in the region
-                    LOGGER.debug("eBird filter: %s not present in region, skipping", det.species)
-                    continue
-                elif ebird_mode == "flag" and not is_present:
-                    # Flag mode: mark but don't filter
-                    LOGGER.info("eBird flag: %s not recently reported in region", det.species)
-                # boost mode: could be used for sorting/prioritization later
-            
+
             filtered.append(det)
         return filtered
-    
-    def _is_bird_detection(self, det: Detection) -> bool:
-        """Check if a detection is a bird based on taxonomy or species name."""
-        taxonomy = det.taxonomy or det.species
-        taxonomy_lower = taxonomy.lower()
-        
-        # Check taxonomy for bird indicators
-        bird_indicators = ['aves', 'bird', ';aves;', 'animalia;chordata;aves']
-        for indicator in bird_indicators:
-            if indicator in taxonomy_lower:
-                return True
-        
-        # Check common bird species names
-        species_lower = det.species.lower()
-        common_bird_words = {
-            'cardinal', 'robin', 'sparrow', 'finch', 'hawk', 'eagle', 'owl',
-            'crow', 'raven', 'jay', 'woodpecker', 'hummingbird', 'duck', 'goose',
-            'heron', 'crane', 'pelican', 'gull', 'tern', 'warbler', 'thrush',
-            'wren', 'chickadee', 'nuthatch', 'titmouse', 'oriole', 'tanager',
-            'grosbeak', 'bunting', 'dove', 'pigeon', 'falcon', 'kestrel'
-        }
-        for word in common_bird_words:
-            if word in species_lower:
-                return True
-        
-        return False
 
     async def _maybe_close_event(self, ts: float) -> None:
         if self.event_state is None:
@@ -1034,14 +987,9 @@ class StreamWorker:
             clip_duration_secs = total_frames / estimated_fps
             # 1 frame per second, min 5, max 60
             num_samples = max(5, min(60, int(clip_duration_secs)))
-            LOGGER.debug("Auto-calculated post-analysis: %d frames for ~%.1fs clip", 
+            LOGGER.debug("Auto-calculated post-analysis: %d frames for ~%.1fs clip",
                         num_samples, clip_duration_secs)
-        
-        # Get eBird filter mode if enabled
-        ebird_mode = None
-        if self.ebird_client and self.ebird_client.enabled:
-            ebird_mode = self.runtime.general.ebird.filter_mode
-        
+
         # Sample frames for analysis
         # When tracking is enabled, we need more frequent samples to maintain track continuity
         total_frames = len(frames)
@@ -1093,34 +1041,10 @@ class StreamWorker:
             
             tracked_species = analysis_tracker.get_unique_species()
             if tracked_species:
-                # Apply eBird filtering to tracked results
-                best_species = None
-                best_conf = 0.0
-                
-                for species, conf in tracked_species:
-                    # Check eBird if enabled
-                    if ebird_mode and self._is_bird_species(species):
-                        is_present = self.ebird_client.is_species_present(species)
-                        if is_present is False and ebird_mode == "filter":
-                            LOGGER.debug("eBird filter: %s not in region, skipping", species)
-                            continue
-                        elif is_present is True and (best_species is None or conf > best_conf):
-                            best_species = species
-                            best_conf = conf
-                            LOGGER.debug("eBird: %s confirmed in region", species)
-                        elif is_present is None or is_present is False:
-                            # Not a bird or not confirmed - use if no better option
-                            if best_species is None or conf > best_conf:
-                                best_species = species
-                                best_conf = conf
-                    else:
-                        # Non-bird or no eBird filtering
-                        if best_species is None or conf > best_conf:
-                            best_species = species
-                            best_conf = conf
-                
+                # Pick the species with highest confidence
+                best_species, best_conf = max(tracked_species, key=lambda x: x[1])
                 if best_species:
-                    LOGGER.info("Post-clip analysis (tracked): %d objects -> %s (%.2f)", 
+                    LOGGER.info("Post-clip analysis (tracked): %d objects -> %s (%.2f)",
                                analysis_tracker.active_track_count, best_species, best_conf)
                     return best_species, best_conf
         
@@ -1158,34 +1082,12 @@ class StreamWorker:
                 # Bonus for having a full binomial name (genus_species)
                 if '_' in species and len(species.split('_')) >= 2:
                     specificity += 2
-                
-                # Check eBird for bird species - boost if present in region
-                ebird_boost = 0
-                ebird_present = None
-                if ebird_mode and self._is_bird_species(det.taxonomy or det.species):
-                    ebird_present = self.ebird_client.is_species_present(det.taxonomy or det.species)
-                    if ebird_present is True:
-                        # Species confirmed in region - boost priority
-                        ebird_boost = 3
-                        LOGGER.debug("eBird: %s confirmed in region, boosting", species)
-                    elif ebird_present is False:
-                        # Species NOT seen in region - penalize
-                        if ebird_mode == "filter":
-                            # Skip entirely in filter mode
-                            LOGGER.debug("eBird filter: %s not in region, skipping", species)
-                            continue
-                        else:
-                            # Flag/boost mode: just penalize
-                            ebird_boost = -2
-                            LOGGER.debug("eBird: %s not reported in region, penalizing", species)
-                
+
                 species_scores[species] = {
                     'max_confidence': det.confidence,
                     'count': 1,
                     'specificity': specificity,
                     'taxonomy': det.taxonomy or species,
-                    'ebird_boost': ebird_boost,
-                    'ebird_present': ebird_present,
                 }
             else:
                 species_scores[species]['count'] += 1
@@ -1206,51 +1108,22 @@ class StreamWorker:
         
         if not candidates:
             return "", 0.0
-        
-        # Pick the best: prioritize eBird presence, then specificity, then count, then confidence
+
+        # Pick the best: prioritize specificity, then count, then confidence
         best_species = max(
             candidates.keys(),
             key=lambda s: (
-                candidates[s].get('ebird_boost', 0),  # eBird confirmed species first
                 candidates[s]['specificity'],
                 candidates[s]['count'],
                 candidates[s]['max_confidence']
             )
         )
-        
+
         best_confidence = candidates[best_species]['max_confidence']
-        ebird_info = candidates[best_species].get('ebird_present')
-        ebird_status = ""
-        if ebird_info is True:
-            ebird_status = " [eBird: confirmed in region]"
-        elif ebird_info is False:
-            ebird_status = " [eBird: not reported in region]"
-        
-        LOGGER.info("Post-clip analysis: %d valid detections across %d frames -> %s (%.2f)%s", 
-                   len(valid_detections), len(sample_indices), best_species, best_confidence, ebird_status)
-        
+        LOGGER.info("Post-clip analysis: %d valid detections across %d frames -> %s (%.2f)",
+                   len(valid_detections), len(sample_indices), best_species, best_confidence)
+
         return best_species, best_confidence
-    
-    def _is_bird_species(self, taxonomy: str) -> bool:
-        """Check if a taxonomy string represents a bird species."""
-        taxonomy_lower = taxonomy.lower()
-        
-        # Check taxonomy for bird indicators
-        bird_indicators = ['aves', ';aves;', 'animalia;chordata;aves']
-        for indicator in bird_indicators:
-            if indicator in taxonomy_lower:
-                return True
-        
-        # Check common bird family/order names
-        bird_terms = {
-            'passeriformes', 'piciformes', 'strigiformes', 'falconiformes',
-            'accipitriformes', 'anseriformes', 'columbiformes', 'apodiformes'
-        }
-        for term in bird_terms:
-            if term in taxonomy_lower:
-                return True
-        
-        return False
 
 
 class PipelineOrchestrator:
@@ -1289,19 +1162,7 @@ class PipelineOrchestrator:
                 "Split-model architecture: %s (realtime) + %s (post-processing)",
                 realtime_backend, postprocess_backend
             )
-        
-        # Create eBird client if configured
-        ebird_cfg = runtime.general.ebird
-        self.ebird_client = create_ebird_client(
-            enabled=ebird_cfg.enabled,
-            api_key_env=ebird_cfg.api_key_env,
-            region=ebird_cfg.region,
-            days_back=ebird_cfg.days_back,
-            cache_hours=ebird_cfg.cache_hours,
-        )
-        if self.ebird_client and self.ebird_client.enabled:
-            LOGGER.info(f"eBird integration enabled: region={ebird_cfg.region}, mode={ebird_cfg.filter_mode}")
-        
+
         self.notifier = PushoverNotifier(
             runtime.general.notification.pushover_app_token_env,
             runtime.general.notification.pushover_user_key_env,
@@ -1337,7 +1198,6 @@ class PipelineOrchestrator:
                 detector=self.detector,
                 notifier=self.notifier,
                 storage=self.storage,
-                ebird_client=self.ebird_client,
                 tracking_enabled=tracking_enabled,
             )
             for cam in self.cameras

@@ -6644,8 +6644,14 @@ class WebServer:
         if self.workers:
             worker = next(iter(self.workers.values()))
             detector_info['backend'] = worker.detector.backend_name
-            if hasattr(worker.detector, 'country'):
-                detector_info['country'] = worker.detector.country
+            # Get location from config, not detector object
+            detector_cfg = worker.runtime.general.detector
+            country = getattr(detector_cfg, 'country', None) or ''
+            region = getattr(detector_cfg, 'admin1_region', None) or ''
+            if country and region:
+                detector_info['country'] = f"{country} {region}"
+            elif country:
+                detector_info['country'] = country
         
         # Recent clips (last 5)
         recent_clips = []

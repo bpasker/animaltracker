@@ -8744,10 +8744,11 @@ class WebServer:
                                 const isSelected = selectedSet.has(sp.toLowerCase());
                                 const itemClass = isSelected ? 'species-item selected recent-item' : 'species-item recent-item';
                                 const displayName = sp.charAt(0).toUpperCase() + sp.slice(1);
+                                const escapedSp = sp.replace(/'/g, "\\\\'");
                                 html += `
-                                    <div class="${itemClass}" onclick="toggleSpecies('${field}', '${sp}', this)" data-species="${sp.toLowerCase()}">
-                                        <input type="checkbox" ${isSelected ? 'checked' : ''} 
-                                               onclick="event.stopPropagation(); toggleSpecies('${field}', '${sp}', this.parentElement)">
+                                    <div class="${itemClass}" onclick="toggleSpecies('${field}', '${escapedSp}', this)" data-species="${sp.toLowerCase()}">
+                                        <input type="checkbox" ${isSelected ? 'checked' : ''}
+                                               onclick="event.stopPropagation(); toggleSpecies('${field}', '${escapedSp}', this.parentElement)">
                                         <label>${displayName}</label>
                                         <span class="detection-count">${count}</span>
                                     </div>`;

@@ -495,7 +495,8 @@ class WebServer:
                                 const statusEl = document.getElementById('ptz-status-' + camId);
                                 const patrolToggleEl = document.getElementById('patrol-toggle-' + camId);
                                 const trackToggleEl = document.getElementById('track-toggle-' + camId);
-                                
+                                const debugEl = document.getElementById('ptz-debug-info-' + camId);
+
                                 if (statusEl) {
                                     statusEl.textContent = data.mode.toUpperCase();
                                     statusEl.className = 'ptz-mode-status ' + data.mode;
@@ -513,9 +514,61 @@ class WebServer:
                                     delaySlider.value = data.patrol_return_delay;
                                     if (delayLabel) delayLabel.textContent = data.patrol_return_delay + 's';
                                 }
+                                // Update debug info panel
+                                if (debugEl && data.debug) {
+                                    const d = data.debug;
+                                    let html = '';
+                                    if (data.mode === 'tracking') {
+                                        const species = d.last_tracked_species || 'unknown';
+                                        const age = d.last_detection_age_seconds;
+                                        const source = d.last_detection_source || '?';
+                                        if (age !== null) {
+                                            html += `<div>Tracking: <b>${species}</b> (${source})</div>`;
+                                            html += `<div>Last seen: <b>${age.toFixed(1)}s ago</b></div>`;
+                                            if (age > data.patrol_return_delay) {
+                                                html += `<div style="color: #ff9800;">⚠ Should return to patrol (>${data.patrol_return_delay}s)</div>`;
+                                            }
+                                        }
+                                    } else if (data.mode === 'patrol') {
+                                        const presets = d.preset_tokens || [];
+                                        if (presets.length > 0) {
+                                            const idx = d.current_preset_index + 1;
+                                            html += `<div>Preset ${idx}/${presets.length}</div>`;
+                                        } else {
+                                            html += `<div>Continuous sweep</div>`;
+                                        }
+                                    } else if (data.mode === 'idle') {
+                                        html += `<div style="color: #888;">Patrol & Track disabled</div>`;
+                                    }
+                                    // Show if updates are stale
+                                    if (d.last_update_age_seconds !== null && d.last_update_age_seconds > 5) {
+                                        html += `<div style="color: #f44336;">⚠ No updates for ${d.last_update_age_seconds.toFixed(0)}s</div>`;
+                                    }
+                                    debugEl.innerHTML = html || '<div style="color: #888;">--</div>';
+                                }
                             }
                         } catch (e) {
                             console.error('Mode fetch error:', e);
+                        }
+                    }
+
+                    async function forcePatrolMode(camId) {
+                        // Disable track, then re-enable to force return to patrol
+                        try {
+                            await fetch('/ptz/' + camId + '/track', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ enabled: false })
+                            });
+                            await new Promise(r => setTimeout(r, 300));
+                            await fetch('/ptz/' + camId + '/track', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({ enabled: true })
+                            });
+                            setTimeout(() => updatePtzMode(camId), 500);
+                        } catch (e) {
+                            console.error('Force patrol error:', e);
                         }
                     }
 
@@ -927,10 +980,16 @@ class WebServer:
                                            onchange="setReturnDelay('{cam_id}', this.value)">
                                     <div style="font-size: 10px; color: #666;">Seconds after losing object before resuming patrol</div>
                                 </div>
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                     <span style="color: #888;">Current:</span>
                                     <span class="ptz-mode-status" id="ptz-status-{cam_id}" style="font-weight: bold; color: #888;">--</span>
                                 </div>
+                                <div id="ptz-debug-info-{cam_id}" style="font-size: 11px; padding: 8px; background: #1a1a1a; border-radius: 4px; margin-bottom: 8px;">
+                                    <div style="color: #888;">--</div>
+                                </div>
+                                <button onclick="forcePatrolMode('{cam_id}')" style="width: 100%; padding: 6px; background: #555; font-size: 11px;">
+                                    Reset to Patrol
+                                </button>
                             </div>
                             <div class="ptz-presets" id="ptz-presets-{cam_id}">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">

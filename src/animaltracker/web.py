@@ -1092,11 +1092,28 @@ class WebServer:
                 'patrol_return_delay': 3.0
             })
         
+        import time
+        now = time.time()
+        last_detection_age = now - tracker._last_detection_time if tracker._last_detection_time > 0 else None
+        last_update_age = now - tracker._last_update if tracker._last_update > 0 else None
+
         return web.json_response({
             'mode': tracker._mode.value if hasattr(tracker._mode, 'value') else str(tracker._mode),
             'patrol_enabled': tracker.is_patrol_enabled(),
             'track_enabled': tracker.is_track_enabled(),
-            'patrol_return_delay': tracker.patrol_return_delay
+            'patrol_return_delay': tracker.patrol_return_delay,
+            # Debug info
+            'debug': {
+                'last_detection_age_seconds': round(last_detection_age, 1) if last_detection_age else None,
+                'last_update_age_seconds': round(last_update_age, 1) if last_update_age else None,
+                'patrol_presets': tracker.patrol_presets,
+                'preset_tokens': tracker._preset_tokens,
+                'current_preset_index': tracker._current_preset_index,
+                'patrol_active': tracker._patrol_active,
+                'track_active': tracker._track_active,
+                'last_tracked_species': tracker._last_tracked_species,
+                'last_detection_source': tracker._last_detection_source,
+            }
         })
 
     async def handle_ptz_patrol(self, request):

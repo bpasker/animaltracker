@@ -1232,6 +1232,7 @@ class PipelineOrchestrator:
                                 'pan_scale': ptz_cfg.pan_scale,
                                 'tilt_scale': ptz_cfg.tilt_scale,
                                 'target_fill_pct': ptz_cfg.target_fill_pct,
+                                'min_detection_area': getattr(ptz_cfg, 'min_detection_area', 0.005),
                                 'smoothing': ptz_cfg.smoothing,
                                 'update_interval': ptz_cfg.update_interval,
                                 'pan_center_x': 0.5,  # Self-tracking always centers
@@ -1283,6 +1284,7 @@ class PipelineOrchestrator:
                             'pan_scale': ptz_cfg.pan_scale,
                             'tilt_scale': ptz_cfg.tilt_scale,
                             'target_fill_pct': ptz_cfg.target_fill_pct,
+                            'min_detection_area': getattr(ptz_cfg, 'min_detection_area', 0.005),
                             'smoothing': ptz_cfg.smoothing,
                             'update_interval': ptz_cfg.update_interval,
                             'pan_center_x': ptz_cfg.pan_center_x,

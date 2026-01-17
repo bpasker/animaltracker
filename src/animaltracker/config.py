@@ -128,6 +128,7 @@ class PTZTrackingSettings(BaseModel):
     # Multi-camera tracking: allow target camera's detections to take over tracking
     multi_camera_tracking: bool = Field(default=True, description="When enabled, target camera (cam2) detections can take over tracking for finer control")
     target_fill_pct: float = Field(default=0.6, ge=0.1, le=0.95, description="Target object fill percentage (0.6 = 60%)")
+    min_detection_area: float = Field(default=0.005, ge=0.0, le=0.1, description="Ignore detections smaller than this fraction of frame (0.005 = 0.5%, filters leaves/noise)")
     pan_scale: float = Field(default=0.8, ge=0.1, le=2.0, description="PTZ pan range as fraction of wide-angle FOV")
     tilt_scale: float = Field(default=0.6, ge=0.1, le=2.0, description="PTZ tilt range as fraction of wide-angle FOV")
     # Optimized for real-time tracking with YOLO backend (~50-150ms inference)

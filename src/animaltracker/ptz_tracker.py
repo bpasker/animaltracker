@@ -156,6 +156,7 @@ class PTZTracker:
     # Tracking behavior
     target_fill_pct: float = 0.6  # Target 60% frame fill
     min_move_threshold: float = 0.05  # Don't move if offset < 5% of range
+    min_detection_area: float = 0.005  # Ignore detections smaller than 0.5% of frame (filters leaves/noise)
     # Optimized defaults for real-time tracking with YOLO
     smoothing: float = 0.15  # Lower = faster response (was 0.3)
     update_interval: float = 0.1  # 10 updates/sec for responsive tracking (was 0.2)
@@ -456,7 +457,27 @@ class PTZTracker:
             return False
         
         self._last_update = now
-        
+
+        # Filter out small detections (likely leaves, noise, distant objects)
+        if detections and self.min_detection_area > 0:
+            frame_area = frame_width * frame_height
+            min_area_pixels = self.min_detection_area * frame_area
+            filtered_detections = []
+            for det in detections:
+                # bbox is [x1, y1, x2, y2]
+                det_width = det.bbox[2] - det.bbox[0]
+                det_height = det.bbox[3] - det.bbox[1]
+                det_area = det_width * det_height
+                if det_area >= min_area_pixels:
+                    filtered_detections.append(det)
+                else:
+                    PTZ_LOGGER.debug(
+                        "[SIZE_FILTER] Ignoring small detection: %s area=%.0fpx (%.2f%%) < min=%.0fpx (%.2f%%)",
+                        det.species, det_area, (det_area/frame_area)*100,
+                        min_area_pixels, self.min_detection_area*100
+                    )
+            detections = filtered_detections
+
         # Handle state transitions based on detections
         if detections and self._track_active:
             # We have detections and tracking is enabled - switch to tracking mode
@@ -643,6 +664,19 @@ class PTZTracker:
 
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
+
+        # Filter out small detections (likely leaves, noise) from both cameras
+        if self.min_detection_area > 0:
+            if source_detections and source_data:
+                frame_area = source_data[1] * source_data[2]
+                min_area = self.min_detection_area * frame_area
+                source_detections = [d for d in source_detections
+                                    if (d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1]) >= min_area]
+            if target_detections and target_data:
+                frame_area = target_data[1] * target_data[2]
+                min_area = self.min_detection_area * frame_area
+                target_detections = [d for d in target_detections
+                                    if (d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1]) >= min_area]
 
         # Log what we have
         PTZ_LOGGER.debug(
@@ -1164,6 +1198,7 @@ def create_ptz_tracker(
         profile_token=profile_token,
         calibration=calibration,
         target_fill_pct=config.get('target_fill_pct', 0.6),
+        min_detection_area=config.get('min_detection_area', 0.005),  # Filter small detections (leaves/noise)
         smoothing=config.get('smoothing', 0.15),  # Fast response (was 0.3)
         update_interval=config.get('update_interval', 0.1),  # 10 updates/sec (was 0.2)
         patrol_enabled=config.get('patrol_enabled', True),

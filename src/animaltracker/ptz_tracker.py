@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -197,7 +198,10 @@ class PTZTracker:
     # Decision log buffer (for storing with clips)
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
     _decision_log_max_entries: int = field(default=1000, init=False)  # Prevent unbounded growth
-    
+
+    # Thread lock for multi-camera access
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
     def _log_decision(self, event: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Log a PTZ decision for later retrieval."""
         entry = PTZDecisionEntry(
@@ -429,24 +433,29 @@ class PTZTracker:
     
     def update(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
         """Process detections and move PTZ if needed.
-        
+
         State machine:
         - PATROL: Sweeping to find objects. On detection -> TRACKING
         - TRACKING: Following object. On lost object -> wait, then PATROL
         - IDLE: Tracking disabled
-        
+
         Args:
             detections: List of Detection objects from wide-angle camera
             frame_width: Width of the detection frame
             frame_height: Height of the detection frame
-            
+
         Returns:
             True if PTZ was moved, False otherwise
         """
+        with self._lock:
+            return self._update_locked(detections, frame_width, frame_height)
+
+    def _update_locked(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
+        """Internal update method, must be called with lock held."""
         # Need at least one of patrol or track enabled
         if not self._patrol_active and not self._track_active:
             return False
-        
+
         # Rate limit updates
         now = time.time()
         if now - self._last_update < self.update_interval:
@@ -455,28 +464,11 @@ class PTZTracker:
                 now - self._last_update, self.update_interval
             )
             return False
-        
+
         self._last_update = now
 
         # Filter out small detections (likely leaves, noise, distant objects)
-        if detections and self.min_detection_area > 0:
-            frame_area = frame_width * frame_height
-            min_area_pixels = self.min_detection_area * frame_area
-            filtered_detections = []
-            for det in detections:
-                # bbox is [x1, y1, x2, y2]
-                det_width = det.bbox[2] - det.bbox[0]
-                det_height = det.bbox[3] - det.bbox[1]
-                det_area = det_width * det_height
-                if det_area >= min_area_pixels:
-                    filtered_detections.append(det)
-                else:
-                    PTZ_LOGGER.debug(
-                        "[SIZE_FILTER] Ignoring small detection: %s area=%.0fpx (%.2f%%) < min=%.0fpx (%.2f%%)",
-                        det.species, det_area, (det_area/frame_area)*100,
-                        min_area_pixels, self.min_detection_area*100
-                    )
-            detections = filtered_detections
+        detections = self._filter_small_detections(detections, frame_width, frame_height)
 
         # Handle state transitions based on detections
         if detections and self._track_active:
@@ -484,6 +476,7 @@ class PTZTracker:
             self._last_detection_time = now
             self._tracking_lost_logged_at = 0.0  # Reset - we have detections again
             self._last_tracked_species = detections[0].species  # Remember what we're tracking
+            self._last_detection_source = "single"  # Single camera mode
 
             PTZ_LOGGER.debug(
                 "[DETECTIONS] %d objects detected, track_active=%s",
@@ -496,7 +489,7 @@ class PTZTracker:
                     det.bbox[0], det.bbox[1], det.bbox[2], det.bbox[3],
                     getattr(det, 'track_id', 'N/A')
                 )
-            
+
             if self._mode != PTZMode.TRACKING:
                 PTZ_LOGGER.info(
                     "[MODE_CHANGE] %s -> TRACKING (detected %s at %.1f%%)",
@@ -510,7 +503,7 @@ class PTZTracker:
                 })
                 self._mode = PTZMode.TRACKING
                 LOGGER.info("PTZ switching to TRACKING mode - object detected")
-            
+
             return self._do_tracking(detections, frame_width, frame_height)
         else:
             # No detections or tracking disabled
@@ -526,104 +519,33 @@ class PTZTracker:
                     'species': detections[0].species if detections else None,
                     'reason': 'tracking not enabled in config',
                 })
+
+            # Use consolidated no-detection handler
+            return self._handle_no_detections(now)
+
+    def _filter_small_detections(
+        self, detections: List['Detection'], frame_width: int, frame_height: int
+    ) -> List['Detection']:
+        """Filter out detections smaller than min_detection_area."""
+        if not detections or self.min_detection_area <= 0:
+            return detections
+
+        frame_area = frame_width * frame_height
+        min_area_pixels = self.min_detection_area * frame_area
+        filtered = []
+        for det in detections:
+            det_width = det.bbox[2] - det.bbox[0]
+            det_height = det.bbox[3] - det.bbox[1]
+            det_area = det_width * det_height
+            if det_area >= min_area_pixels:
+                filtered.append(det)
             else:
                 PTZ_LOGGER.debug(
-                    "[NO_DETECTION] detections=%d, track_active=%s, mode=%s",
-                    len(detections) if detections else 0, self._track_active, self._mode.value
+                    "[SIZE_FILTER] Ignoring small detection: %s area=%.0fpx (%.2f%%) < min=%.0fpx (%.2f%%)",
+                    det.species, det_area, (det_area/frame_area)*100,
+                    min_area_pixels, self.min_detection_area*100
                 )
-            
-            if self._mode == PTZMode.TRACKING:
-                # Was tracking, check if we should return to patrol
-                time_since_detection = now - self._last_detection_time
-
-                # Log when object is FIRST lost (not every frame)
-                if self._tracking_lost_logged_at == 0.0:
-                    self._tracking_lost_logged_at = now
-                    PTZ_LOGGER.info(
-                        "[TRACKING_LOST] Lost %s - no detections. Waiting %.1fs before returning to patrol",
-                        self._last_tracked_species or "object", self.patrol_return_delay
-                    )
-                    LOGGER.info(
-                        "PTZ lost %s - holding position for %.1fs before returning to patrol",
-                        self._last_tracked_species or "object", self.patrol_return_delay
-                    )
-                    self._log_decision('tracking_lost', {
-                        'species': self._last_tracked_species,
-                        'return_delay': self.patrol_return_delay,
-                        'action': 'waiting',
-                    })
-
-                if time_since_detection > self.patrol_return_delay or not self._track_active:
-                    # Object lost for long enough (or tracking disabled), return to patrol
-                    if self._patrol_active:
-                        reason = "tracking disabled" if not self._track_active else f"no detections for {time_since_detection:.1f}s (> {self.patrol_return_delay}s delay)"
-                        PTZ_LOGGER.info(
-                            "[MODE_CHANGE] TRACKING -> PATROL (%s was lost, %s)",
-                            self._last_tracked_species or "object", reason
-                        )
-                        self._log_decision('mode_change', {
-                            'from': 'tracking',
-                            'to': 'patrol',
-                            'reason': 'object_lost' if self._track_active else 'tracking_disabled',
-                            'species': self._last_tracked_species,
-                            'time_since_detection': round(time_since_detection, 2),
-                            'return_delay': self.patrol_return_delay,
-                        })
-                        self._mode = PTZMode.PATROL
-                        self._tracking_lost_logged_at = 0.0  # Reset for next tracking session
-                        if self._track_active:
-                            LOGGER.info(
-                                "PTZ returning to PATROL - %s lost for %.1fs (exceeded %.1fs delay)",
-                                self._last_tracked_species or "object", time_since_detection, self.patrol_return_delay
-                            )
-                        else:
-                            LOGGER.info("PTZ returning to PATROL mode - tracking disabled")
-                    else:
-                        # Patrol disabled, stop and wait
-                        PTZ_LOGGER.info("[MODE_CHANGE] TRACKING -> IDLE (patrol disabled)")
-                        self._log_decision('mode_change', {
-                            'from': 'tracking',
-                            'to': 'idle',
-                            'reason': 'patrol_disabled',
-                            'species': self._last_tracked_species,
-                        })
-                        self._mode = PTZMode.IDLE
-                        self._tracking_lost_logged_at = 0.0
-                        try:
-                            self.onvif_client.ptz_stop(self.profile_token)
-                        except Exception:
-                            pass
-                else:
-                    # Still within delay, stop and wait for object to reappear
-                    time_remaining = self.patrol_return_delay - time_since_detection
-                    PTZ_LOGGER.debug(
-                        "[WAITING] Holding position for %s, %.1fs remaining before patrol",
-                        self._last_tracked_species or "object", time_remaining
-                    )
-                    try:
-                        self.onvif_client.ptz_stop(self.profile_token)
-                    except Exception:
-                        pass
-                    return False
-            
-            # Start patrol if enabled but not started yet
-            if self._patrol_active and self._mode != PTZMode.PATROL:
-                self._mode = PTZMode.PATROL
-                PTZ_LOGGER.info("[MODE_CHANGE] -> PATROL (patrol enabled, starting)")
-                # Initialize patrol - go to first preset or start sweep
-                if self._preset_tokens:
-                    self._current_preset_index = 0
-                    self._goto_current_preset()
-                else:
-                    # Start continuous sweep
-                    self._patrol_reverse_time = time.time()
-            
-            if self._mode == PTZMode.PATROL:
-                LOGGER.debug("PTZ update: calling _do_patrol(), presets=%d", len(self._preset_tokens) if self._preset_tokens else 0)
-                self._do_patrol()
-                return True
-
-            return False
+        return filtered
 
     def update_multi_camera(
         self,
@@ -647,6 +569,18 @@ class PTZTracker:
         Returns:
             True if PTZ was moved, False otherwise
         """
+        with self._lock:
+            return self._update_multi_camera_locked(
+                camera_detections, source_camera_id, target_camera_id
+            )
+
+    def _update_multi_camera_locked(
+        self,
+        camera_detections: Dict[str, Tuple[List['Detection'], int, int]],
+        source_camera_id: str,
+        target_camera_id: str,
+    ) -> bool:
+        """Internal multi-camera update, must be called with lock held."""
         # Need at least one of patrol or track enabled
         if not self._patrol_active and not self._track_active:
             return False
@@ -665,18 +599,15 @@ class PTZTracker:
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
 
-        # Filter out small detections (likely leaves, noise) from both cameras
-        if self.min_detection_area > 0:
-            if source_detections and source_data:
-                frame_area = source_data[1] * source_data[2]
-                min_area = self.min_detection_area * frame_area
-                source_detections = [d for d in source_detections
-                                    if (d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1]) >= min_area]
-            if target_detections and target_data:
-                frame_area = target_data[1] * target_data[2]
-                min_area = self.min_detection_area * frame_area
-                target_detections = [d for d in target_detections
-                                    if (d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1]) >= min_area]
+        # Filter out small detections using shared method
+        if source_detections and source_data:
+            source_detections = self._filter_small_detections(
+                source_detections, source_data[1], source_data[2]
+            )
+        if target_detections and target_data:
+            target_detections = self._filter_small_detections(
+                target_detections, target_data[1], target_data[2]
+            )
 
         # Log what we have
         PTZ_LOGGER.debug(

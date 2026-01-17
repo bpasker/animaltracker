@@ -109,12 +109,12 @@ class EventState:
     # Object tracker for this event
     tracker: Optional[ObjectTracker] = None
 
-    def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray) -> None:
+    def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray, frame_idx: Optional[int] = None) -> None:
         self.last_detection_ts = frame_ts
-        
+
         # Update tracker if available
         if self.tracker:
-            tracked_detections = self.tracker.update(detections, frame)
+            tracked_detections = self.tracker.update(detections, frame, frame_idx=frame_idx)
             # Use tracked detections for species updates
             for track_id, det in tracked_detections.items():
                 # Get best species for this track so far
@@ -455,7 +455,7 @@ class StreamWorker:
                         
                         # Start new inference task
                         inference_task = asyncio.create_task(
-                            self._process_frame(frame.copy(), frame_ts)
+                            self._process_frame(frame.copy(), frame_ts, frame_count)
                         )
             finally:
                 # Cancel any pending inference
@@ -467,12 +467,12 @@ class StreamWorker:
             if not stop_event.is_set():
                 await asyncio.sleep(1)  # Brief pause before reconnect
 
-    async def _process_frame(self, frame: np.ndarray, ts: float) -> None:
-        loop = asyncio.get_running_loop()        
+    async def _process_frame(self, frame: np.ndarray, ts: float, frame_idx: int = 0) -> None:
+        loop = asyncio.get_running_loop()
         detections = await loop.run_in_executor(
-            None, 
+            None,
             lambda: self.detector.infer(
-                frame, 
+                frame,
                 conf_threshold=self.camera.thresholds.confidence,
                 generic_confidence=self.camera.thresholds.generic_confidence
             )
@@ -505,8 +505,8 @@ class StreamWorker:
                 camera_detections = {}
 
                 for cam_id, worker in self._ptz_detection_sources.items():
-                    # Only use recent detections (within 1 second)
-                    if ts - worker.latest_detection_ts < 1.0:
+                    # Only use recent detections (within 300ms to match inference latency)
+                    if ts - worker.latest_detection_ts < 0.3:
                         w, h = worker.latest_frame_size
                         if w > 0 and h > 0:
                             camera_detections[cam_id] = (
@@ -582,7 +582,7 @@ class StreamWorker:
             cutoff = ts - self.runtime.general.clip.pre_seconds
             self.event_state.frames.extend([f for f in buffered if f[0] >= cutoff])
             
-        self.event_state.update(filtered, ts, frame)
+        self.event_state.update(filtered, ts, frame, frame_idx=frame_idx)
 
     def _normalize_species(self, species: str) -> str:
         """Normalize species name for comparison (lowercase, underscores)."""
@@ -1025,7 +1025,7 @@ class StreamWorker:
                 
                 # Update tracker if available
                 if analysis_tracker and detections:
-                    analysis_tracker.update(detections, frame)
+                    analysis_tracker.update(detections, frame, frame_idx=idx)
                 
                 all_detections.extend(detections)
             except Exception as e:

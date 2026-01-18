@@ -506,7 +506,8 @@ class StreamWorker:
 
                 for cam_id, worker in self._ptz_detection_sources.items():
                     # Only use recent detections (within 300ms to match inference latency)
-                    if ts - worker.latest_detection_ts < 0.3:
+                    detection_age = ts - worker.latest_detection_ts
+                    if detection_age < 0.3:
                         w, h = worker.latest_frame_size
                         if w > 0 and h > 0:
                             camera_detections[cam_id] = (
@@ -514,8 +515,20 @@ class StreamWorker:
                                 w,
                                 h
                             )
+                            LOGGER.debug(
+                                "Multi-cam PTZ: %s contributing %d detections (age=%.3fs)",
+                                cam_id, len(worker.latest_detections), detection_age
+                            )
+                    else:
+                        LOGGER.debug(
+                            "Multi-cam PTZ: %s detections too old (age=%.3fs > 0.3s)",
+                            cam_id, detection_age
+                        )
 
+                # Log which cameras are contributing
                 if camera_detections:
+                    contrib = ', '.join(f"{k}:{len(v[0])}" for k, v in camera_detections.items())
+                    LOGGER.debug("Multi-cam PTZ update from %s: %s", self.camera.id, contrib)
                     await loop.run_in_executor(
                         None,
                         self.ptz_tracker.update_multi_camera,
@@ -1320,17 +1333,26 @@ class PipelineOrchestrator:
                     )
         
         # Second pass: give target cameras access to the shared tracker
+        # This enables:
+        # 1. PTZ decision logs to be captured in target camera recordings
+        # 2. Self-tracking (if self_track: true) where target camera detections can trigger PTZ
         for worker in workers:
             ptz_cfg = worker.camera.ptz_tracking
-            if ptz_cfg.self_track and not worker.ptz_tracker:
+            if not worker.ptz_tracker:
                 # Check if another camera created a tracker for this PTZ
                 existing_tracker = shared_ptz_trackers.get(worker.camera.id)
                 if existing_tracker:
                     worker.ptz_tracker = existing_tracker
-                    LOGGER.info(
-                        "PTZ self-tracking enabled: %s shares tracker (cam2 detections will also trigger tracking)",
-                        worker.camera.id
-                    )
+                    if ptz_cfg.self_track:
+                        LOGGER.info(
+                            "PTZ self-tracking enabled: %s shares tracker (cam2 detections will also trigger tracking)",
+                            worker.camera.id
+                        )
+                    else:
+                        LOGGER.info(
+                            "PTZ tracker shared with %s for logging (PTZ decisions will appear in recordings)",
+                            worker.camera.id
+                        )
 
         # Third pass: set up multi-camera detection sources for PTZ tracking
         # This allows cam2 (target) detections to take over tracking from cam1 (source)

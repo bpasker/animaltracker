@@ -618,14 +618,29 @@ class PTZTracker:
 
         # Determine which detections to use
         # Priority: target camera (cam2) > source camera (cam1)
+        # This allows cam2 to center objects in its frame even when cam1 doesn't see them
         if target_detections and self._track_active:
             # Target camera can see the object - use its detections for fine tracking
             frame_width, frame_height = target_data[1], target_data[2]
 
-            PTZ_LOGGER.info(
-                "[CAM_TAKEOVER] %s has %d detections - using for fine tracking",
-                target_camera_id, len(target_detections)
-            )
+            # Log whether this is takeover (cam1 also sees) or cam2-only tracking
+            if source_detections:
+                PTZ_LOGGER.info(
+                    "[CAM_TAKEOVER] %s has %d detections (cam1 has %d) - using target for fine tracking",
+                    target_camera_id, len(target_detections), len(source_detections)
+                )
+            else:
+                PTZ_LOGGER.info(
+                    "[CAM2_ONLY_TRACK] %s has %d detections, %s has none - tracking from target camera only",
+                    target_camera_id, len(target_detections), source_camera_id
+                )
+                self._log_decision('cam2_only_track', {
+                    'target_camera': target_camera_id,
+                    'source_camera': source_camera_id,
+                    'detection_count': len(target_detections),
+                    'species': target_detections[0].species,
+                    'confidence': round(target_detections[0].confidence * 100, 1),
+                })
 
             self._last_detection_time = now
             self._tracking_lost_logged_at = 0.0

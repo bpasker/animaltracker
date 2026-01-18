@@ -12,45 +12,66 @@ from datetime import datetime, timezone, timedelta
 
 from .species_names import get_common_name, format_species_display, get_species_icon
 
-# Central Time with automatic DST handling
-try:
-    from zoneinfo import ZoneInfo
-    CENTRAL_TZ = ZoneInfo("America/Chicago")
-except ImportError:
-    # Fallback for Python < 3.9: manual DST calculation
-    class CentralTime(timezone):
-        """Central Time with DST support (CST/CDT)."""
-        def __init__(self):
-            super().__init__(timedelta(hours=-6), 'CST')
-        
-        def utcoffset(self, dt):
-            if self._is_dst(dt):
-                return timedelta(hours=-5)  # CDT
-            return timedelta(hours=-6)  # CST
-        
-        def tzname(self, dt):
-            return 'CDT' if self._is_dst(dt) else 'CST'
-        
-        def _is_dst(self, dt):
-            """Check if DST is in effect (2nd Sunday March - 1st Sunday November)."""
-            if dt is None:
-                return False
-            year = dt.year
-            # DST starts 2nd Sunday of March at 2:00 AM
-            march_start = datetime(year, 3, 8)  # Earliest possible 2nd Sunday
-            while march_start.weekday() != 6:  # Find Sunday
-                march_start += timedelta(days=1)
-            dst_start = march_start.replace(hour=2)
-            
-            # DST ends 1st Sunday of November at 2:00 AM
-            nov_start = datetime(year, 11, 1)
-            while nov_start.weekday() != 6:  # Find Sunday
-                nov_start += timedelta(days=1)
-            dst_end = nov_start.replace(hour=2)
-            
-            return dst_start <= dt.replace(tzinfo=None) < dst_end
-    
-    CENTRAL_TZ = CentralTime()
+# Server's local timezone (auto-detected)
+import time as _time
+
+def _get_local_timezone():
+    """Get the server's local timezone with DST support."""
+    try:
+        from zoneinfo import ZoneInfo
+        # Try to get the system timezone name
+        import os
+        tz_name = os.environ.get('TZ')
+        if tz_name:
+            return ZoneInfo(tz_name)
+
+        # Try to read from /etc/timezone (Linux)
+        try:
+            with open('/etc/timezone', 'r') as f:
+                tz_name = f.read().strip()
+                if tz_name:
+                    return ZoneInfo(tz_name)
+        except (FileNotFoundError, IOError):
+            pass
+
+        # Try to read from /etc/localtime symlink (Linux/macOS)
+        try:
+            import os.path
+            localtime = os.path.realpath('/etc/localtime')
+            # Extract timezone from path like /usr/share/zoneinfo/America/Chicago
+            if 'zoneinfo/' in localtime:
+                tz_name = localtime.split('zoneinfo/')[-1]
+                return ZoneInfo(tz_name)
+        except (FileNotFoundError, IOError, OSError):
+            pass
+
+    except ImportError:
+        pass
+
+    # Fallback: create a fixed offset timezone from system's UTC offset
+    # This handles DST at the moment of detection but won't auto-update
+    offset_seconds = -_time.timezone if _time.daylight == 0 else -_time.altzone
+    offset = timedelta(seconds=offset_seconds)
+    tz_name = _time.tzname[1] if _time.daylight and _time.localtime().tm_isdst else _time.tzname[0]
+    return timezone(offset, tz_name)
+
+LOCAL_TZ = _get_local_timezone()
+# Keep CENTRAL_TZ as alias for backwards compatibility
+CENTRAL_TZ = LOCAL_TZ
+
+def get_timezone_display_name():
+    """Get a human-readable timezone name for display."""
+    try:
+        # Try to get the zone name from ZoneInfo
+        if hasattr(LOCAL_TZ, 'key'):
+            return LOCAL_TZ.key  # e.g., "America/Chicago"
+        # Fallback to tzname
+        now = datetime.now(LOCAL_TZ)
+        return LOCAL_TZ.tzname(now) or str(LOCAL_TZ)
+    except Exception:
+        return str(LOCAL_TZ)
+
+TIMEZONE_DISPLAY = get_timezone_display_name()
 
 if TYPE_CHECKING:
     from .pipeline import StreamWorker
@@ -7054,6 +7075,7 @@ class WebServer:
             'type': log_type,
             'count': len(logs),
             'skipped': skipped_count,
+            'timezone': TIMEZONE_DISPLAY,
             'logs': logs,
         }
         # Include time range info if custom range was used
@@ -7336,6 +7358,13 @@ class WebServer:
                         outline: none;
                         border-color: #4CAF50;
                     }
+                    .timezone-hint {
+                        color: #888;
+                        font-size: 0.8em;
+                        padding: 8px;
+                        background: #333;
+                        border-radius: 4px;
+                    }
                     /* Reprocessing jobs */
                     .reprocessing-list {
                         display: flex;
@@ -7558,6 +7587,7 @@ class WebServer:
                             <input type="datetime-local" id="logStartTime" onchange="loadLogs()">
                             <label>To:</label>
                             <input type="datetime-local" id="logEndTime" onchange="loadLogs()">
+                            <span class="timezone-hint">""" + TIMEZONE_DISPLAY + """</span>
                         </div>
                     </div>
                     <div class="log-info" id="logInfo">Loading...</div>
@@ -9664,6 +9694,7 @@ class WebServer:
         site = web.TCPSite(runner, '0.0.0.0', self.port)
         await site.start()
         LOGGER.info(f"Web server started on http://0.0.0.0:{self.port}")
+        LOGGER.info(f"Server timezone: {TIMEZONE_DISPLAY}")
         
         # Keep the server running until cancelled
         try:

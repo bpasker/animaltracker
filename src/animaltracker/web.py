@@ -6765,12 +6765,16 @@ class WebServer:
         """Get recent logs from journalctl or log files."""
         import subprocess
         import re as regex
-        
+
         # Get query params
         camera_id = request.query.get('camera', None)
         minutes = int(request.query.get('minutes', 30))
         level = request.query.get('level', 'all')  # all, error, warning
         log_type = request.query.get('type', 'all')  # all, no-http, detection, tracking, events, clips, errors
+
+        # Custom time range support (overrides minutes if provided)
+        start_time = request.query.get('start', None)  # ISO format: 2026-01-17T10:00
+        end_time = request.query.get('end', None)  # ISO format: 2026-01-17T12:00
         
         # Server-side filter patterns (match client-side)
         # Patterns to exclude HTTP access logs from all filters
@@ -6832,7 +6836,18 @@ class WebServer:
         source = 'none'
         error_msg = None
         skipped_count = 0
-        
+
+        # Parse custom time range if provided
+        time_range_start = None
+        time_range_end = None
+        if start_time and end_time:
+            try:
+                # Parse ISO format datetime-local (2026-01-17T10:00)
+                time_range_start = datetime.fromisoformat(start_time).replace(tzinfo=CENTRAL_TZ)
+                time_range_end = datetime.fromisoformat(end_time).replace(tzinfo=CENTRAL_TZ)
+            except ValueError as e:
+                LOGGER.warning("Invalid time range format: %s", e)
+
         # Try journalctl first (for systemd systems)
         try:
             # Build journalctl command - simpler approach without unit filtering
@@ -6841,11 +6856,17 @@ class WebServer:
             fetch_limit = 2000 if log_type != 'all' else 500
             cmd = [
                 'journalctl',
-                '--since', f'{minutes} minutes ago',
                 '--no-pager',
                 '-o', 'json',
                 '-n', str(fetch_limit),
             ]
+
+            # Add time range - either custom or relative
+            if time_range_start and time_range_end:
+                cmd.extend(['--since', time_range_start.strftime('%Y-%m-%d %H:%M:%S')])
+                cmd.extend(['--until', time_range_end.strftime('%Y-%m-%d %H:%M:%S')])
+            else:
+                cmd.extend(['--since', f'{minutes} minutes ago'])
             
             # Add unit filter if specific camera requested
             if camera_id:
@@ -6925,7 +6946,13 @@ class WebServer:
         # Also read from log files and merge (not just fallback)
         log_files_found = 0
         if self.logs_root and self.logs_root.exists():
-            cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
+            # Use custom time range or fall back to minutes
+            if time_range_start:
+                cutoff = time_range_start
+                cutoff_end = time_range_end
+            else:
+                cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
+                cutoff_end = None
             
             # Look for log files
             log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
@@ -6998,9 +7025,15 @@ class WebServer:
             'skipped': skipped_count,
             'logs': logs,
         }
+        # Include time range info if custom range was used
+        if time_range_start and time_range_end:
+            response_data['time_range'] = {
+                'start': time_range_start.isoformat(),
+                'end': time_range_end.isoformat(),
+            }
         if error_msg and source in ('none', 'unknown'):
             response_data['error'] = error_msg
-        
+
         return web.json_response(response_data)
 
     async def handle_monitor_page(self, request):
@@ -7243,6 +7276,35 @@ class WebServer:
                     .refresh-logs-btn:hover, .copy-logs-btn:hover { background: #444; }
                     .copy-logs-btn { background: #2a5a2a; }
                     .copy-logs-btn:hover { background: #3a6a3a; }
+                    /* Time range picker */
+                    .time-range-picker {
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        padding: 12px;
+                        margin-bottom: 12px;
+                    }
+                    .time-range-row {
+                        display: flex;
+                        align-items: center;
+                        gap: 12px;
+                        flex-wrap: wrap;
+                    }
+                    .time-range-row label {
+                        color: #888;
+                        font-size: 0.85em;
+                    }
+                    .time-range-row input[type="datetime-local"] {
+                        background: #2a2a2a;
+                        color: #fff;
+                        border: 1px solid #444;
+                        padding: 8px 12px;
+                        border-radius: 6px;
+                        font-size: 0.85em;
+                    }
+                    .time-range-row input[type="datetime-local"]:focus {
+                        outline: none;
+                        border-color: #4CAF50;
+                    }
                     /* Reprocessing jobs */
                     .reprocessing-list {
                         display: flex;
@@ -7445,7 +7507,7 @@ class WebServer:
                             <option value="clips">Clips Only</option>
                             <option value="errors">Errors/Warnings</option>
                         </select>
-                        <select id="logMinutes" onchange="loadLogs()">
+                        <select id="logMinutes" onchange="onTimeRangeChange()">
                             <option value="15">Last 15 min</option>
                             <option value="30" selected>Last 30 min</option>
                             <option value="60">Last 1 hour</option>
@@ -7454,9 +7516,18 @@ class WebServer:
                             <option value="720">Last 12 hours</option>
                             <option value="1440">Last 24 hours</option>
                             <option value="2880">Last 48 hours</option>
+                            <option value="custom">Custom Range...</option>
                         </select>
                         <button class="refresh-logs-btn" onclick="loadLogs()">↻ Refresh</button>
                         <button class="copy-logs-btn" onclick="copyLogs()">📋 Copy</button>
+                    </div>
+                    <div class="time-range-picker" id="timeRangePicker" style="display: none;">
+                        <div class="time-range-row">
+                            <label>From:</label>
+                            <input type="datetime-local" id="logStartTime" onchange="loadLogs()">
+                            <label>To:</label>
+                            <input type="datetime-local" id="logEndTime" onchange="loadLogs()">
+                        </div>
                     </div>
                     <div class="log-info" id="logInfo">Loading...</div>
                     <div class="log-container" id="logContainer">
@@ -7681,24 +7752,67 @@ class WebServer:
                         return true;
                     }
                     
+                    function onTimeRangeChange() {
+                        const minutes = document.getElementById('logMinutes').value;
+                        const picker = document.getElementById('timeRangePicker');
+
+                        if (minutes === 'custom') {
+                            picker.style.display = 'block';
+                            // Set default values: last 2 hours
+                            const now = new Date();
+                            const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+
+                            // Format for datetime-local input (YYYY-MM-DDTHH:MM)
+                            const formatDateTime = (d) => {
+                                const year = d.getFullYear();
+                                const month = String(d.getMonth() + 1).padStart(2, '0');
+                                const day = String(d.getDate()).padStart(2, '0');
+                                const hours = String(d.getHours()).padStart(2, '0');
+                                const mins = String(d.getMinutes()).padStart(2, '0');
+                                return `${year}-${month}-${day}T${hours}:${mins}`;
+                            };
+
+                            const startInput = document.getElementById('logStartTime');
+                            const endInput = document.getElementById('logEndTime');
+                            if (!startInput.value) startInput.value = formatDateTime(twoHoursAgo);
+                            if (!endInput.value) endInput.value = formatDateTime(now);
+                        } else {
+                            picker.style.display = 'none';
+                        }
+                        loadLogs();
+                    }
+
                     async function loadLogs() {
                         const camera = document.getElementById('logCamera').value;
                         const level = document.getElementById('logLevel').value;
                         const logType = document.getElementById('logType').value;
                         const minutes = document.getElementById('logMinutes').value;
-                        
+
                         const logContainer = document.getElementById('logContainer');
                         const logInfo = document.getElementById('logInfo');
-                        
+
                         logInfo.textContent = 'Loading...';
-                        
+
                         try {
                             const params = new URLSearchParams({
-                                minutes: minutes,
                                 level: level,
                                 type: logType,  // Pass filter type to server
                             });
                             if (camera) params.set('camera', camera);
+
+                            // Handle custom time range vs relative minutes
+                            if (minutes === 'custom') {
+                                const startTime = document.getElementById('logStartTime').value;
+                                const endTime = document.getElementById('logEndTime').value;
+                                if (startTime && endTime) {
+                                    params.set('start', startTime);
+                                    params.set('end', endTime);
+                                } else {
+                                    params.set('minutes', '30');  // Fallback
+                                }
+                            } else {
+                                params.set('minutes', minutes);
+                            }
                             
                             const response = await fetch('/api/logs?' + params);
                             const data = await response.json();
@@ -7707,12 +7821,24 @@ class WebServer:
                             const logs = data.logs;
                             
                             // Update info
-                            let sourceText = data.source === 'journalctl' ? 'systemd journal' : 
+                            let sourceText = data.source === 'journalctl' ? 'systemd journal' :
                                             (data.source === 'journalctl+logfile' ? 'journal + logs' :
                                             (data.source === 'logfile' ? 'log files' : 'no source'));
                             let filterText = data.skipped > 0 ? ` (${data.skipped} filtered out)` : '';
                             let errorText = data.error ? ` [${data.error}]` : '';
-                            logInfo.textContent = `${logs.length} entries from ${sourceText}${filterText}${errorText}`;
+
+                            // Show time range info
+                            let timeText = '';
+                            if (data.time_range) {
+                                const start = new Date(data.time_range.start);
+                                const end = new Date(data.time_range.end);
+                                const formatTime = (d) => d.toLocaleString('en-US', {
+                                    month: 'short', day: 'numeric',
+                                    hour: '2-digit', minute: '2-digit'
+                                });
+                                timeText = ` • ${formatTime(start)} to ${formatTime(end)}`;
+                            }
+                            logInfo.textContent = `${logs.length} entries from ${sourceText}${timeText}${filterText}${errorText}`;
                             
                             // Render logs
                             if (logs.length === 0) {

@@ -6792,6 +6792,7 @@ class WebServer:
         minutes = int(request.query.get('minutes', 30))
         level = request.query.get('level', 'all')  # all, error, warning
         log_type = request.query.get('type', 'all')  # all, no-http, detection, tracking, events, clips, errors
+        limit = min(int(request.query.get('limit', 200)), 2000)  # Cap at 2000 to prevent memory issues
 
         # Custom time range support (overrides minutes if provided)
         start_time = request.query.get('start', None)  # ISO format: 2026-01-17T10:00
@@ -6874,7 +6875,8 @@ class WebServer:
             # Build journalctl command - simpler approach without unit filtering
             # to capture all system logs, then filter in Python
             # Fetch more logs when filtering to ensure we get enough matches
-            fetch_limit = 2000 if log_type != 'all' else 500
+            # Use at least 2x the requested limit to account for filtering
+            fetch_limit = max(limit * 2, 500) if log_type == 'all' else max(limit * 4, 2000)
             cmd = [
                 'journalctl',
                 '--no-pager',
@@ -7060,7 +7062,7 @@ class WebServer:
                     source = 'logfile'
         
         # Sort by time descending and limit
-        logs = logs[-200:]  # Keep last 200
+        logs = logs[-limit:]  # Keep last N (user-configurable, max 2000)
         logs.reverse()  # Most recent first
         
         # Determine final source description
@@ -7073,6 +7075,7 @@ class WebServer:
             'minutes': minutes,
             'level': level,
             'type': log_type,
+            'limit': limit,
             'count': len(logs),
             'skipped': skipped_count,
             'timezone': TIMEZONE_DISPLAY,
@@ -7578,6 +7581,13 @@ class WebServer:
                             <option value="2880">Last 48 hours</option>
                             <option value="custom">Custom Range...</option>
                         </select>
+                        <select id="logLimit" onchange="loadLogs()">
+                            <option value="100">100 entries</option>
+                            <option value="200" selected>200 entries</option>
+                            <option value="500">500 entries</option>
+                            <option value="1000">1000 entries</option>
+                            <option value="2000">2000 entries</option>
+                        </select>
                         <button class="refresh-logs-btn" onclick="loadLogs()">↻ Refresh</button>
                         <button class="copy-logs-btn" onclick="copyLogs()">📋 Copy</button>
                     </div>
@@ -7848,6 +7858,7 @@ class WebServer:
                         const level = document.getElementById('logLevel').value;
                         const logType = document.getElementById('logType').value;
                         const minutes = document.getElementById('logMinutes').value;
+                        const limit = document.getElementById('logLimit').value;
 
                         const logContainer = document.getElementById('logContainer');
                         const logInfo = document.getElementById('logInfo');
@@ -7858,6 +7869,7 @@ class WebServer:
                             const params = new URLSearchParams({
                                 level: level,
                                 type: logType,  // Pass filter type to server
+                                limit: limit,
                             });
                             if (camera) params.set('camera', camera);
 

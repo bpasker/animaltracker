@@ -6954,6 +6954,33 @@ class WebServer:
                 cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
                 cutoff_end = None
             
+            # Helper to parse log timestamps
+            def parse_log_timestamp(line):
+                """Try to extract datetime from log line. Returns (datetime, time_str) or (None, time_str)."""
+                # Try full datetime: 2026-01-17 10:30:45 or 2026-01-17T10:30:45
+                full_match = regex.search(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})', line)
+                if full_match:
+                    try:
+                        dt = datetime.strptime(f"{full_match.group(1)} {full_match.group(2)}", '%Y-%m-%d %H:%M:%S')
+                        dt = dt.replace(tzinfo=CENTRAL_TZ)
+                        return dt, full_match.group(2)
+                    except ValueError:
+                        pass
+
+                # Try time only: 10:30:45 - assume today
+                time_match = regex.search(r'(\d{2}:\d{2}:\d{2})', line)
+                if time_match:
+                    time_str = time_match.group(1)
+                    try:
+                        today = datetime.now(tz=CENTRAL_TZ).date()
+                        t = datetime.strptime(time_str, '%H:%M:%S').time()
+                        dt = datetime.combine(today, t, tzinfo=CENTRAL_TZ)
+                        return dt, time_str
+                    except ValueError:
+                        return None, time_str
+
+                return None, '--:--:--'
+
             # Look for log files
             log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
             for pattern in log_patterns:
@@ -6967,26 +6994,30 @@ class WebServer:
                                 line = line.strip()
                                 if not line:
                                     continue
-                                
+
                                 # Parse common log formats
                                 log_level = 'info'
                                 if 'ERROR' in line or 'error' in line.lower():
                                     log_level = 'error'
                                 elif 'WARNING' in line or 'warning' in line.lower():
                                     log_level = 'warning'
-                                
+
                                 # Filter by level
                                 if level == 'error' and log_level != 'error':
                                     continue
                                 if level == 'warning' and log_level not in ('error', 'warning'):
                                     continue
-                                
-                                # Try to extract timestamp
-                                time_str = '--:--:--'
-                                time_match = regex.search(r'(\\d{2}:\\d{2}:\\d{2})', line)
-                                if time_match:
-                                    time_str = time_match.group(1)
-                                
+
+                                # Extract and filter by timestamp
+                                log_dt, time_str = parse_log_timestamp(line)
+
+                                # Apply time range filter if we could parse the timestamp
+                                if log_dt:
+                                    if log_dt < cutoff:
+                                        continue  # Before start time
+                                    if cutoff_end and log_dt > cutoff_end:
+                                        continue  # After end time
+
                                 # Apply server-side type filter
                                 if matches_filter(line, log_type):
                                     logs.append({

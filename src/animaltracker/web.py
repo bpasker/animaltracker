@@ -6900,23 +6900,24 @@ class WebServer:
 
         # Try journalctl first (for systemd systems)
         try:
-            # Build journalctl command - simpler approach without unit filtering
-            # to capture all system logs, then filter in Python
-            # Fetch more logs when filtering to ensure we get enough matches
-            # Use at least 2x the requested limit to account for filtering
-            fetch_limit = max(limit * 2, 500) if log_type == 'all' else max(limit * 4, 2000)
+            # Build journalctl command
             cmd = [
                 'journalctl',
                 '--no-pager',
                 '-o', 'json',
-                '-n', str(fetch_limit),
             ]
 
             # Add time range - either custom or relative
             if time_range_start and time_range_end:
+                # For custom time range, fetch ALL logs in the range (no -n limit)
+                # We'll apply the limit after filtering
                 cmd.extend(['--since', time_range_start.strftime('%Y-%m-%d %H:%M:%S')])
                 cmd.extend(['--until', time_range_end.strftime('%Y-%m-%d %H:%M:%S')])
             else:
+                # For relative time (last N minutes), use -n to limit fetch size
+                # Fetch more logs when filtering to ensure we get enough matches
+                fetch_limit = max(limit * 2, 500) if log_type == 'all' else max(limit * 4, 2000)
+                cmd.extend(['-n', str(fetch_limit)])
                 cmd.extend(['--since', f'{minutes} minutes ago'])
             
             # Add unit filter if specific camera requested
@@ -7036,13 +7037,15 @@ class WebServer:
 
             # Look for log files
             log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
+            # For custom time range, read more lines to ensure we capture the full range
+            max_lines_per_file = 10000 if time_range_start else 500
             for pattern in log_patterns:
                 for log_file in self.logs_root.glob(pattern):
                     log_files_found += 1
                     try:
                         with open(log_file, 'r') as f:
-                            # Read last 500 lines
-                            lines = f.readlines()[-500:]
+                            # Read last N lines (more for custom range)
+                            lines = f.readlines()[-max_lines_per_file:]
                             for line in lines:
                                 line = line.strip()
                                 if not line:
@@ -7092,8 +7095,10 @@ class WebServer:
                 else:
                     source = 'logfile'
         
-        # Sort by time descending and limit
-        logs = logs[-limit:]  # Keep last N (user-configurable, max 2000)
+        # Sort by timestamp (oldest first), then take last N and reverse for most recent first
+        # This ensures we get the most recent logs within the time range
+        logs.sort(key=lambda x: x.get('timestamp') or 0)  # Sort by timestamp ascending
+        logs = logs[-limit:]  # Keep last N (most recent)
         logs.reverse()  # Most recent first
         
         # Determine final source description

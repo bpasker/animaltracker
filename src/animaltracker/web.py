@@ -12,14 +12,28 @@ from datetime import datetime, timezone, timedelta
 
 from .species_names import get_common_name, format_species_display, get_species_icon
 
-# Server's local timezone (auto-detected)
+# Server's timezone (configurable or auto-detected)
 import time as _time
 
-def _get_local_timezone():
-    """Get the server's local timezone with DST support."""
+def _get_timezone(configured_tz: str = None):
+    """Get timezone - use configured value if provided, otherwise auto-detect.
+
+    Args:
+        configured_tz: Timezone name like "America/Chicago", "US/Central", "UTC"
+    """
     try:
         from zoneinfo import ZoneInfo
-        # Try to get the system timezone name
+
+        # Use configured timezone if provided
+        if configured_tz:
+            try:
+                return ZoneInfo(configured_tz)
+            except Exception as e:
+                # LOGGER may not be defined yet at module load time
+                import logging
+                logging.getLogger(__name__).warning(f"Invalid timezone '{configured_tz}': {e}, falling back to auto-detect")
+
+        # Auto-detect from environment/system
         import os
         tz_name = os.environ.get('TZ')
         if tz_name:
@@ -55,23 +69,29 @@ def _get_local_timezone():
     tz_name = _time.tzname[1] if _time.daylight and _time.localtime().tm_isdst else _time.tzname[0]
     return timezone(offset, tz_name)
 
-LOCAL_TZ = _get_local_timezone()
-# Keep CENTRAL_TZ as alias for backwards compatibility
-CENTRAL_TZ = LOCAL_TZ
-
-def get_timezone_display_name():
+def _get_timezone_display_name(tz):
     """Get a human-readable timezone name for display."""
     try:
         # Try to get the zone name from ZoneInfo
-        if hasattr(LOCAL_TZ, 'key'):
-            return LOCAL_TZ.key  # e.g., "America/Chicago"
+        if hasattr(tz, 'key'):
+            return tz.key  # e.g., "America/Chicago"
         # Fallback to tzname
-        now = datetime.now(LOCAL_TZ)
-        return LOCAL_TZ.tzname(now) or str(LOCAL_TZ)
+        now = datetime.now(tz)
+        return tz.tzname(now) or str(tz)
     except Exception:
-        return str(LOCAL_TZ)
+        return str(tz)
 
-TIMEZONE_DISPLAY = get_timezone_display_name()
+# Initialize with auto-detect (will be updated when WebServer starts with config)
+LOCAL_TZ = _get_timezone()
+CENTRAL_TZ = LOCAL_TZ  # Backwards compatibility alias
+TIMEZONE_DISPLAY = _get_timezone_display_name(LOCAL_TZ)
+
+def configure_timezone(tz_name: str = None):
+    """Configure the global timezone. Called when config is loaded."""
+    global LOCAL_TZ, CENTRAL_TZ, TIMEZONE_DISPLAY
+    LOCAL_TZ = _get_timezone(tz_name)
+    CENTRAL_TZ = LOCAL_TZ
+    TIMEZONE_DISPLAY = _get_timezone_display_name(LOCAL_TZ)
 
 if TYPE_CHECKING:
     from .pipeline import StreamWorker
@@ -86,6 +106,14 @@ class WebServer:
         self.port = port
         self.config_path = config_path
         self.runtime = runtime
+
+        # Configure timezone from config (or auto-detect if not specified)
+        configured_tz = None
+        if runtime and hasattr(runtime, 'general') and hasattr(runtime.general, 'timezone'):
+            configured_tz = runtime.general.timezone
+        configure_timezone(configured_tz)
+        LOGGER.info(f"Timezone configured: {TIMEZONE_DISPLAY}" + (f" (from config)" if configured_tz else " (auto-detected)"))
+
         # State file for persisting PTZ settings across restarts
         # Store in config directory alongside cameras.yml
         config_dir = config_path.parent if config_path else None

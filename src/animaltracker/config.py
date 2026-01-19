@@ -183,6 +183,7 @@ class GeneralSettings(BaseModel):
     exclusion_list: List[str] = Field(default_factory=list)
     notification: NotificationSettings
     retention: RetentionSettings = RetentionSettings()
+    timezone: Optional[str] = None  # e.g., "America/Chicago", "US/Central", "UTC"
 
 
 class RuntimeConfig(BaseModel):

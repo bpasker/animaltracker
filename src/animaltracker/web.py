@@ -6948,10 +6948,11 @@ class WebServer:
                             # Parse journalctl JSON format
                             timestamp = entry.get('__REALTIME_TIMESTAMP', '')
                             if timestamp:
-                                # Convert microseconds to datetime
+                                # Convert microseconds to seconds (Unix epoch)
                                 ts = int(timestamp) / 1_000_000
                                 time_str = datetime.fromtimestamp(ts, tz=CENTRAL_TZ).strftime('%H:%M:%S')
                             else:
+                                ts = None
                                 time_str = '--:--:--'
                             
                             message = entry.get('MESSAGE', '')
@@ -6975,6 +6976,7 @@ class WebServer:
                             if matches_filter(message, log_type):
                                 logs.append({
                                     'time': time_str,
+                                    'timestamp': ts,  # Unix epoch for client-side timezone conversion
                                     'level': log_level,
                                     'camera': cam,
                                     'message': message,
@@ -7007,14 +7009,14 @@ class WebServer:
             
             # Helper to parse log timestamps
             def parse_log_timestamp(line):
-                """Try to extract datetime from log line. Returns (datetime, time_str) or (None, time_str)."""
+                """Try to extract datetime from log line. Returns (datetime, time_str, unix_ts) or (None, time_str, None)."""
                 # Try full datetime: 2026-01-17 10:30:45 or 2026-01-17T10:30:45
                 full_match = regex.search(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})', line)
                 if full_match:
                     try:
                         dt = datetime.strptime(f"{full_match.group(1)} {full_match.group(2)}", '%Y-%m-%d %H:%M:%S')
                         dt = dt.replace(tzinfo=CENTRAL_TZ)
-                        return dt, full_match.group(2)
+                        return dt, full_match.group(2), dt.timestamp()
                     except ValueError:
                         pass
 
@@ -7026,11 +7028,11 @@ class WebServer:
                         today = datetime.now(tz=CENTRAL_TZ).date()
                         t = datetime.strptime(time_str, '%H:%M:%S').time()
                         dt = datetime.combine(today, t, tzinfo=CENTRAL_TZ)
-                        return dt, time_str
+                        return dt, time_str, dt.timestamp()
                     except ValueError:
-                        return None, time_str
+                        return None, time_str, None
 
-                return None, '--:--:--'
+                return None, '--:--:--', None
 
             # Look for log files
             log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
@@ -7060,7 +7062,7 @@ class WebServer:
                                     continue
 
                                 # Extract and filter by timestamp
-                                log_dt, time_str = parse_log_timestamp(line)
+                                log_dt, time_str, unix_ts = parse_log_timestamp(line)
 
                                 # Apply time range filter if we could parse the timestamp
                                 if log_dt:
@@ -7073,6 +7075,7 @@ class WebServer:
                                 if matches_filter(line, log_type):
                                     logs.append({
                                         'time': time_str,
+                                        'timestamp': unix_ts,  # Unix epoch for client-side timezone conversion
                                         'level': log_level,
                                         'camera': '',
                                         'message': line[:500],  # Truncate long lines
@@ -7616,6 +7619,17 @@ class WebServer:
                             <option value="1000">1000 entries</option>
                             <option value="2000">2000 entries</option>
                         </select>
+                        <select id="logTimezone" onchange="onTimezoneChange()">
+                            <option value="local">Local Browser Time</option>
+                            <option value="America/Chicago">Central (Chicago)</option>
+                            <option value="America/New_York">Eastern (New York)</option>
+                            <option value="America/Denver">Mountain (Denver)</option>
+                            <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+                            <option value="UTC">UTC</option>
+                            <option value="Europe/London">London</option>
+                            <option value="Europe/Paris">Paris</option>
+                            <option value="Asia/Tokyo">Tokyo</option>
+                        </select>
                         <button class="refresh-logs-btn" onclick="loadLogs()">↻ Refresh</button>
                         <button class="copy-logs-btn" onclick="copyLogs()">📋 Copy</button>
                     </div>
@@ -7642,7 +7656,63 @@ class WebServer:
                 <script>
                     let refreshInterval = 2000;
                     let countdown = 2;
-                    
+
+                    // Timezone handling for log display
+                    function getSelectedTimezone() {
+                        return localStorage.getItem('logTimezone') || 'local';
+                    }
+
+                    function formatLogTime(timestamp) {
+                        // If no timestamp, return the server-provided time
+                        if (!timestamp) return '--:--:--';
+
+                        const tz = getSelectedTimezone();
+                        const date = new Date(timestamp * 1000);  // Convert Unix epoch to JS Date
+
+                        try {
+                            if (tz === 'local') {
+                                // Use browser's local time
+                                return date.toLocaleTimeString('en-US', {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                    hour12: false
+                                });
+                            } else {
+                                // Use specified timezone
+                                return date.toLocaleTimeString('en-US', {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                    hour12: false,
+                                    timeZone: tz
+                                });
+                            }
+                        } catch (e) {
+                            // Fallback if timezone is invalid
+                            return date.toLocaleTimeString('en-US', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit',
+                                hour12: false
+                            });
+                        }
+                    }
+
+                    function onTimezoneChange() {
+                        const tz = document.getElementById('logTimezone').value;
+                        localStorage.setItem('logTimezone', tz);
+                        loadLogs();  // Reload with new timezone
+                    }
+
+                    function initTimezoneSelector() {
+                        const saved = localStorage.getItem('logTimezone');
+                        if (saved) {
+                            const select = document.getElementById('logTimezone');
+                            if (select) select.value = saved;
+                        }
+                    }
+
                     function getBarClass(value) {
                         if (value > 90) return 'danger';
                         if (value > 70) return 'warning';
@@ -7947,7 +8017,7 @@ class WebServer:
                             } else {
                                 logContainer.innerHTML = logs.map(log => `
                                     <div class="log-entry">
-                                        <span class="log-time">${log.time}</span>
+                                        <span class="log-time">${log.timestamp ? formatLogTime(log.timestamp) : log.time}</span>
                                         ${log.camera ? `<span class="log-camera">${log.camera}</span>` : ''}
                                         <span class="log-level ${log.level}">${log.level.toUpperCase()}</span>
                                         <span class="log-message">${escapeHtml(log.message)}</span>
@@ -8036,8 +8106,11 @@ class WebServer:
                     }
                     
                     // Load logs on page load
+                    // Initialize timezone selector from saved preference
+                    initTimezoneSelector();
+
                     setTimeout(loadLogs, 500);
-                    
+
                     // Auto-refresh logs every 30 seconds
                     setInterval(() => {
                         if (logsLoaded) loadLogs();

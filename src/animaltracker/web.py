@@ -6835,12 +6835,20 @@ class WebServer:
             'no-http': {
                 'exclude': HTTP_EXCLUDE_PATTERNS
             },
+            'realtime': {
+                'include': [r'\[REALTIME\]', r'raw detections'],
+                'exclude': HTTP_EXCLUDE_PATTERNS
+            },
             'detection': {
-                'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet'],
+                'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet', r'\[REALTIME\]'],
                 'exclude': HTTP_EXCLUDE_PATTERNS  # Exclude HTTP traffic that happens to contain "detect" in URL
             },
             'tracking': {
                 'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge'],
+                'exclude': HTTP_EXCLUDE_PATTERNS
+            },
+            'ptz': {
+                'include': [r'ptz', r'PTZ', r'\[MOVE', r'\[MODE_CHANGE', r'\[TRACKING', r'\[COORD', r'\[OFFSET', r'patrol', r'preset'],
                 'exclude': HTTP_EXCLUDE_PATTERNS
             },
             'events': {
@@ -7600,8 +7608,10 @@ class WebServer:
                         <select id="logType" onchange="loadLogs()">
                             <option value="all">All Types</option>
                             <option value="no-http">Hide HTTP Traffic</option>
-                            <option value="detection">Detections Only</option>
-                            <option value="tracking">Tracking Only</option>
+                            <option value="realtime">Realtime Detections</option>
+                            <option value="detection">All Detections</option>
+                            <option value="ptz">PTZ Decisions</option>
+                            <option value="tracking">Object Tracking</option>
                             <option value="events">Events Only</option>
                             <option value="clips">Clips Only</option>
                             <option value="errors">Errors/Warnings</option>

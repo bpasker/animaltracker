@@ -39,9 +39,15 @@ def _load_secrets(config_path: str) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     _load_secrets(args.config)
-    
-    # Enable PTZ decision logging if requested
-    if getattr(args, 'ptz_debug', False):
+
+    # Enable debug logging if requested
+    if getattr(args, 'debug', False):
+        # Enable DEBUG for all animaltracker modules
+        logging.getLogger('animaltracker').setLevel(logging.DEBUG)
+        logging.getLogger('ptz.decisions').setLevel(logging.DEBUG)
+        LOGGER.info("Debug logging enabled for animaltracker.* and ptz.decisions")
+    elif getattr(args, 'ptz_debug', False):
+        # Just PTZ decision logging
         ptz_logger = logging.getLogger('ptz.decisions')
         ptz_logger.setLevel(logging.DEBUG)
         LOGGER.info("PTZ decision logging enabled (ptz.decisions)")
@@ -424,6 +430,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--camera",
         action="append",
         help="Camera id to run (repeatable); default=all",
+    )
+    run_cmd.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG logging for all animaltracker modules",
     )
     run_cmd.add_argument(
         "--ptz-debug",

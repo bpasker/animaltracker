@@ -477,7 +477,30 @@ class StreamWorker:
                 generic_confidence=self.camera.thresholds.generic_confidence
             )
         )
+
+        # Log raw detections from MegaDetector (before species filtering)
+        if detections:
+            det_summary = ', '.join(f"{d.species}:{d.confidence:.0%}" for d in detections[:3])
+            if len(detections) > 3:
+                det_summary += f" (+{len(detections)-3} more)"
+            LOGGER.info(
+                "[REALTIME] %s: %d raw detections: %s",
+                self.camera.id, len(detections), det_summary
+            )
+
         filtered = self._filter_detections(detections)
+
+        # Log if detections were filtered out
+        if detections and not filtered:
+            LOGGER.debug(
+                "[REALTIME] %s: %d detections filtered out by species rules",
+                self.camera.id, len(detections)
+            )
+        elif detections and len(filtered) < len(detections):
+            LOGGER.debug(
+                "[REALTIME] %s: %d of %d detections passed species filter",
+                self.camera.id, len(filtered), len(detections)
+            )
 
         # Store for live view overlay
         frame_h, frame_w = frame.shape[:2]
@@ -709,14 +732,29 @@ class StreamWorker:
             else:
                 # Log why no decisions were captured - helps debug PTZ issues
                 total_decisions = len(self.ptz_tracker._decision_log)
-                LOGGER.info(
-                    "No PTZ decisions in event window [%.1f - %.1f] for %s "
-                    "(tracker has %d total decisions, track_enabled=%s, mode=%s)",
-                    window_start, event_end, self.camera.id,
-                    total_decisions,
-                    self.ptz_tracker.is_track_enabled(),
-                    self.ptz_tracker.get_mode()
-                )
+                # Show timestamps of available decisions if any
+                if total_decisions > 0:
+                    oldest = min(e.timestamp for e in self.ptz_tracker._decision_log)
+                    newest = max(e.timestamp for e in self.ptz_tracker._decision_log)
+                    LOGGER.info(
+                        "No PTZ decisions in event window [%.1f - %.1f] for %s "
+                        "(tracker has %d decisions from %.1f to %.1f - outside window)",
+                        window_start, event_end, self.camera.id,
+                        total_decisions, oldest, newest
+                    )
+                else:
+                    LOGGER.info(
+                        "No PTZ decisions in event window [%.1f - %.1f] for %s "
+                        "(tracker has 0 total decisions, track_enabled=%s, mode=%s)",
+                        window_start, event_end, self.camera.id,
+                        self.ptz_tracker.is_track_enabled(),
+                        self.ptz_tracker.get_mode()
+                    )
+        else:
+            LOGGER.debug(
+                "Event closing for %s but no PTZ tracker assigned",
+                self.camera.id
+            )
         
         # Capture exclusion lists for post-processing check
         # (species may be reclassified by post-processor to an excluded species)
@@ -1336,8 +1374,14 @@ class PipelineOrchestrator:
         # This enables:
         # 1. PTZ decision logs to be captured in target camera recordings
         # 2. Self-tracking (if self_track: true) where target camera detections can trigger PTZ
+        LOGGER.info("Shared PTZ trackers available: %s", list(shared_ptz_trackers.keys()))
         for worker in workers:
             ptz_cfg = worker.camera.ptz_tracking
+            LOGGER.debug(
+                "PTZ setup check for %s: has_tracker=%s, self_track=%s, available_shared=%s",
+                worker.camera.id, worker.ptz_tracker is not None, ptz_cfg.self_track,
+                worker.camera.id in shared_ptz_trackers
+            )
             if not worker.ptz_tracker:
                 # Check if another camera created a tracker for this PTZ
                 existing_tracker = shared_ptz_trackers.get(worker.camera.id)
@@ -1353,6 +1397,11 @@ class PipelineOrchestrator:
                             "PTZ tracker shared with %s for logging (PTZ decisions will appear in recordings)",
                             worker.camera.id
                         )
+                else:
+                    LOGGER.debug(
+                        "%s has no PTZ tracker and none shared for it",
+                        worker.camera.id
+                    )
 
         # Third pass: set up multi-camera detection sources for PTZ tracking
         # This allows cam2 (target) detections to take over tracking from cam1 (source)

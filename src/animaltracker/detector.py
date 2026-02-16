@@ -64,13 +64,41 @@ class BaseDetector(ABC):
 # ============================================================================
 
 class YoloDetector(BaseDetector):
-    """YOLOv8 detection backend using Ultralytics."""
+    """YOLOv8/YOLO11 detection backend using Ultralytics.
+    
+    By default, only returns detections for animal-related COCO classes
+    to avoid false positives from non-animal objects (potted plants, 
+    umbrellas, kites, etc.) being detected in outdoor wildlife scenes.
+    """
+    
+    # COCO class IDs that are animals (or ambiguous enough to keep)
+    # Full COCO has 80 classes; these are the animal-relevant ones:
+    ANIMAL_CLASS_IDS = {
+        14,  # bird
+        15,  # cat
+        16,  # dog
+        17,  # horse
+        18,  # sheep
+        19,  # cow
+        20,  # elephant
+        21,  # bear
+        22,  # zebra
+        23,  # giraffe
+    }
     
     def __init__(
         self, 
         model_path: str = "yolov8n.pt", 
-        class_map: dict[int, str] | None = None
+        class_map: dict[int, str] | None = None,
+        animal_only: bool = True,
     ) -> None:
+        """
+        Args:
+            model_path: Path to YOLO model weights
+            class_map: Optional class ID to name mapping
+            animal_only: If True, only return animal COCO classes (filters out
+                        chairs, potted plants, etc. that cause false positives)
+        """
         try:
             from ultralytics import YOLO  # type: ignore
         except ImportError:
@@ -80,7 +108,8 @@ class YoloDetector(BaseDetector):
         
         self.model = YOLO(model_path)
         self.class_map = class_map or self.model.names
-        LOGGER.info(f"Loaded YOLO model from {model_path}")
+        self.animal_only = animal_only
+        LOGGER.info(f"Loaded YOLO model from {model_path} (animal_only={animal_only})")
 
     @property
     def backend_name(self) -> str:
@@ -95,9 +124,14 @@ class YoloDetector(BaseDetector):
             generic_confidence: Ignored for YOLO (only used by SpeciesNet)
             
         Returns:
-            List of Detection objects
+            List of Detection objects (animal classes only if animal_only=True)
         """
-        results = self.model.predict(source=frame, conf=conf_threshold, verbose=False)
+        # Pass classes filter to YOLO to only detect animals (much faster & fewer FPs)
+        predict_kwargs = dict(source=frame, conf=conf_threshold, verbose=False)
+        if self.animal_only:
+            predict_kwargs['classes'] = list(self.ANIMAL_CLASS_IDS)
+        
+        results = self.model.predict(**predict_kwargs)
         detections: List[Detection] = []
         
         for result in results:

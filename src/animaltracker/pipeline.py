@@ -238,6 +238,8 @@ class StreamWorker:
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
         self.event_state: Optional[EventState] = None
         self.pending_detection_start_ts: Optional[float] = None
+        self.pending_detection_count: int = 0  # Consecutive frames with detections
+        self.pending_detection_gap: int = 0  # Frames without detection during pending period
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
         self.latest_detections: List[Detection] = []  # Current detections for live view overlay
@@ -489,6 +491,11 @@ class StreamWorker:
             )
 
         filtered = self._filter_detections(detections)
+        
+        # Filter small detections and leaf-like shapes BEFORE event triggering
+        # This prevents false positives from triggering clip recording
+        frame_h, frame_w = frame.shape[:2]
+        filtered = self._filter_false_positives(filtered, frame_w, frame_h)
 
         # Log if detections were filtered out
         if detections and not filtered:
@@ -579,23 +586,43 @@ class StreamWorker:
             self.ptz_tracker.trim_old_decisions(cutoff)
 
         if not filtered:
-            self.pending_detection_start_ts = None
+            # Allow small gaps without resetting the pending counter.
+            # Real animals may be briefly undetected (occlusion, motion blur)
+            # but leaves tend to flicker on/off every other frame.
+            if self.pending_detection_start_ts is not None:
+                self.pending_detection_gap += 1
+                # Only reset if gap exceeds tolerance (3 consecutive empty frames)
+                if self.pending_detection_gap > 3:
+                    self.pending_detection_start_ts = None
+                    self.pending_detection_count = 0
+                    self.pending_detection_gap = 0
             await self._maybe_close_event(ts)
             return
+        
+        # Reset gap counter on detection
+        self.pending_detection_gap = 0
         
         # Use all filtered detections to update state
         primary = filtered[0]
         if self.event_state is None:
-            # Check for minimum duration
+            # Check for minimum duration AND minimum frame count
             if self.pending_detection_start_ts is None:
                 self.pending_detection_start_ts = ts
-                return # Wait for next frame
+                self.pending_detection_count = 1
+                return # Wait for more frames
             
-            if ts - self.pending_detection_start_ts < self.camera.thresholds.min_duration:
-                return # Still waiting
+            self.pending_detection_count += 1
             
-            # Duration met, start event
+            duration_met = (ts - self.pending_detection_start_ts) >= self.camera.thresholds.min_duration
+            frames_met = self.pending_detection_count >= self.camera.thresholds.min_frames
+            
+            if not (duration_met and frames_met):
+                return # Still waiting for both conditions
+            
+            # Duration AND frame count met, start event
             self.pending_detection_start_ts = None
+            self.pending_detection_count = 0
+            self.pending_detection_gap = 0
             LOGGER.info("Started tracking %s on %s (%.2f)", primary.species, self.camera.id, primary.confidence)
             
             # Create tracker for this event if enabled
@@ -688,6 +715,67 @@ class StreamWorker:
                 continue
 
             filtered.append(det)
+        return filtered
+
+    def _filter_false_positives(
+        self, detections: List[Detection], frame_width: int, frame_height: int
+    ) -> List[Detection]:
+        """Filter out detections that are likely false positives (leaves, branches, noise).
+        
+        Applies geometric filters that are model-agnostic:
+        1. Minimum area: tiny detections are usually noise/leaves
+        2. Extreme aspect ratio: very long/thin shapes are branches/leaves, not animals
+        
+        These filters run BEFORE event triggering to prevent false clips.
+        """
+        if not detections:
+            return detections
+        
+        # Use threshold-level min_detection_area (applies to all cameras),
+        # fall back to PTZ setting for backward compatibility
+        min_area_frac = getattr(self.camera.thresholds, 'min_detection_area',
+                                self.camera.ptz_tracking.min_detection_area)
+        frame_area = frame_width * frame_height
+        min_area_pixels = min_area_frac * frame_area
+        
+        # Animals have aspect ratios roughly between 1:4 and 4:1
+        # Leaves/branches tend to be much thinner (1:8 or more)
+        max_aspect_ratio = 5.0
+        
+        filtered = []
+        for det in detections:
+            bbox_w = det.bbox[2] - det.bbox[0]
+            bbox_h = det.bbox[3] - det.bbox[1]
+            det_area = bbox_w * bbox_h
+            
+            # Filter tiny detections
+            if det_area < min_area_pixels:
+                LOGGER.debug(
+                    "[FP_FILTER] %s: too small (%.1fpx², %.2f%% of frame, min=%.2f%%)",
+                    self.camera.id, det_area, (det_area / frame_area) * 100,
+                    min_area_frac * 100
+                )
+                continue
+            
+            # Filter extreme aspect ratios (likely branches/leaves)
+            if bbox_w > 0 and bbox_h > 0:
+                aspect = max(bbox_w / bbox_h, bbox_h / bbox_w)
+                if aspect > max_aspect_ratio:
+                    LOGGER.debug(
+                        "[FP_FILTER] %s: extreme aspect ratio %.1f (likely leaf/branch), "
+                        "bbox=%.0fx%.0f, species=%s",
+                        self.camera.id, aspect, bbox_w, bbox_h, det.species
+                    )
+                    continue
+            
+            filtered.append(det)
+        
+        if len(filtered) < len(detections):
+            LOGGER.debug(
+                "[FP_FILTER] %s: filtered %d/%d detections (size/shape)",
+                self.camera.id, len(detections) - len(filtered), len(detections)
+            )
+        
         return filtered
 
     async def _maybe_close_event(self, ts: float) -> None:

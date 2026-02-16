@@ -112,6 +112,7 @@ class ThresholdSettings(BaseModel):
     generic_confidence: float = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
     min_frames: int = Field(default=3, ge=1)
     min_duration: float = Field(default=2.0, ge=0)
+    min_detection_area: float = Field(default=0.005, ge=0.0, le=0.5, description="Ignore detections smaller than this fraction of frame area (0.005 = 0.5%%, filters leaves/noise)")
 
 
 class PTZTrackingSettings(BaseModel):

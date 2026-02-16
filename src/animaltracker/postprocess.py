@@ -501,10 +501,15 @@ class ClipPostProcessor:
                         ))
                         filtered_count += 1
                     
-                    if tracker and detections:
-                        # Update tracker with detections, passing actual video frame index
+                    if tracker:
+                        # ALWAYS update tracker, even with empty detections.
+                        # This keeps ByteTrack's internal frame counter synchronized
+                        # so lost_track_buffer and Kalman filter predictions work correctly.
+                        # Without this, blank frames don't advance the counter,
+                        # corrupting track association for subsequent detections.
                         tracked = tracker.update(detections, frame, frame_idx=frame_idx)
-                        all_frames_data.append((frame_idx, frame.copy(), detections))
+                        if detections:
+                            all_frames_data.append((frame_idx, frame.copy(), detections))
                         
                         # Log tracking assignments
                         for track_id, det in tracked.items():

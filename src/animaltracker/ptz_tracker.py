@@ -195,6 +195,14 @@ class PTZTracker:
     _last_tracked_species: str = field(default="", init=False)  # Species we were tracking when lost
     _last_detection_source: str = field(default="", init=False)  # Which camera provided the detection
 
+    # Track persistence: Once we lock onto a target, keep tracking it
+    # to prevent jitter from switching between detections every frame.
+    _locked_track_id: Optional[int] = field(default=None, init=False)  # Currently locked track ID
+    _locked_bbox_center: Optional[Tuple[float, float]] = field(default=None, init=False)  # Last known center (normalized)
+    _lock_start_time: float = field(default=0.0, init=False)  # When we locked onto current target
+    _consecutive_lock_misses: int = field(default=0, init=False)  # Frames since locked target was last seen
+    _lock_miss_limit: int = field(default=5, init=False)  # Misses before releasing lock
+
     # Decision log buffer (for storing with clips)
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
     _decision_log_max_entries: int = field(default=1000, init=False)  # Prevent unbounded growth
@@ -352,6 +360,10 @@ class PTZTracker:
         self.set_patrol_enabled(False)
         self.set_track_enabled(False)
         self._mode = PTZMode.IDLE
+        # Reset track lock
+        self._locked_track_id = None
+        self._locked_bbox_center = None
+        self._consecutive_lock_misses = 0
         try:
             self.onvif_client.ptz_stop(self.profile_token)
         except Exception:
@@ -716,8 +728,10 @@ class PTZTracker:
             len(detections), frame_width, frame_height
         )
 
-        # Find best detection to track (highest confidence)
-        best = max(detections, key=lambda d: d.confidence)
+        # Select best detection with track persistence (prevents jitter)
+        best = self._select_best_detection(detections, frame_width, frame_height)
+        if best is None:
+            return False
         bbox = best.bbox
 
         PTZ_LOGGER.info(
@@ -867,11 +881,19 @@ class PTZTracker:
                     })
                     self._mode = PTZMode.PATROL
                     self._tracking_lost_logged_at = 0.0
+                    # Reset track lock so we pick fresh when tracking resumes
+                    self._locked_track_id = None
+                    self._locked_bbox_center = None
+                    self._consecutive_lock_misses = 0
                     if self._preset_tokens:
                         self._goto_current_preset()
                 else:
                     self._mode = PTZMode.IDLE
                     self._tracking_lost_logged_at = 0.0
+                    # Reset track lock
+                    self._locked_track_id = None
+                    self._locked_bbox_center = None
+                    self._consecutive_lock_misses = 0
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)
                     except Exception:
@@ -899,6 +921,98 @@ class PTZTracker:
 
         return False
 
+    def _select_best_detection(
+        self, detections: List['Detection'], frame_width: int, frame_height: int
+    ) -> 'Detection':
+        """Select the best detection to track, with track persistence.
+        
+        Once locked onto a target (by track_id or spatial proximity), keep
+        tracking it to prevent jitter from switching targets every frame.
+        Only switch targets when the locked target is truly lost.
+        """
+        if not detections:
+            return None
+        
+        # Build a map of track_id -> detection for quick lookup
+        track_id_map = {}
+        for det in detections:
+            tid = getattr(det, 'track_id', None)
+            if tid is not None:
+                track_id_map[tid] = det
+        
+        # 1. If we have a locked track_id, try to keep tracking it
+        if self._locked_track_id is not None and self._locked_track_id in track_id_map:
+            self._consecutive_lock_misses = 0
+            locked_det = track_id_map[self._locked_track_id]
+            # Update last known center
+            cx = (locked_det.bbox[0] + locked_det.bbox[2]) / 2 / frame_width
+            cy = (locked_det.bbox[1] + locked_det.bbox[3]) / 2 / frame_height
+            self._locked_bbox_center = (cx, cy)
+            PTZ_LOGGER.debug(
+                "[LOCK_PERSIST] Continuing to track locked target track_id=%d (%s, %.1f%%)",
+                self._locked_track_id, locked_det.species, locked_det.confidence * 100
+            )
+            return locked_det
+        
+        # 2. Locked track ID not found - try spatial proximity to last known position
+        if self._locked_bbox_center is not None:
+            self._consecutive_lock_misses += 1
+            
+            if self._consecutive_lock_misses <= self._lock_miss_limit:
+                # Find detection closest to last known position
+                best_dist = float('inf')
+                best_nearby = None
+                for det in detections:
+                    cx = (det.bbox[0] + det.bbox[2]) / 2 / frame_width
+                    cy = (det.bbox[1] + det.bbox[3]) / 2 / frame_height
+                    dist = ((cx - self._locked_bbox_center[0]) ** 2 + 
+                            (cy - self._locked_bbox_center[1]) ** 2) ** 0.5
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_nearby = det
+                
+                # If nearest detection is spatially close (within 15% of frame), use it
+                if best_nearby is not None and best_dist < 0.15:
+                    new_tid = getattr(best_nearby, 'track_id', None)
+                    PTZ_LOGGER.info(
+                        "[LOCK_SPATIAL] Locked track %s lost, nearest detection at dist=%.3f "
+                        "(track_id=%s, %s, %.1f%%) - continuing",
+                        self._locked_track_id, best_dist,
+                        new_tid, best_nearby.species, best_nearby.confidence * 100
+                    )
+                    # Update lock to new track ID if available
+                    if new_tid is not None:
+                        self._locked_track_id = new_tid
+                    cx = (best_nearby.bbox[0] + best_nearby.bbox[2]) / 2 / frame_width
+                    cy = (best_nearby.bbox[1] + best_nearby.bbox[3]) / 2 / frame_height
+                    self._locked_bbox_center = (cx, cy)
+                    self._consecutive_lock_misses = 0
+                    return best_nearby
+            else:
+                # Too many misses - release lock
+                PTZ_LOGGER.info(
+                    "[LOCK_RELEASE] Releasing lock on track %s after %d misses",
+                    self._locked_track_id, self._consecutive_lock_misses
+                )
+                self._locked_track_id = None
+                self._locked_bbox_center = None
+                self._consecutive_lock_misses = 0
+        
+        # 3. No lock or lock released - pick highest confidence and establish new lock
+        best = max(detections, key=lambda d: d.confidence)
+        new_tid = getattr(best, 'track_id', None)
+        self._locked_track_id = new_tid
+        cx = (best.bbox[0] + best.bbox[2]) / 2 / frame_width
+        cy = (best.bbox[1] + best.bbox[3]) / 2 / frame_height
+        self._locked_bbox_center = (cx, cy)
+        self._consecutive_lock_misses = 0
+        self._lock_start_time = time.time()
+        PTZ_LOGGER.info(
+            "[LOCK_NEW] Locked onto new target: track_id=%s, %s (%.1f%%)",
+            new_tid, best.species, best.confidence * 100
+        )
+        return best
+
     def _do_tracking(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
         """Execute object tracking logic."""
         PTZ_LOGGER.info(
@@ -910,8 +1024,10 @@ class PTZTracker:
         self.calibration.frame_width = frame_width
         self.calibration.frame_height = frame_height
 
-        # Find best detection to track (highest confidence)
-        best = max(detections, key=lambda d: d.confidence)
+        # Select best detection with track persistence (prevents jitter)
+        best = self._select_best_detection(detections, frame_width, frame_height)
+        if best is None:
+            return False
         bbox = best.bbox
 
         PTZ_LOGGER.info(

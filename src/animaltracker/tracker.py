@@ -252,7 +252,7 @@ class ObjectTracker:
         self,
         track_activation_threshold: float = 0.25,
         lost_track_buffer: int = 120,
-        minimum_matching_threshold: float = 0.3,
+        minimum_matching_threshold: float = 0.1,
         frame_rate: int = 15,
     ):
         """Initialize the object tracker.
@@ -264,7 +264,8 @@ class ObjectTracker:
                               Default 120 handles ~8s gaps at 15fps.
             minimum_matching_threshold: IoU threshold for matching detections to 
                               existing tracks. Lower = more forgiving of movement.
-                              Default 0.3 is very permissive for fast-moving animals.
+                              Default 0.1 is very permissive to handle PTZ camera
+                              movement where the whole frame shifts between captures.
             frame_rate: Expected frame rate (for buffer calculations)
         """
         if not SUPERVISION_AVAILABLE:
@@ -305,6 +306,13 @@ class ObjectTracker:
         actual_frame_idx = frame_idx if frame_idx is not None else self.frame_count
         
         if not detections:
+            # Still update ByteTrack with empty detections so its internal
+            # frame counter advances. This is critical for:
+            # 1. Kalman filter predictions staying accurate over time
+            # 2. lost_track_buffer expiring correctly
+            # 3. Proper track association when detections resume
+            sv_empty = sv.Detections.empty()
+            self.tracker.update_with_detections(sv_empty)
             return {}
         
         # Convert to supervision format

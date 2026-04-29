@@ -36,8 +36,11 @@ class ClipBuffer:
         return len(self._buffer) / self.fps if self.fps > 0 else 0.0
 
     def push(self, timestamp: float, frame: np.ndarray) -> None:
+        # Store the frame by reference; cv2.VideoCapture.read() returns a fresh
+        # ndarray on each call, so no defensive copy is needed here. Avoiding
+        # the copy saves significant RAM in the rolling pre/post buffer.
         with self._lock:
-            self._buffer.append((timestamp, frame.copy()))
+            self._buffer.append((timestamp, frame))
 
     def dump(self) -> List[FramePayload]:
         with self._lock:

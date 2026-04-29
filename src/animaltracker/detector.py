@@ -42,6 +42,7 @@ class Detection:
     confidence: float
     bbox: List[float]  # [x1, y1, x2, y2] pixel coordinates
     taxonomy: Optional[str] = None  # For SpeciesNet: full taxonomy path
+    track_id: Optional[int] = None  # Persistent ID assigned by ObjectTracker (None until tracked)
 
 
 class BaseDetector(ABC):

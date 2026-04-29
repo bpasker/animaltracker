@@ -19,11 +19,17 @@ from .detector import Detection, BaseDetector, create_detector, create_realtime_
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager
 from .onvif_client import OnvifClient
-from .tracker import ObjectTracker, create_tracker
+from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
 from .web import WebServer
 
 LOGGER = logging.getLogger(__name__)
+
+
+# Serializes setting OPENCV_FFMPEG_CAPTURE_OPTIONS (process-wide env var) and
+# the immediately-following cv2.VideoCapture() call so concurrent worker
+# starts with different transport/hwaccel options can't race each other.
+_CAPTURE_OPEN_LOCK = threading.Lock()
 
 
 def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp", hwaccel: bool = False) -> str:
@@ -112,13 +118,16 @@ class EventState:
     def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray, frame_idx: Optional[int] = None) -> None:
         self.last_detection_ts = frame_ts
 
-        # Update tracker if available
-        if self.tracker:
-            tracked_detections = self.tracker.update(detections, frame, frame_idx=frame_idx)
-            # Use tracked detections for species updates
-            for track_id, det in tracked_detections.items():
-                # Get best species for this track so far
-                best_species, best_conf, _ = self.tracker.get_track_species(track_id)
+        # NOTE: The ObjectTracker is now driven by StreamWorker._process_frame
+        # BEFORE the PTZ tracker call, so detections already carry track_ids
+        # by the time we get here. We only consume tracker state for species
+        # accumulation; we never call tracker.update() here.
+        if self.tracker is not None:
+            for det in detections:
+                tid = getattr(det, 'track_id', None)
+                if tid is None:
+                    continue
+                best_species, best_conf, _ = self.tracker.get_track_species(tid)
                 if best_species:
                     self.species.add(best_species)
                     if best_conf > self.max_confidence:
@@ -257,6 +266,23 @@ class StreamWorker:
         self._ptz_source_camera_id: Optional[str] = None  # Source camera (wide-angle)
         self._ptz_target_camera_id: Optional[str] = None  # Target camera (PTZ/zoom)
 
+        # Whether this worker should drive the PTZ tracker (call .update on it).
+        # When a tracker is shared across workers for *logging only*, the
+        # non-driving worker must not push its own (different-camera-frame)
+        # detections into the tracker -- doing so corrupts the tracker's lock
+        # state, smoothing, and pixel->PTZ math.
+        self.ptz_drives_tracking: bool = False
+
+        # Persistent per-worker ObjectTracker. We run this BEFORE the PTZ
+        # tracker each frame so detections carry stable track_ids by the time
+        # PTZ lock-persistence logic looks at them. (Previously the tracker
+        # was only created inside an event and ran AFTER the PTZ tracker, so
+        # PTZ never saw track_ids on the same frame and lock persistence was
+        # structurally broken.)
+        self.tracker: Optional[ObjectTracker] = create_tracker(
+            enabled=tracking_enabled, frame_rate=15
+        )
+
         # Cached post-process detector (lazy initialization to avoid loading if not needed)
         # This prevents creating a new SpeciesNet model for every clip (VRAM leak fix)
         self._postprocess_detector: Optional[BaseDetector] = None
@@ -378,20 +404,25 @@ class StreamWorker:
 
         while not stop_event.is_set():
             loop = asyncio.get_running_loop()
-            # Offload connection to thread as it can block
-            cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_uri, capture_backend)
-            
+
+            def _open_capture(uri: str, hw: bool) -> 'cv2.VideoCapture':
+                # Hold the global lock across env-var write + VideoCapture
+                # construction so a concurrent worker can't flip the env var
+                # mid-open.
+                with _CAPTURE_OPEN_LOCK:
+                    resolved = build_ffmpeg_uri(
+                        self.camera.rtsp.uri, self.camera.rtsp.transport, hwaccel=hw
+                    )
+                    return cv2.VideoCapture(resolved, capture_backend)
+
+            cap = await loop.run_in_executor(None, _open_capture, rtsp_uri, use_hwaccel)
+
             if not cap.isOpened():
                 if use_hwaccel:
                     # Fall back to software decoding if CUDA failed
                     LOGGER.warning("CUDA hardware decoding failed for %s, falling back to software", self.camera.id)
                     use_hwaccel = False
-                    rtsp_uri = build_ffmpeg_uri(
-                        self.camera.rtsp.uri,
-                        self.camera.rtsp.transport,
-                        hwaccel=False
-                    )
-                    cap = await loop.run_in_executor(None, cv2.VideoCapture, rtsp_uri, capture_backend)
+                    cap = await loop.run_in_executor(None, _open_capture, rtsp_uri, False)
                     if not cap.isOpened():
                         LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
                         await asyncio.sleep(5)
@@ -421,9 +452,12 @@ class StreamWorker:
                     frame_ts = time.time()
                     self.clip_buffer.push(frame_ts, frame)
                     
-                    # Capture every frame for active events (even if inference is skipped)
+                    # Capture every frame for active events (even if inference is skipped).
+                    # Copy because OpenCV may reuse the underlying buffer for the next read,
+                    # and downstream consumers (clip writer, key-frame storage) read these
+                    # frames asynchronously.
                     if self.event_state is not None:
-                        self.event_state.frames.append((frame_ts, frame))
+                        self.event_state.frames.append((frame_ts, frame.copy()))
 
                         # Force-close events that exceed max duration (prevents memory leak)
                         max_duration = self.runtime.general.clip.max_event_seconds
@@ -433,7 +467,7 @@ class StreamWorker:
                                 "Event for %s exceeded max duration (%.1fs > %.1fs, %d frames) - force closing to prevent memory leak",
                                 self.camera.id, event_elapsed, max_duration, len(self.event_state.frames)
                             )
-                            await self._close_event(frame_ts)
+                            await self._maybe_close_event(frame_ts, force=True)
 
                     # Skip inference on some frames to save CPU
                     frame_count += 1
@@ -469,8 +503,64 @@ class StreamWorker:
             if not stop_event.is_set():
                 await asyncio.sleep(1)  # Brief pause before reconnect
 
+    @staticmethod
+    def _compute_blur_score(frame: np.ndarray) -> float:
+        """Compute Laplacian variance as a blur metric.
+        
+        Higher value = sharper image. Blurry/motion-blurred frames score low.
+        Typical values:
+        - Sharp outdoor scene: 200-1000+
+        - Slightly blurry: 50-200
+        - Heavy motion blur (PTZ moving): 5-50
+        - Completely out of focus: <5
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.Laplacian(gray, cv2.CV_64F).var()
+
     async def _process_frame(self, frame: np.ndarray, ts: float, frame_idx: int = 0) -> None:
         loop = asyncio.get_running_loop()
+
+        # --- Blur detection: skip processing blurry frames (PTZ motion blur) ---
+        blur_threshold = self.camera.thresholds.blur_threshold
+        if blur_threshold > 0:
+            blur_score = self._compute_blur_score(frame)
+            if blur_score < blur_threshold:
+                LOGGER.debug(
+                    "[BLUR_SKIP] %s: frame too blurry (score=%.1f < threshold=%.1f), skipping detection",
+                    self.camera.id, blur_score, blur_threshold
+                )
+                await self._maybe_close_event(ts)
+                return
+
+        # --- PTZ settle delay: skip detections while camera is stabilizing ---
+        # Only applies to the camera physically being moved by the PTZ tracker.
+        # Without this guard, a wide-angle source camera that triggers PTZ
+        # commands on a separate zoom camera would suppress its own detections
+        # every time it issued a move, causing tracking to never engage.
+        ptz_settle_time = self.camera.thresholds.ptz_settle_time
+        if (
+            ptz_settle_time > 0
+            and self.ptz_tracker is not None
+            and self.onvif_client is not None
+            and self.ptz_tracker.onvif_client is self.onvif_client
+        ):
+            if self.ptz_tracker.is_settling(ptz_settle_time):
+                LOGGER.debug(
+                    "[PTZ_SETTLE] %s: PTZ still settling (moved %.2fs ago, need %.2fs), skipping detection",
+                    self.camera.id,
+                    ts - self.ptz_tracker.get_last_move_time(),
+                    ptz_settle_time
+                )
+                # Invalidate this worker's published detections while we're
+                # in the settle window. Otherwise other workers reading
+                # `self.latest_detections` (multi-cam path) would treat the
+                # pre-move detections as still-current after the camera has
+                # physically moved, jerking the PTZ on stale data.
+                self.latest_detections = []
+                self.latest_detection_ts = ts
+                await self._maybe_close_event(ts)
+                return
+
         detections = await loop.run_in_executor(
             None,
             lambda: self.detector.infer(
@@ -515,8 +605,27 @@ class StreamWorker:
         self.latest_detection_ts = ts
         self.latest_frame_size = (frame_w, frame_h)
 
-        # PTZ auto-tracking: always call update (handles patrol when no detections)
-        if self.ptz_tracker:
+        # Run object tracker BEFORE the PTZ tracker so detections carry
+        # stable track_ids. The tracker also needs to be ticked on empty
+        # frames so its internal Kalman filter / lost-track buffer advance
+        # consistently with wall-clock; ObjectTracker.update handles [].
+        if self.tracker is not None:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    self.tracker.update,
+                    filtered,
+                    frame,
+                    frame_idx,
+                )
+            except Exception as e:
+                LOGGER.warning("ObjectTracker.update failed for %s: %s", self.camera.id, e)
+
+        # PTZ auto-tracking: always call update (handles patrol when no detections).
+        # Only the worker designated as the tracker driver may push detections;
+        # otherwise a second camera with a *different* coordinate space would
+        # corrupt the tracker's lock state and pixel->PTZ math.
+        if self.ptz_tracker and self.ptz_drives_tracking:
             # Debug: log what we're sending to PTZ tracker
             if filtered:
                 LOGGER.info(
@@ -534,10 +643,17 @@ class StreamWorker:
                 # Build detection dict from all contributing cameras
                 camera_detections = {}
 
+                # Use a staleness window strictly less than the worker's
+                # ptz_settle_time so a recently-moved camera's stale
+                # detections cannot drive PTZ. (Settle gate already clears
+                # latest_detections for the moved camera, but the window
+                # protects the source camera too if its inference happens
+                # to lag.)
+                staleness_window = max(0.05, min(0.2, self.camera.thresholds.ptz_settle_time / 2 - 0.05))
+
                 for cam_id, worker in self._ptz_detection_sources.items():
-                    # Only use recent detections (within 300ms to match inference latency)
                     detection_age = ts - worker.latest_detection_ts
-                    if detection_age < 0.3:
+                    if detection_age < staleness_window:
                         w, h = worker.latest_frame_size
                         if w > 0 and h > 0:
                             camera_detections[cam_id] = (
@@ -551,8 +667,8 @@ class StreamWorker:
                             )
                     else:
                         LOGGER.debug(
-                            "Multi-cam PTZ: %s detections too old (age=%.3fs > 0.3s)",
-                            cam_id, detection_age
+                            "Multi-cam PTZ: %s detections too old (age=%.3fs > %.3fs)",
+                            cam_id, detection_age, staleness_window
                         )
 
                 # Log which cameras are contributing
@@ -625,12 +741,12 @@ class StreamWorker:
             self.pending_detection_gap = 0
             LOGGER.info("Started tracking %s on %s (%.2f)", primary.species, self.camera.id, primary.confidence)
             
-            # Create tracker for this event if enabled
-            event_tracker = None
-            if self.tracking_enabled:
-                event_tracker = create_tracker(enabled=True, frame_rate=15)
-                if event_tracker:
-                    LOGGER.debug("Object tracking enabled for event on %s", self.camera.id)
+            # Create tracker for this event if enabled.
+            # We share the persistent worker tracker so PTZ lock-persistence
+            # and event-scoped species accumulation see the same track_ids.
+            event_tracker = self.tracker if self.tracking_enabled else None
+            if event_tracker:
+                LOGGER.debug("Object tracking enabled for event on %s", self.camera.id)
             
             self.event_state = EventState(
                 camera=self.camera,
@@ -657,11 +773,13 @@ class StreamWorker:
         Supports:
         - Exact match: "mammalia_rodentia_sciuridae" matches "mammalia_rodentia_sciuridae"
         - Prefix match: "mammalia_rodentia_sciuridae_sciurus" matches "mammalia_rodentia_sciuridae"
+        - Token match: "sciuridae" matches a label with token "sciuridae" (not arbitrary substrings)
         - Common name match: "mammalia_rodentia_sciuridae" matches "squirrel"
         """
         from .species_names import get_common_name
         
         normalized = self._normalize_species(detection_species)
+        norm_tokens = normalized.split('_')
         
         for exclude in excludes:
             exclude_norm = self._normalize_species(exclude)
@@ -680,9 +798,9 @@ class StreamWorker:
             if exclude_norm.startswith(normalized + '_'):
                 return True
             
-            # Check if exclude is a substring (for family/order level matching)
-            # e.g., "sciuridae" in "mammalia_rodentia_sciuridae"
-            if exclude_norm in normalized:
+            # Token match (was substring; substring matched too aggressively,
+            # e.g. excluding "bear" would also drop "bearded_dragon").
+            if exclude_norm in norm_tokens:
                 return True
         
         # Also check common name match
@@ -698,15 +816,28 @@ class StreamWorker:
         global_excludes = set(self._normalize_species(s) for s in self.runtime.general.exclusion_list)
         all_excludes = excludes | global_excludes
 
+        def _matches_include(label: str, inc: str) -> bool:
+            # Exact match
+            if label == inc:
+                return True
+            # Hierarchical: label is a more-specific child of inc
+            #   inc='mammalia_carnivora_ursidae' matches 'mammalia_carnivora_ursidae_ursus'
+            if label.startswith(inc + '_'):
+                return True
+            # Component match: inc appears as a whole token of the label
+            #   inc='bear' matches 'mammalia_carnivora_ursidae_bear' but NOT 'bearded_dragon'
+            #   inc='deer' matches 'odocoileus_deer' but NOT 'musk_deer_meadow'-style false hits
+            tokens = label.split('_')
+            if inc in tokens:
+                return True
+            return False
+
         filtered: List[Detection] = []
         for det in detections:
             label = self._normalize_species(det.species)
 
             # Check includes (if specified, only allow listed species)
-            if includes and not any(
-                label == inc or label.startswith(inc + '_') or inc in label
-                for inc in includes
-            ):
+            if includes and not any(_matches_include(label, inc) for inc in includes):
                 continue
 
             # Check excludes (skip if matches any exclude pattern)
@@ -731,10 +862,8 @@ class StreamWorker:
         if not detections:
             return detections
         
-        # Use threshold-level min_detection_area (applies to all cameras),
-        # fall back to PTZ setting for backward compatibility
-        min_area_frac = getattr(self.camera.thresholds, 'min_detection_area',
-                                self.camera.ptz_tracking.min_detection_area)
+        # Use threshold-level min_detection_area (applies to all cameras).
+        min_area_frac = self.camera.thresholds.min_detection_area
         frame_area = frame_width * frame_height
         min_area_pixels = min_area_frac * frame_area
         
@@ -778,11 +907,11 @@ class StreamWorker:
         
         return filtered
 
-    async def _maybe_close_event(self, ts: float) -> None:
+    async def _maybe_close_event(self, ts: float, force: bool = False) -> None:
         if self.event_state is None:
             return
         idle = ts - self.event_state.last_detection_ts
-        if idle < self.runtime.general.clip.post_seconds:
+        if not force and idle < self.runtime.general.clip.post_seconds:
             return
         
         # Offload clip writing, post-analysis, and notification to thread
@@ -1094,8 +1223,24 @@ class StreamWorker:
             ptz_log,
             detector_cfg,  # Pass detector config for split-model post-processing
         )
-        
+
         self.event_state = None
+
+        # Event boundary cleanup: reset the persistent ObjectTracker so the
+        # next event starts with fresh IDs (otherwise stale TrackInfo from a
+        # previous event leaks into the new clip's species accumulation).
+        # Also clear the PTZ lock so a recycled ByteTrack id of 1/2/... cannot
+        # be silently treated as a continuation of the previous event's lock.
+        if self.tracker is not None:
+            try:
+                self.tracker.reset()
+            except Exception as e:
+                LOGGER.debug("tracker.reset failed for %s: %s", self.camera.id, e)
+        if self.ptz_tracker is not None and self.ptz_drives_tracking:
+            try:
+                self.ptz_tracker.clear_lock()
+            except Exception:
+                pass
 
     def _analyze_clip_frames(self, frames: List[tuple], num_samples: int = None) -> tuple[str, float]:
         """Analyze frames from a clip to get the most specific species identification.
@@ -1359,6 +1504,7 @@ class PipelineOrchestrator:
                     if existing_tracker:
                         # Reuse existing tracker (another camera created it)
                         worker.ptz_tracker = existing_tracker
+                        worker.ptz_drives_tracking = True
                         LOGGER.info(
                             "PTZ self-tracking enabled: %s shares tracker with primary",
                             worker.camera.id
@@ -1387,6 +1533,7 @@ class PipelineOrchestrator:
                         # Enable patrol and tracking based on config
                         worker.ptz_tracker.set_patrol_enabled(ptz_cfg.patrol_enabled)
                         worker.ptz_tracker.set_track_enabled(ptz_cfg.track_enabled)
+                        worker.ptz_drives_tracking = True
                         shared_ptz_trackers[worker.camera.id] = worker.ptz_tracker
                         
                         mode_parts = []
@@ -1411,37 +1558,69 @@ class PipelineOrchestrator:
             
             # Handle cross-camera tracking (cam1 detects -> cam2 PTZ)
             elif ptz_cfg.enabled:
-                # Find target camera for PTZ control
-                target_id = ptz_cfg.target_camera_id or worker.camera.id
-                target_worker = worker_map.get(target_id)
-                
-                if target_worker and target_worker.onvif_client and target_worker.onvif_profile_token:
-                    worker.ptz_tracker = create_ptz_tracker(
-                        onvif_client=target_worker.onvif_client,
-                        profile_token=target_worker.onvif_profile_token,
-                        config={
-                            'pan_scale': ptz_cfg.pan_scale,
-                            'tilt_scale': ptz_cfg.tilt_scale,
-                            'target_fill_pct': ptz_cfg.target_fill_pct,
-                            'min_detection_area': getattr(ptz_cfg, 'min_detection_area', 0.005),
-                            'smoothing': ptz_cfg.smoothing,
-                            'update_interval': ptz_cfg.update_interval,
-                            'pan_center_x': ptz_cfg.pan_center_x,
-                            'tilt_center_y': ptz_cfg.tilt_center_y,
-                            'patrol_enabled': ptz_cfg.patrol_enabled,
-                            'patrol_speed': ptz_cfg.patrol_speed,
-                            'patrol_return_delay': ptz_cfg.patrol_return_delay,
-                            'patrol_presets': ptz_cfg.patrol_presets,
-                            'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
-                        }
+                # Find target camera for PTZ control. Refuse to silently default
+                # to self -- that would attach this worker's tracker to its own
+                # (potentially missing) ONVIF profile and either drive the
+                # wrong camera or fail silently.
+                target_id = ptz_cfg.target_camera_id
+                if not target_id:
+                    LOGGER.warning(
+                        "PTZ tracking enabled for %s but no target_camera_id "
+                        "configured; skipping (set target_camera_id or use "
+                        "self_track: true)",
+                        worker.camera.id
                     )
-                    # Enable patrol and tracking separately based on config
-                    worker.ptz_tracker.set_patrol_enabled(ptz_cfg.patrol_enabled)
-                    worker.ptz_tracker.set_track_enabled(ptz_cfg.track_enabled)
-                    
-                    # Share this tracker so target camera can also use it for self-tracking
-                    shared_ptz_trackers[target_id] = worker.ptz_tracker
-                    
+                    continue
+                if target_id == worker.camera.id:
+                    LOGGER.warning(
+                        "PTZ target_camera_id for %s points at itself; use "
+                        "self_track: true instead. Skipping.",
+                        worker.camera.id
+                    )
+                    continue
+                target_worker = worker_map.get(target_id)
+
+                if target_worker and target_worker.onvif_client and target_worker.onvif_profile_token:
+                    # If a tracker already exists for this PTZ target (e.g.,
+                    # the target camera was processed first with self_track),
+                    # reuse it instead of creating a competing instance with
+                    # its own lock and state.
+                    existing_tracker = shared_ptz_trackers.get(target_id)
+                    if existing_tracker is not None:
+                        worker.ptz_tracker = existing_tracker
+                        worker.ptz_drives_tracking = True
+                        LOGGER.info(
+                            "PTZ auto-tracking: %s reusing shared tracker for %s PTZ",
+                            worker.camera.id, target_id
+                        )
+                    else:
+                        worker.ptz_tracker = create_ptz_tracker(
+                            onvif_client=target_worker.onvif_client,
+                            profile_token=target_worker.onvif_profile_token,
+                            config={
+                                'pan_scale': ptz_cfg.pan_scale,
+                                'tilt_scale': ptz_cfg.tilt_scale,
+                                'target_fill_pct': ptz_cfg.target_fill_pct,
+                                'min_detection_area': getattr(ptz_cfg, 'min_detection_area', 0.005),
+                                'smoothing': ptz_cfg.smoothing,
+                                'update_interval': ptz_cfg.update_interval,
+                                'pan_center_x': ptz_cfg.pan_center_x,
+                                'tilt_center_y': ptz_cfg.tilt_center_y,
+                                'patrol_enabled': ptz_cfg.patrol_enabled,
+                                'patrol_speed': ptz_cfg.patrol_speed,
+                                'patrol_return_delay': ptz_cfg.patrol_return_delay,
+                                'patrol_presets': ptz_cfg.patrol_presets,
+                                'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
+                            }
+                        )
+                        # Enable patrol and tracking separately based on config
+                        worker.ptz_tracker.set_patrol_enabled(ptz_cfg.patrol_enabled)
+                        worker.ptz_tracker.set_track_enabled(ptz_cfg.track_enabled)
+                        worker.ptz_drives_tracking = True
+
+                        # Share this tracker so target camera can also use it for self-tracking
+                        shared_ptz_trackers[target_id] = worker.ptz_tracker
+
                     if ptz_cfg.patrol_presets:
                         mode = f"preset-patrol({len(ptz_cfg.patrol_presets)})+track"
                     elif ptz_cfg.patrol_enabled:
@@ -1476,11 +1655,19 @@ class PipelineOrchestrator:
                 if existing_tracker:
                     worker.ptz_tracker = existing_tracker
                     if ptz_cfg.self_track:
+                        # Target camera is configured for self-track; it may
+                        # drive the shared tracker with its own detections.
+                        worker.ptz_drives_tracking = True
                         LOGGER.info(
                             "PTZ self-tracking enabled: %s shares tracker (cam2 detections will also trigger tracking)",
                             worker.camera.id
                         )
                     else:
+                        # Logging-only sharing: do NOT push this worker's
+                        # detections (different coordinate space) into the
+                        # tracker. Only the source camera's _process_frame
+                        # will call ptz_tracker.update.
+                        worker.ptz_drives_tracking = False
                         LOGGER.info(
                             "PTZ tracker shared with %s for logging (PTZ decisions will appear in recordings)",
                             worker.camera.id

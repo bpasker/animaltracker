@@ -113,6 +113,8 @@ class ThresholdSettings(BaseModel):
     min_frames: int = Field(default=3, ge=1)
     min_duration: float = Field(default=2.0, ge=0)
     min_detection_area: float = Field(default=0.005, ge=0.0, le=0.5, description="Ignore detections smaller than this fraction of frame area (0.005 = 0.5%%, filters leaves/noise)")
+    blur_threshold: float = Field(default=50.0, ge=0.0, le=1000.0, description="Laplacian variance below this value = blurry frame, skip detection. 0 = disabled. 50-100 works for most cameras.")
+    ptz_settle_time: float = Field(default=0.5, ge=0.0, le=5.0, description="Seconds to wait after PTZ movement before processing detections (0 = disabled)")
 
 
 class PTZTrackingSettings(BaseModel):

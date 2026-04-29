@@ -326,41 +326,72 @@ class ObjectTracker:
         
         # Update tracker
         tracked = self.tracker.update_with_detections(sv_detections)
-        
+
         # Map results back and accumulate classifications
         result: Dict[int, Detection] = {}
-        
+
         if tracked.tracker_id is None:
             return result
-        
+
+        def _iou(a, b) -> float:
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            ix1 = max(ax1, bx1)
+            iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2)
+            iy2 = min(ay2, by2)
+            iw = max(0.0, ix2 - ix1)
+            ih = max(0.0, iy2 - iy1)
+            inter = iw * ih
+            area_a = max(0.0, (ax2 - ax1) * (ay2 - ay1))
+            area_b = max(0.0, (bx2 - bx1) * (by2 - by1))
+            union = area_a + area_b - inter
+            if union <= 0:
+                return 0.0
+            return inter / union
+
+        used_indices: set[int] = set()
         for i, track_id in enumerate(tracked.tracker_id):
             if track_id is None:
                 continue
-            
+
             track_id = int(track_id)
-            
-            # Find original detection by matching bbox
-            original_det = None
+
+            # Match the tracked output to its source Detection by IoU.
+            # ByteTrack's Kalman filter can shift the bbox by more than 1px,
+            # so np.allclose(atol=1) misses real matches; the i-th index
+            # fallback is only correct when ByteTrack returns one output per
+            # input in the same order, which is not guaranteed.
             tracked_bbox = tracked.xyxy[i]
-            for det in detections:
-                if np.allclose(det.bbox, tracked_bbox, atol=1.0):
-                    original_det = det
-                    break
-            
-            if original_det is None:
-                # Fallback: use index if available
-                if i < len(detections):
-                    original_det = detections[i]
-                else:
+            best_iou = 0.0
+            best_idx = -1
+            for j, det in enumerate(detections):
+                if j in used_indices:
                     continue
-            
+                iou = _iou(det.bbox, tracked_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = j
+
+            if best_idx < 0 or best_iou < 0.3:
+                # Couldn't confidently match this tracked output to any input
+                # detection. Skip rather than risk attaching the wrong id.
+                LOGGER.debug(
+                    "Track %d: no input detection matched tracked bbox (best IoU=%.2f)",
+                    track_id, best_iou
+                )
+                continue
+
+            used_indices.add(best_idx)
+            original_det = detections[best_idx]
+
             # Initialize track if new
             if track_id not in self.tracks:
                 self.tracks[track_id] = TrackInfo(
                     track_id=track_id,
                     first_seen_frame=actual_frame_idx,
                 )
-            
+
             # Add classification to track
             self.tracks[track_id].add_classification(
                 species=original_det.species,
@@ -370,9 +401,13 @@ class ObjectTracker:
                 frame_idx=actual_frame_idx,
                 frame=frame,
             )
-            
+
+            # Stamp the persistent id back onto the detection so downstream
+            # consumers (PTZ tracker lock) can use it directly.
+            original_det.track_id = track_id
+
             result[track_id] = original_det
-        
+
         return result
     
     def get_track_species(self, track_id: int) -> Tuple[str, float, Optional[str]]:

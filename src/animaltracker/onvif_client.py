@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -28,6 +29,13 @@ class OnvifClient:
         self.port = port
         self.username = username
         self.password = password
+        # zeep service proxies created by onvif-zeep are not safe to call
+        # concurrently from multiple threads. The PTZ tracker, web UI, and
+        # discovery code can all hit the same OnvifClient simultaneously, so
+        # serialize every outbound call through this lock. Use RLock so a
+        # method that calls another method on the same client (e.g.
+        # ptz_set_zoom -> ptz_stop) doesn't deadlock.
+        self._call_lock = threading.RLock()
         if ONVIFCamera is None:
             LOGGER.warning("onvif-zeep library not installed; ONVIF features disabled")
         else:
@@ -36,42 +44,45 @@ class OnvifClient:
     def get_profiles(self) -> list[OnvifProfile]:
         if ONVIFCamera is None:
             return []
-        media_service = self._camera.create_media_service()
-        profiles = media_service.GetProfiles()
-        results = []
-        for profile in profiles:
-            token = profile.token
-            stream_uri = media_service.GetStreamUri({"StreamSetup": {"Stream": "RTP-Unicast", "Transport": {"Protocol": "RTSP"}}, "ProfileToken": token}).Uri
-            try:
-                snapshot_uri = media_service.GetSnapshotUri({"ProfileToken": token}).Uri
-            except Exception:  # noqa: BLE001
-                snapshot_uri = None
-            results.append(OnvifProfile(uri=stream_uri, snapshot_uri=snapshot_uri, metadata={"token": token}))
-        return results
+        with self._call_lock:
+            media_service = self._camera.create_media_service()
+            profiles = media_service.GetProfiles()
+            results = []
+            for profile in profiles:
+                token = profile.token
+                stream_uri = media_service.GetStreamUri({"StreamSetup": {"Stream": "RTP-Unicast", "Transport": {"Protocol": "RTSP"}}, "ProfileToken": token}).Uri
+                try:
+                    snapshot_uri = media_service.GetSnapshotUri({"ProfileToken": token}).Uri
+                except Exception:  # noqa: BLE001
+                    snapshot_uri = None
+                results.append(OnvifProfile(uri=stream_uri, snapshot_uri=snapshot_uri, metadata={"token": token}))
+            return results
 
     def get_status(self) -> Dict[str, Any]:
         if ONVIFCamera is None:
             return {"status": "unknown", "reason": "library-missing"}
-        dev_service = self._camera.create_devicemgmt_service()
-        info = dev_service.GetDeviceInformation()
-        return {
-            "manufacturer": getattr(info, "Manufacturer", "unknown"),
-            "model": getattr(info, "Model", "unknown"),
-            "firmware": getattr(info, "FirmwareVersion", "unknown"),
-        }
+        with self._call_lock:
+            dev_service = self._camera.create_devicemgmt_service()
+            info = dev_service.GetDeviceInformation()
+            return {
+                "manufacturer": getattr(info, "Manufacturer", "unknown"),
+                "model": getattr(info, "Model", "unknown"),
+                "firmware": getattr(info, "FirmwareVersion", "unknown"),
+            }
 
     def ptz_move(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
         start_time = time.time()
-        ptz_service = self._camera.create_ptz_service()
-        request = ptz_service.create_type("ContinuousMove")
-        request.ProfileToken = profile_token
-        request.Velocity = {
-            "PanTilt": {"x": pan, "y": tilt},
-            "Zoom": {"x": zoom},
-        }
-        ptz_service.ContinuousMove(request)
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            request = ptz_service.create_type("ContinuousMove")
+            request.ProfileToken = profile_token
+            request.Velocity = {
+                "PanTilt": {"x": pan, "y": tilt},
+                "Zoom": {"x": zoom},
+            }
+            ptz_service.ContinuousMove(request)
         elapsed = (time.time() - start_time) * 1000
         PTZ_LOGGER.debug(
             "[ONVIF] ContinuousMove sent: pan=%.3f, tilt=%.3f, zoom=%.3f (%.1fms)",
@@ -82,18 +93,15 @@ class OnvifClient:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
         start_time = time.time()
-        ptz_service = self._camera.create_ptz_service()
-
-        # Get status to find range (optional, but good for debugging)
-        # status = ptz_service.GetStatus({'ProfileToken': profile_token})
-
-        request = ptz_service.create_type("AbsoluteMove")
-        request.ProfileToken = profile_token
-        request.Position = {
-            "PanTilt": {"x": pan, "y": tilt},
-            "Zoom": {"x": zoom},
-        }
-        ptz_service.AbsoluteMove(request)
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            request = ptz_service.create_type("AbsoluteMove")
+            request.ProfileToken = profile_token
+            request.Position = {
+                "PanTilt": {"x": pan, "y": tilt},
+                "Zoom": {"x": zoom},
+            }
+            ptz_service.AbsoluteMove(request)
         elapsed = (time.time() - start_time) * 1000
         PTZ_LOGGER.debug(
             "[ONVIF] AbsoluteMove sent: pan=%.3f, tilt=%.3f, zoom=%.3f (%.1fms)",
@@ -108,75 +116,86 @@ class OnvifClient:
 
         Args:
             profile_token: ONVIF profile token
-            zoom: Target zoom level (0.0 = wide, 1.0 = full zoom)
+            zoom: Target zoom level (0.0 = wide, 1.0 = full zoom). Clamped to [0.0, 1.0].
             use_absolute: If True, try absolute move first (default False for compatibility)
         """
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
 
+        # Clamp zoom into the documented [0, 1] range; values outside this can
+        # produce undefined behaviour on some firmwares.
+        zoom = max(0.0, min(1.0, float(zoom)))
+
         LOGGER.info("[ONVIF] Setting zoom to %.3f on profile %s", zoom, profile_token)
         start_time = time.time()
-        ptz_service = self._camera.create_ptz_service()
 
-        # Try absolute zoom-only if requested
-        if use_absolute:
+        # Hold the call lock for the entire operation so concurrent PTZ
+        # commands (from the tracker or web UI) don't interleave with the
+        # zoom-out / zoom-in sequence.
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+
+            # Try absolute zoom-only if requested
+            if use_absolute:
+                try:
+                    request = ptz_service.create_type("AbsoluteMove")
+                    request.ProfileToken = profile_token
+                    request.Position = {"Zoom": {"x": zoom}}
+                    ptz_service.AbsoluteMove(request)
+                    elapsed = (time.time() - start_time) * 1000
+                    LOGGER.info("[ONVIF] AbsoluteZoom SUCCESS: zoom=%.3f (%.1fms)", zoom, elapsed)
+                    return
+                except Exception as e:
+                    LOGGER.warning("[ONVIF] AbsoluteZoom failed, using continuous: %s", e)
+
+            # Use continuous zoom with timing (works for relative-only cameras)
             try:
-                request = ptz_service.create_type("AbsoluteMove")
-                request.ProfileToken = profile_token
-                request.Position = {"Zoom": {"x": zoom}}
-                ptz_service.AbsoluteMove(request)
-                elapsed = (time.time() - start_time) * 1000
-                LOGGER.info("[ONVIF] AbsoluteZoom SUCCESS: zoom=%.3f (%.1fms)", zoom, elapsed)
-                return
-            except Exception as e:
-                LOGGER.warning("[ONVIF] AbsoluteZoom failed, using continuous: %s", e)
+                # Full zoom range takes about 6-8 seconds on most PTZ cameras
+                zoom_duration_full = 8.0  # Seconds to go from 0% to 100%
 
-        # Use continuous zoom with timing (works for relative-only cameras)
-        try:
-            # Full zoom range takes about 6-8 seconds on most PTZ cameras
-            # We use timed movements based on target zoom level
-            zoom_duration_full = 8.0  # Seconds to go from 0% to 100%
+                # Calculate duration based on target zoom
+                duration = zoom * zoom_duration_full
 
-            # Calculate duration based on target zoom
-            # Note: We assume starting from current position is unknown,
-            # so we may overshoot but the camera will stop at limits
-            duration = zoom * zoom_duration_full
-
-            if zoom < 0.05:
-                # Zoom all the way out - zoom out for full duration to ensure we hit minimum
-                LOGGER.info("[ONVIF] Zooming OUT to minimum (%.1fs)", zoom_duration_full)
-                request = ptz_service.create_type("ContinuousMove")
-                request.ProfileToken = profile_token
-                request.Velocity = {"Zoom": {"x": -0.5}}
-                ptz_service.ContinuousMove(request)
-                time.sleep(zoom_duration_full)
-                self.ptz_stop(profile_token)
-            else:
-                # First zoom all the way out, then zoom in to target
-                LOGGER.info("[ONVIF] Zooming OUT first, then IN to %.0f%% (%.1fs)", zoom * 100, duration)
-
-                # Zoom out to baseline
-                request = ptz_service.create_type("ContinuousMove")
-                request.ProfileToken = profile_token
-                request.Velocity = {"Zoom": {"x": -0.5}}
-                ptz_service.ContinuousMove(request)
-                time.sleep(zoom_duration_full)
-                self.ptz_stop(profile_token)
-                time.sleep(0.3)  # Brief pause
-
-                # Now zoom in to target
-                if duration > 0.1:
+                if zoom < 0.05:
+                    # Zoom all the way out - zoom out for full duration to ensure we hit minimum
+                    LOGGER.info("[ONVIF] Zooming OUT to minimum (%.1fs)", zoom_duration_full)
                     request = ptz_service.create_type("ContinuousMove")
                     request.ProfileToken = profile_token
-                    request.Velocity = {"Zoom": {"x": 0.5}}
+                    request.Velocity = {"Zoom": {"x": -0.5}}
                     ptz_service.ContinuousMove(request)
-                    time.sleep(duration)
+                    time.sleep(zoom_duration_full)
                     self.ptz_stop(profile_token)
+                else:
+                    # First zoom all the way out, then zoom in to target
+                    LOGGER.info("[ONVIF] Zooming OUT first, then IN to %.0f%% (%.1fs)", zoom * 100, duration)
 
-            elapsed = (time.time() - start_time) * 1000
-            LOGGER.info("[ONVIF] ContinuousZoom completed: target=%.0f%% (%.1fms)", zoom * 100, elapsed)
-        except Exception as e:
-            LOGGER.error("[ONVIF] Failed to set zoom: %s", e)
+                    # Zoom out to baseline
+                    request = ptz_service.create_type("ContinuousMove")
+                    request.ProfileToken = profile_token
+                    request.Velocity = {"Zoom": {"x": -0.5}}
+                    ptz_service.ContinuousMove(request)
+                    time.sleep(zoom_duration_full)
+                    self.ptz_stop(profile_token)
+                    time.sleep(0.3)  # Brief pause
+
+                    # Now zoom in to target
+                    if duration > 0.1:
+                        request = ptz_service.create_type("ContinuousMove")
+                        request.ProfileToken = profile_token
+                        request.Velocity = {"Zoom": {"x": 0.5}}
+                        ptz_service.ContinuousMove(request)
+                        time.sleep(duration)
+                        self.ptz_stop(profile_token)
+
+                elapsed = (time.time() - start_time) * 1000
+                LOGGER.info("[ONVIF] ContinuousZoom completed: target=%.0f%% (%.1fms)", zoom * 100, elapsed)
+            except Exception as e:
+                LOGGER.error("[ONVIF] Failed to set zoom: %s", e)
+                # Best-effort stop on error so the camera doesn't keep zooming.
+                try:
+                    self.ptz_stop(profile_token)
+                except Exception:
+                    pass
 
     def ptz_move_relative(self, profile_token: str, pan: float, tilt: float, zoom: float = 0.0) -> None:
         """Move PTZ by a relative amount from current position.
@@ -189,24 +208,26 @@ class OnvifClient:
         """
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
-        ptz_service = self._camera.create_ptz_service()
-        request = ptz_service.create_type("RelativeMove")
-        request.ProfileToken = profile_token
-        request.Translation = {
-            "PanTilt": {"x": pan, "y": tilt},
-            "Zoom": {"x": zoom},
-        }
-        ptz_service.RelativeMove(request)
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            request = ptz_service.create_type("RelativeMove")
+            request.ProfileToken = profile_token
+            request.Translation = {
+                "PanTilt": {"x": pan, "y": tilt},
+                "Zoom": {"x": zoom},
+            }
+            ptz_service.RelativeMove(request)
 
     def ptz_stop(self, profile_token: str) -> None:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
-        ptz_service = self._camera.create_ptz_service()
-        request = ptz_service.create_type("Stop")
-        request.ProfileToken = profile_token
-        request.PanTilt = True
-        request.Zoom = True
-        ptz_service.Stop(request)
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            request = ptz_service.create_type("Stop")
+            request.ProfileToken = profile_token
+            request.PanTilt = True
+            request.Zoom = True
+            ptz_service.Stop(request)
 
     def ptz_get_position(self, profile_token: str) -> Dict[str, Any]:
         """Get current PTZ position for the given profile.
@@ -216,8 +237,9 @@ class OnvifClient:
         """
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
-        ptz_service = self._camera.create_ptz_service()
-        status = ptz_service.GetStatus({"ProfileToken": profile_token})
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            status = ptz_service.GetStatus({"ProfileToken": profile_token})
         
         result: Dict[str, Any] = {
             "pan": None,
@@ -272,8 +294,9 @@ class OnvifClient:
             return []
         
         try:
-            ptz_service = self._camera.create_ptz_service()
-            configs = ptz_service.GetConfigurations()
+            with self._call_lock:
+                ptz_service = self._camera.create_ptz_service()
+                configs = ptz_service.GetConfigurations()
             result = []
             for cfg in configs:
                 result.append({
@@ -344,8 +367,9 @@ class OnvifClient:
             return []
         
         try:
-            ptz_service = self._camera.create_ptz_service()
-            presets = ptz_service.GetPresets({"ProfileToken": profile_token})
+            with self._call_lock:
+                ptz_service = self._camera.create_ptz_service()
+                presets = ptz_service.GetPresets({"ProfileToken": profile_token})
             
             result = []
             for preset in presets:
@@ -385,15 +409,16 @@ class OnvifClient:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
         
-        ptz_service = self._camera.create_ptz_service()
-        request = ptz_service.create_type("GotoPreset")
-        request.ProfileToken = profile_token
-        request.PresetToken = preset_token
-        request.Speed = {
-            "PanTilt": {"x": speed, "y": speed},
-            "Zoom": {"x": speed},
-        }
-        ptz_service.GotoPreset(request)
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            request = ptz_service.create_type("GotoPreset")
+            request.ProfileToken = profile_token
+            request.PresetToken = preset_token
+            request.Speed = {
+                "PanTilt": {"x": speed, "y": speed},
+                "Zoom": {"x": speed},
+            }
+            ptz_service.GotoPreset(request)
         LOGGER.debug("Moving to preset %s", preset_token)
 
     def ptz_set_preset(self, profile_token: str, preset_name: str, preset_token: Optional[str] = None) -> str:
@@ -410,13 +435,14 @@ class OnvifClient:
         if ONVIFCamera is None:
             raise RuntimeError("ONVIF PTZ not available; install onvif-zeep")
         
-        ptz_service = self._camera.create_ptz_service()
-        request = ptz_service.create_type("SetPreset")
-        request.ProfileToken = profile_token
-        request.PresetName = preset_name
-        if preset_token:
-            request.PresetToken = preset_token
-        
-        result = ptz_service.SetPreset(request)
+        with self._call_lock:
+            ptz_service = self._camera.create_ptz_service()
+            request = ptz_service.create_type("SetPreset")
+            request.ProfileToken = profile_token
+            request.PresetName = preset_name
+            if preset_token:
+                request.PresetToken = preset_token
+            
+            result = ptz_service.SetPreset(request)
         LOGGER.info("Saved preset '%s' with token %s", preset_name, result)
         return result

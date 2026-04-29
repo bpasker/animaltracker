@@ -194,14 +194,40 @@ class PTZTracker:
     _tracking_lost_logged_at: float = field(default=0.0, init=False)  # When we last logged "tracking lost"
     _last_tracked_species: str = field(default="", init=False)  # Species we were tracking when lost
     _last_detection_source: str = field(default="", init=False)  # Which camera provided the detection
+    _holding_position: bool = field(default=False, init=False)  # True after we've issued a Stop while waiting for return-to-patrol
+
+    # PTZ movement timing: track when last move command was sent
+    # Used by pipeline to skip detection during camera settle period.
+    # NOTE: only updated for *discrete* repositions (preset goto, absolute move,
+    # tracking velocity changes). Continuous patrol velocity does NOT refresh
+    # this timestamp, otherwise the worker's settle gate would permanently
+    # suppress inference and tracking could never engage.
+    _last_move_time: float = field(default=0.0, init=False)
+
+    # Cached patrol velocity so we don't re-issue identical ContinuousMove
+    # commands every tick (which both hammers the camera and refreshes
+    # _last_move_time, causing the settle deadlock).
+    _patrol_velocity: Optional[Tuple[float, float, float]] = field(default=None, init=False)
 
     # Track persistence: Once we lock onto a target, keep tracking it
     # to prevent jitter from switching between detections every frame.
     _locked_track_id: Optional[int] = field(default=None, init=False)  # Currently locked track ID
     _locked_bbox_center: Optional[Tuple[float, float]] = field(default=None, init=False)  # Last known center (normalized)
+    _locked_source_camera: Optional[str] = field(default=None, init=False)  # Camera id whose frame _locked_bbox_center is in
+    _locked_species: Optional[str] = field(default=None, init=False)  # Species we are locked onto (for handoff continuity)
     _lock_start_time: float = field(default=0.0, init=False)  # When we locked onto current target
     _consecutive_lock_misses: int = field(default=0, init=False)  # Frames since locked target was last seen
     _lock_miss_limit: int = field(default=5, init=False)  # Misses before releasing lock
+    # Hysteresis for switching to a *different* (non-locked) max-confidence target.
+    # H4: prevents flickering between two similar-confidence detections.
+    _challenger_track_id: Optional[int] = field(default=None, init=False)
+    _challenger_streak: int = field(default=0, init=False)
+    _challenger_required_streak: int = field(default=3, init=False)
+    _challenger_required_margin: float = field(default=0.10, init=False)
+    # Cam handoff: require N target-camera frames in a row matching the
+    # locked species/aim before declaring takeover (H8).
+    _pending_takeover_frames: int = field(default=0, init=False)
+    _pending_takeover_required: int = field(default=2, init=False)
 
     # Decision log buffer (for storing with clips)
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
@@ -225,7 +251,8 @@ class PTZTracker:
     
     def get_decision_log(self) -> List[Dict[str, Any]]:
         """Get all logged PTZ decisions as dicts."""
-        return [entry.to_dict() for entry in self._decision_log]
+        with self._lock:
+            return [entry.to_dict() for entry in self._decision_log]
     
     def get_decisions_in_window(self, start_ts: float, end_ts: float) -> List[Dict[str, Any]]:
         """Get PTZ decisions within a time window (for event finalization).
@@ -233,29 +260,54 @@ class PTZTracker:
         This is safe for shared trackers - doesn't clear the log, just returns
         decisions that fall within the event's time window.
         """
-        return [
-            entry.to_dict() 
-            for entry in self._decision_log 
-            if start_ts <= entry.timestamp <= end_ts
-        ]
+        with self._lock:
+            return [
+                entry.to_dict()
+                for entry in self._decision_log
+                if start_ts <= entry.timestamp <= end_ts
+            ]
     
     def clear_decision_log(self) -> List[Dict[str, Any]]:
         """Get and clear all logged PTZ decisions (for event finalization).
         
         DEPRECATED: Use get_decisions_in_window() for shared trackers.
         """
-        log = self.get_decision_log()
-        self._decision_log = []
-        return log
+        with self._lock:
+            log = [entry.to_dict() for entry in self._decision_log]
+            self._decision_log = []
+            return log
     
     def trim_old_decisions(self, cutoff_ts: float) -> int:
         """Remove decisions older than cutoff timestamp.
         
         Returns number of entries removed.
         """
-        original_len = len(self._decision_log)
-        self._decision_log = [e for e in self._decision_log if e.timestamp >= cutoff_ts]
-        return original_len - len(self._decision_log)
+        with self._lock:
+            original_len = len(self._decision_log)
+            self._decision_log = [e for e in self._decision_log if e.timestamp >= cutoff_ts]
+            return original_len - len(self._decision_log)
+
+    def get_last_move_time(self) -> float:
+        """Return timestamp of last PTZ move command.
+        
+        Used by pipeline to implement settle delay - skip detections
+        while the camera is still moving/stabilizing after a PTZ command.
+        """
+        return self._last_move_time
+
+    def is_settling(self, settle_time: float = 0.5) -> bool:
+        """Check if the PTZ camera is still settling after a move.
+        
+        Args:
+            settle_time: Seconds to wait after last move before considering
+                         the camera stable. Default 0.5s.
+        
+        Returns:
+            True if the camera moved within the last settle_time seconds.
+        """
+        if settle_time <= 0 or self._last_move_time == 0:
+            return False
+        return (time.time() - self._last_move_time) < settle_time
     
     def _resolve_presets(self) -> None:
         """Resolve preset names to tokens."""
@@ -264,13 +316,16 @@ class PTZTracker:
             
         try:
             available = self.onvif_client.ptz_get_presets(self.profile_token)
-            preset_map = {}
+            # Build token map first so a name->token lookup can never collide
+            # with another preset's token (token wins on conflict).
+            token_set = {p.get('token') for p in available if p.get('token')}
+            preset_map: Dict[str, str] = {tok: tok for tok in token_set}
             for p in available:
-                if p.get('token'):
-                    preset_map[p['token']] = p['token']
-                    if p.get('name'):
-                        preset_map[p['name']] = p['token']
-            
+                tok = p.get('token')
+                name = p.get('name')
+                if tok and name and name not in token_set:
+                    preset_map[name] = tok
+
             self._preset_tokens = []
             for preset in self.patrol_presets:
                 if preset in preset_map:
@@ -295,52 +350,76 @@ class PTZTracker:
     
     def set_patrol_enabled(self, enabled: bool) -> None:
         """Enable or disable patrol mode independently."""
-        self._patrol_active = enabled
-        
-        if enabled:
-            # Resolve presets if configured
-            if self.patrol_presets and not self._preset_tokens:
-                self._resolve_presets()
-            
-            # Start patrol if not currently tracking
-            if self._mode != PTZMode.TRACKING:
-                self._mode = PTZMode.PATROL
-                if self._preset_tokens:
-                    LOGGER.info("PTZ preset patrol enabled - cycling %d positions", len(self._preset_tokens))
-                    self._goto_current_preset()
-                else:
-                    LOGGER.info("PTZ patrol mode enabled - continuous sweep")
-        else:
-            # If patrol disabled and not tracking, go idle
-            if self._mode == PTZMode.PATROL:
-                self._mode = PTZMode.IDLE
-                try:
-                    self.onvif_client.ptz_stop(self.profile_token)
-                except Exception:
-                    pass
-            LOGGER.info("PTZ patrol disabled")
-    
-    def set_track_enabled(self, enabled: bool) -> None:
-        """Enable or disable object tracking independently."""
-        self._track_active = enabled
-        
-        if enabled:
-            LOGGER.info("PTZ tracking enabled")
-        else:
-            LOGGER.info("PTZ tracking disabled")
-            # If currently tracking, either return to patrol or go idle
-            if self._mode == PTZMode.TRACKING:
-                if self._patrol_active:
+        with self._lock:
+            self._patrol_active = enabled
+
+            if enabled:
+                # Resolve presets if configured
+                if self.patrol_presets and not self._preset_tokens:
+                    self._resolve_presets()
+
+                # Start patrol if not currently tracking
+                if self._mode != PTZMode.TRACKING:
                     self._mode = PTZMode.PATROL
+                    self._patrol_velocity = None  # Force re-issue on next patrol tick
                     if self._preset_tokens:
+                        LOGGER.info("PTZ preset patrol enabled - cycling %d positions", len(self._preset_tokens))
                         self._goto_current_preset()
-                    LOGGER.info("PTZ returning to patrol (tracking disabled)")
-                else:
+                    else:
+                        LOGGER.info("PTZ patrol mode enabled - continuous sweep")
+            else:
+                # If patrol disabled and not tracking, go idle
+                if self._mode == PTZMode.PATROL:
                     self._mode = PTZMode.IDLE
+                    self._patrol_velocity = None
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)
                     except Exception:
                         pass
+                LOGGER.info("PTZ patrol disabled")
+    
+    def set_track_enabled(self, enabled: bool) -> None:
+        """Enable or disable object tracking independently."""
+        with self._lock:
+            self._track_active = enabled
+
+            if enabled:
+                LOGGER.info("PTZ tracking enabled")
+            else:
+                LOGGER.info("PTZ tracking disabled")
+                # Clear lock state so it can't collide with a new ByteTrack
+                # id of 1/2/... when tracking is re-enabled later.
+                self._reset_lock_state_locked()
+                # If currently tracking, either return to patrol or go idle
+                if self._mode == PTZMode.TRACKING:
+                    if self._patrol_active:
+                        self._mode = PTZMode.PATROL
+                        self._patrol_velocity = None
+                        if self._preset_tokens:
+                            self._goto_current_preset()
+                        LOGGER.info("PTZ returning to patrol (tracking disabled)")
+                    else:
+                        self._mode = PTZMode.IDLE
+                        try:
+                            self.onvif_client.ptz_stop(self.profile_token)
+                        except Exception:
+                            pass
+
+    def _reset_lock_state_locked(self) -> None:
+        """Reset all target-lock state. Caller must hold self._lock."""
+        self._locked_track_id = None
+        self._locked_bbox_center = None
+        self._locked_source_camera = None
+        self._locked_species = None
+        self._consecutive_lock_misses = 0
+        self._challenger_track_id = None
+        self._challenger_streak = 0
+        self._pending_takeover_frames = 0
+
+    def clear_lock(self) -> None:
+        """Public: clear the target lock (e.g. on event boundary)."""
+        with self._lock:
+            self._reset_lock_state_locked()
     
     def _goto_current_preset(self) -> None:
         """Move to current preset in the patrol sequence."""
@@ -350,6 +429,7 @@ class PTZTracker:
             preset = self._preset_tokens[self._current_preset_index]
             self.onvif_client.ptz_goto_preset(self.profile_token, preset, speed=0.3)
             self._preset_arrival_time = time.time()
+            self._last_move_time = self._preset_arrival_time
             LOGGER.info("Moving to patrol preset %d/%d: %s", 
                        self._current_preset_index + 1, len(self._preset_tokens), preset)
         except Exception as e:
@@ -359,15 +439,14 @@ class PTZTracker:
         """Disable auto-tracking (legacy - disables both)."""
         self.set_patrol_enabled(False)
         self.set_track_enabled(False)
-        self._mode = PTZMode.IDLE
-        # Reset track lock
-        self._locked_track_id = None
-        self._locked_bbox_center = None
-        self._consecutive_lock_misses = 0
-        try:
-            self.onvif_client.ptz_stop(self.profile_token)
-        except Exception:
-            pass
+        with self._lock:
+            self._mode = PTZMode.IDLE
+            self._patrol_velocity = None
+            self._reset_lock_state_locked()
+            try:
+                self.onvif_client.ptz_stop(self.profile_token)
+            except Exception:
+                pass
         LOGGER.info("PTZ tracking disabled")
     
     def is_patrol_enabled(self) -> bool:
@@ -411,16 +490,27 @@ class PTZTracker:
         # Continuous sweep patrol (fallback if no presets)
         # At very slow speed 0.08, need ~90 seconds to cover full pan range
         sweep_duration = 90.0  # seconds per sweep direction
-        
+        direction_changed = False
+
         if now - self._patrol_reverse_time > sweep_duration:
             self._patrol_direction *= -1
             self._patrol_reverse_time = now
-            LOGGER.info("Patrol reversing direction: %s", 
+            direction_changed = True
+            LOGGER.info("Patrol reversing direction: %s",
                         "right" if self._patrol_direction > 0 else "left")
-        
+
         # Pan sweep at patrol speed (0.08 = very slow, good for small/distant animals)
         pan_vel = self.patrol_speed * self._patrol_direction
-        
+        desired = (pan_vel, 0.0, 0.0)
+
+        # Only re-issue ContinuousMove when the velocity actually changes.
+        # ONVIF ContinuousMove runs until Stop or another Move; spamming it
+        # every tick (a) hammers the camera and (b) keeps refreshing
+        # _last_move_time which would permanently trip the worker's settle
+        # gate and prevent any inference from running.
+        if self._patrol_velocity == desired and not direction_changed:
+            return
+
         try:
             self.onvif_client.ptz_move(
                 self.profile_token,
@@ -428,16 +518,25 @@ class PTZTracker:
                 0.0,  # No tilt during patrol
                 0.0   # No zoom change during patrol
             )
+            self._patrol_velocity = desired
+            # Intentionally do NOT update _last_move_time for ongoing patrol
+            # velocity. Patrol is a sustained motion, not a discrete reposition;
+            # the settle gate is meant for discrete jumps. Direction reversals
+            # do count as a discrete change.
+            if direction_changed:
+                self._last_move_time = time.time()
         except Exception as e:
             LOGGER.error("Patrol move error: %s", e)
+            self._patrol_velocity = None
     
     def update_calibration(self, pan_scale: float, tilt_scale: float, 
                            pan_center_x: float, tilt_center_y: float) -> None:
         """Update calibration parameters (e.g., from auto-calibration results)."""
-        self.calibration.pan_scale = pan_scale
-        self.calibration.tilt_scale = tilt_scale
-        self.calibration.pan_center_x = pan_center_x
-        self.calibration.tilt_center_y = tilt_center_y
+        with self._lock:
+            self.calibration.pan_scale = pan_scale
+            self.calibration.tilt_scale = tilt_scale
+            self.calibration.pan_center_x = pan_center_x
+            self.calibration.tilt_center_y = tilt_center_y
         LOGGER.info(
             "PTZ calibration updated: pan_scale=%.3f, tilt_scale=%.3f, center=(%.3f, %.3f)",
             pan_scale, tilt_scale, pan_center_x, tilt_center_y
@@ -480,7 +579,12 @@ class PTZTracker:
         self._last_update = now
 
         # Filter out small detections (likely leaves, noise, distant objects)
-        detections = self._filter_small_detections(detections, frame_width, frame_height)
+        # but keep the currently-locked target even if it shrunk (H2).
+        detections = self._filter_small_detections(
+            detections, frame_width, frame_height,
+            protect_track_id=self._locked_track_id,
+            protect_center=self._locked_bbox_center,
+        )
 
         # Handle state transitions based on detections
         if detections and self._track_active:
@@ -536,27 +640,60 @@ class PTZTracker:
             return self._handle_no_detections(now)
 
     def _filter_small_detections(
-        self, detections: List['Detection'], frame_width: int, frame_height: int
+        self, detections: List['Detection'], frame_width: int, frame_height: int,
+        protect_track_id: Optional[int] = None,
+        protect_center: Optional[Tuple[float, float]] = None,
     ) -> List['Detection']:
-        """Filter out detections smaller than min_detection_area."""
+        """Filter out detections smaller than min_detection_area.
+
+        H2: the locked target is exempted from filtering. Otherwise an animal
+        that walks farther away (and shrinks below min_detection_area) is
+        silently dropped, the lock is released after _lock_miss_limit, and
+        tracking gives up exactly when the operator most wants it to hold.
+        """
         if not detections or self.min_detection_area <= 0:
             return detections
 
         frame_area = frame_width * frame_height
         min_area_pixels = self.min_detection_area * frame_area
-        filtered = []
+        filtered: List['Detection'] = []
         for det in detections:
             det_width = det.bbox[2] - det.bbox[0]
             det_height = det.bbox[3] - det.bbox[1]
             det_area = det_width * det_height
             if det_area >= min_area_pixels:
                 filtered.append(det)
-            else:
+                continue
+
+            # Exemption: keep this detection if it matches the current lock,
+            # either by track_id or by spatial proximity to the last locked
+            # center. Use a generous radius (20% of frame) since the lock may
+            # have drifted over the last few frames.
+            tid = getattr(det, 'track_id', None)
+            if protect_track_id is not None and tid == protect_track_id:
                 PTZ_LOGGER.debug(
-                    "[SIZE_FILTER] Ignoring small detection: %s area=%.0fpx (%.2f%%) < min=%.0fpx (%.2f%%)",
-                    det.species, det_area, (det_area/frame_area)*100,
-                    min_area_pixels, self.min_detection_area*100
+                    "[SIZE_FILTER_EXEMPT] Keeping shrunk locked target track_id=%s",
+                    tid
                 )
+                filtered.append(det)
+                continue
+            if protect_center is not None:
+                cx = (det.bbox[0] + det.bbox[2]) / 2 / max(frame_width, 1)
+                cy = (det.bbox[1] + det.bbox[3]) / 2 / max(frame_height, 1)
+                dist = ((cx - protect_center[0]) ** 2 + (cy - protect_center[1]) ** 2) ** 0.5
+                if dist < 0.20:
+                    PTZ_LOGGER.debug(
+                        "[SIZE_FILTER_EXEMPT] Keeping shrunk lock-neighbor at dist=%.3f",
+                        dist
+                    )
+                    filtered.append(det)
+                    continue
+
+            PTZ_LOGGER.debug(
+                "[SIZE_FILTER] Ignoring small detection: %s area=%.0fpx (%.2f%%) < min=%.0fpx (%.2f%%)",
+                det.species, det_area, (det_area/frame_area)*100,
+                min_area_pixels, self.min_detection_area*100
+            )
         return filtered
 
     def update_multi_camera(
@@ -611,14 +748,18 @@ class PTZTracker:
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
 
-        # Filter out small detections using shared method
+        # Filter out small detections using shared method (exempt locked target)
         if source_detections and source_data:
             source_detections = self._filter_small_detections(
-                source_detections, source_data[1], source_data[2]
+                source_detections, source_data[1], source_data[2],
+                protect_track_id=self._locked_track_id if self._locked_source_camera == source_camera_id else None,
+                protect_center=self._locked_bbox_center if self._locked_source_camera == source_camera_id else None,
             )
         if target_detections and target_data:
             target_detections = self._filter_small_detections(
-                target_detections, target_data[1], target_data[2]
+                target_detections, target_data[1], target_data[2],
+                protect_track_id=self._locked_track_id if self._locked_source_camera == target_camera_id else None,
+                protect_center=self._locked_bbox_center if self._locked_source_camera == target_camera_id else None,
             )
 
         # Log what we have
@@ -630,8 +771,61 @@ class PTZTracker:
 
         # Determine which detections to use
         # Priority: target camera (cam2) > source camera (cam1)
-        # This allows cam2 to center objects in its frame even when cam1 doesn't see them
+        # H8: cam2 must demonstrate continuity (matching species or
+        # near-center detection) for _pending_takeover_required consecutive
+        # frames before its detections are allowed to drive PTZ. Otherwise
+        # any unrelated cam2 detection (e.g. a different animal that
+        # wandered into the zoom view) silently steals the lock.
+        target_can_take_over = False
         if target_detections and self._track_active:
+            # If we already had cam2 driving, or no existing lock at all, no
+            # extra confirmation needed.
+            if (self._locked_source_camera == target_camera_id
+                    or self._locked_source_camera is None):
+                target_can_take_over = True
+            else:
+                # Continuity check: prefer same-species match; if no species
+                # lock, require a near-frame-center detection (cam1's PTZ
+                # command was meant to put the locked target near the center
+                # of cam2's frame).
+                tw, th = target_data[1], target_data[2]
+                ok = False
+                if self._locked_species:
+                    for d in target_detections:
+                        if d.species == self._locked_species:
+                            ok = True
+                            break
+                if not ok:
+                    for d in target_detections:
+                        cx = (d.bbox[0] + d.bbox[2]) / 2 / max(tw, 1)
+                        cy = (d.bbox[1] + d.bbox[3]) / 2 / max(th, 1)
+                        # Within 25% of cam2 frame center
+                        if abs(cx - 0.5) < 0.25 and abs(cy - 0.5) < 0.25:
+                            ok = True
+                            break
+                if ok:
+                    self._pending_takeover_frames += 1
+                    if self._pending_takeover_frames >= self._pending_takeover_required:
+                        target_can_take_over = True
+                        self._pending_takeover_frames = 0
+                        PTZ_LOGGER.info(
+                            "[CAM_TAKEOVER_CONFIRMED] target=%s passed continuity check",
+                            target_camera_id
+                        )
+                    else:
+                        PTZ_LOGGER.debug(
+                            "[CAM_TAKEOVER_PENDING] %d/%d frames",
+                            self._pending_takeover_frames,
+                            self._pending_takeover_required
+                        )
+                else:
+                    self._pending_takeover_frames = 0
+                    PTZ_LOGGER.debug(
+                        "[CAM_TAKEOVER_REJECT] no continuity match in %s detections",
+                        target_camera_id
+                    )
+
+        if target_can_take_over:
             # Target camera can see the object - use its detections for fine tracking
             frame_width, frame_height = target_data[1], target_data[2]
 
@@ -676,7 +870,10 @@ class PTZTracker:
 
             # Use target camera's detections - these are most accurate since
             # they show where the object is in the PTZ camera's current view
-            return self._do_tracking_from_target(target_detections, frame_width, frame_height)
+            return self._do_tracking_from_target(
+                target_detections, frame_width, frame_height,
+                source_camera=target_camera_id,
+            )
 
         elif source_detections and self._track_active:
             # Only source camera sees the object - need to reposition PTZ
@@ -708,14 +905,18 @@ class PTZTracker:
                 self._mode = PTZMode.TRACKING
 
             # Use the original tracking method for source camera detections
-            return self._do_tracking(source_detections, frame_width, frame_height)
+            return self._do_tracking(
+                source_detections, frame_width, frame_height,
+                source_camera=source_camera_id,
+            )
 
         else:
             # No detections from either camera
             return self._handle_no_detections(now)
 
     def _do_tracking_from_target(
-        self, detections: List['Detection'], frame_width: int, frame_height: int
+        self, detections: List['Detection'], frame_width: int, frame_height: int,
+        source_camera: Optional[str] = None,
     ) -> bool:
         """Execute tracking using detections from the target/PTZ camera itself.
 
@@ -728,10 +929,27 @@ class PTZTracker:
             len(detections), frame_width, frame_height
         )
 
-        # Select best detection with track persistence (prevents jitter)
-        best = self._select_best_detection(detections, frame_width, frame_height)
+        # Select best detection with track persistence (prevents jitter).
+        # Pass source_camera explicitly so cross-camera lock state
+        # (track_id space, spatial center) is correctly invalidated when the
+        # source changes between cam1 (wide) and cam2 (zoom).
+        best = self._select_best_detection(
+            detections, frame_width, frame_height,
+            source_camera=source_camera,
+        )
         if best is None:
+            # Spatial fallback failed within miss budget -- hold position.
+            # Must explicitly issue ptz_stop or the camera keeps moving with
+            # whatever velocity the previous ContinuousMove set.
+            try:
+                self.onvif_client.ptz_stop(self.profile_token)
+            except Exception:
+                pass
+            self._holding_position = True
             return False
+        # We're about to move; clear the held flag so the next deadzone hit
+        # actually issues a Stop instead of being optimized away.
+        self._holding_position = False
         bbox = best.bbox
 
         PTZ_LOGGER.info(
@@ -753,6 +971,14 @@ class PTZTracker:
         offset_x = norm_center_x - 0.5  # Positive = object is right of center
         offset_y = 0.5 - norm_center_y  # Positive = object is above center (inverted Y)
 
+        # L1: apply same exponential smoothing as _do_tracking so cam2
+        # takeover doesn't feel jerky compared to cam1-driven motion.
+        s = self.smoothing
+        self._target_pan = self._target_pan * s + offset_x * (1 - s)
+        self._target_tilt = self._target_tilt * s + offset_y * (1 - s)
+        offset_x = self._target_pan
+        offset_y = self._target_tilt
+
         offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
 
         PTZ_LOGGER.info(
@@ -773,10 +999,12 @@ class PTZTracker:
                 'threshold': self.min_move_threshold,
                 'source': 'target_camera',
             })
-            try:
-                self.onvif_client.ptz_stop(self.profile_token)
-            except Exception:
-                pass
+            if not self._holding_position:
+                try:
+                    self.onvif_client.ptz_stop(self.profile_token)
+                except Exception:
+                    pass
+                self._holding_position = True
             return False
 
         # Non-linear velocity curve for smooth tracking
@@ -837,6 +1065,7 @@ class PTZTracker:
                 tilt_velocity,
                 zoom_velocity
             )
+            self._last_move_time = time.time()
             return True
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
@@ -854,6 +1083,7 @@ class PTZTracker:
 
             if self._tracking_lost_logged_at == 0.0:
                 self._tracking_lost_logged_at = now
+                self._holding_position = False  # Reset so we issue one Stop
                 PTZ_LOGGER.info(
                     "[TRACKING_LOST] Lost %s (last seen by %s) - waiting %.1fs before patrol",
                     self._last_tracked_species or "object",
@@ -882,33 +1112,34 @@ class PTZTracker:
                     self._mode = PTZMode.PATROL
                     self._tracking_lost_logged_at = 0.0
                     # Reset track lock so we pick fresh when tracking resumes
-                    self._locked_track_id = None
-                    self._locked_bbox_center = None
-                    self._consecutive_lock_misses = 0
+                    self._reset_lock_state_locked()
                     if self._preset_tokens:
                         self._goto_current_preset()
                 else:
                     self._mode = PTZMode.IDLE
                     self._tracking_lost_logged_at = 0.0
                     # Reset track lock
-                    self._locked_track_id = None
-                    self._locked_bbox_center = None
-                    self._consecutive_lock_misses = 0
+                    self._reset_lock_state_locked()
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)
                     except Exception:
                         pass
             else:
-                # Still within delay, hold position
-                try:
-                    self.onvif_client.ptz_stop(self.profile_token)
-                except Exception:
-                    pass
+                # Still within delay, hold position. Only issue Stop once;
+                # repeating it every tick spams the camera unnecessarily.
+                if not self._holding_position:
+                    try:
+                        self.onvif_client.ptz_stop(self.profile_token)
+                    except Exception:
+                        pass
+                    self._holding_position = True
                 return False
 
         # Start patrol if enabled
         if self._patrol_active and self._mode != PTZMode.PATROL:
             self._mode = PTZMode.PATROL
+            self._holding_position = False
+            self._patrol_velocity = None
             if self._preset_tokens:
                 self._current_preset_index = 0
                 self._goto_current_preset()
@@ -922,8 +1153,9 @@ class PTZTracker:
         return False
 
     def _select_best_detection(
-        self, detections: List['Detection'], frame_width: int, frame_height: int
-    ) -> 'Detection':
+        self, detections: List['Detection'], frame_width: int, frame_height: int,
+        source_camera: Optional[str] = None,
+    ) -> Optional['Detection']:
         """Select the best detection to track, with track persistence.
         
         Once locked onto a target (by track_id or spatial proximity), keep
@@ -932,102 +1164,194 @@ class PTZTracker:
         """
         if not detections:
             return None
-        
+
+        # If caller didn't specify, infer source from latest update path.
+        if source_camera is None:
+            source_camera = self._last_detection_source or None
+
+        # H1: a lock center stored in a *different* camera's normalized
+        # coordinates is meaningless (cam1 wide vs cam2 zoom). On a true
+        # source change, drop the spatial center AND the track_id (each
+        # camera has its own ByteTrack instance with an overlapping ID
+        # space, so cam1's id=1 colliding with cam2's id=1 would otherwise
+        # produce a false LOCK_PERSIST on a totally unrelated animal).
+        if (source_camera is not None
+                and self._locked_source_camera is not None
+                and source_camera != self._locked_source_camera):
+            PTZ_LOGGER.info(
+                "[LOCK_CROSSCAM] source camera changed %s->%s; invalidating spatial lock and track_id",
+                self._locked_source_camera, source_camera
+            )
+            self._locked_bbox_center = None
+            self._locked_track_id = None
+            self._challenger_track_id = None
+            self._challenger_streak = 0
+
         # Build a map of track_id -> detection for quick lookup
-        track_id_map = {}
+        track_id_map: Dict[int, 'Detection'] = {}
         for det in detections:
             tid = getattr(det, 'track_id', None)
             if tid is not None:
                 track_id_map[tid] = det
-        
+
+        def _record_lock(det: 'Detection', is_new: bool) -> None:
+            tid = getattr(det, 'track_id', None)
+            self._locked_track_id = tid
+            cx = (det.bbox[0] + det.bbox[2]) / 2 / max(frame_width, 1)
+            cy = (det.bbox[1] + det.bbox[3]) / 2 / max(frame_height, 1)
+            self._locked_bbox_center = (cx, cy)
+            self._locked_source_camera = source_camera
+            self._locked_species = det.species
+            self._consecutive_lock_misses = 0
+            self._challenger_track_id = None
+            self._challenger_streak = 0
+            if is_new:
+                self._lock_start_time = time.time()
+                # Reset smoothing so the first command after acquiring a new
+                # lock isn't blended with whatever residual offset was left
+                # over from tracking the previous (now-released) target.
+                self._target_pan = 0.0
+                self._target_tilt = 0.0
+                self._target_zoom = 0.0
+
         # 1. If we have a locked track_id, try to keep tracking it
         if self._locked_track_id is not None and self._locked_track_id in track_id_map:
-            self._consecutive_lock_misses = 0
             locked_det = track_id_map[self._locked_track_id]
-            # Update last known center
-            cx = (locked_det.bbox[0] + locked_det.bbox[2]) / 2 / frame_width
-            cy = (locked_det.bbox[1] + locked_det.bbox[3]) / 2 / frame_height
-            self._locked_bbox_center = (cx, cy)
+
+            # H4: hysteresis on switching to a higher-confidence challenger.
+            # Only switch if a *different* track sustains a confidence margin
+            # for several consecutive frames. The challenger MUST have a
+            # valid track_id; an untracked (None tid) detection just barely
+            # above margin would otherwise win the streak and steal the lock.
+            challenger = max(detections, key=lambda d: d.confidence)
+            ch_tid = getattr(challenger, 'track_id', None)
+            if (ch_tid is not None
+                    and ch_tid != self._locked_track_id
+                    and challenger.confidence >= locked_det.confidence + self._challenger_required_margin):
+                if self._challenger_track_id == ch_tid:
+                    self._challenger_streak += 1
+                else:
+                    self._challenger_track_id = ch_tid
+                    self._challenger_streak = 1
+                if self._challenger_streak >= self._challenger_required_streak:
+                    PTZ_LOGGER.info(
+                        "[LOCK_SWITCH] Switching lock %s->%s (challenger sustained %.0f%% > locked %.0f%% for %d frames)",
+                        self._locked_track_id, ch_tid,
+                        challenger.confidence * 100, locked_det.confidence * 100,
+                        self._challenger_streak
+                    )
+                    _record_lock(challenger, is_new=True)
+                    return challenger
+            else:
+                # Challenger condition not met; reset streak
+                self._challenger_track_id = None
+                self._challenger_streak = 0
+
+            _record_lock(locked_det, is_new=False)
             PTZ_LOGGER.debug(
                 "[LOCK_PERSIST] Continuing to track locked target track_id=%d (%s, %.1f%%)",
                 self._locked_track_id, locked_det.species, locked_det.confidence * 100
             )
             return locked_det
-        
+
         # 2. Locked track ID not found - try spatial proximity to last known position
         if self._locked_bbox_center is not None:
             self._consecutive_lock_misses += 1
-            
+
             if self._consecutive_lock_misses <= self._lock_miss_limit:
                 # Find detection closest to last known position
                 best_dist = float('inf')
-                best_nearby = None
+                best_nearby: Optional['Detection'] = None
                 for det in detections:
-                    cx = (det.bbox[0] + det.bbox[2]) / 2 / frame_width
-                    cy = (det.bbox[1] + det.bbox[3]) / 2 / frame_height
-                    dist = ((cx - self._locked_bbox_center[0]) ** 2 + 
+                    cx = (det.bbox[0] + det.bbox[2]) / 2 / max(frame_width, 1)
+                    cy = (det.bbox[1] + det.bbox[3]) / 2 / max(frame_height, 1)
+                    dist = ((cx - self._locked_bbox_center[0]) ** 2 +
                             (cy - self._locked_bbox_center[1]) ** 2) ** 0.5
                     if dist < best_dist:
                         best_dist = dist
                         best_nearby = det
-                
-                # If nearest detection is spatially close (within 15% of frame), use it
+
+                # If nearest detection is spatially close (within 15% of frame), use it.
+                # Prefer same species if known (handoff continuity).
                 if best_nearby is not None and best_dist < 0.15:
-                    new_tid = getattr(best_nearby, 'track_id', None)
-                    PTZ_LOGGER.info(
-                        "[LOCK_SPATIAL] Locked track %s lost, nearest detection at dist=%.3f "
-                        "(track_id=%s, %s, %.1f%%) - continuing",
-                        self._locked_track_id, best_dist,
-                        new_tid, best_nearby.species, best_nearby.confidence * 100
-                    )
-                    # Update lock to new track ID if available
-                    if new_tid is not None:
-                        self._locked_track_id = new_tid
-                    cx = (best_nearby.bbox[0] + best_nearby.bbox[2]) / 2 / frame_width
-                    cy = (best_nearby.bbox[1] + best_nearby.bbox[3]) / 2 / frame_height
-                    self._locked_bbox_center = (cx, cy)
-                    self._consecutive_lock_misses = 0
-                    return best_nearby
+                    if (self._locked_species is None
+                            or best_nearby.species == self._locked_species):
+                        new_tid = getattr(best_nearby, 'track_id', None)
+                        PTZ_LOGGER.info(
+                            "[LOCK_SPATIAL] Locked track %s lost, nearest detection at dist=%.3f "
+                            "(track_id=%s, %s, %.1f%%) - continuing",
+                            self._locked_track_id, best_dist,
+                            new_tid, best_nearby.species, best_nearby.confidence * 100
+                        )
+                        _record_lock(best_nearby, is_new=False)
+                        return best_nearby
+                    else:
+                        PTZ_LOGGER.debug(
+                            "[LOCK_SPATIAL_REJECT] Nearby detection species %s != locked %s; holding",
+                            best_nearby.species, self._locked_species
+                        )
+
+                # H3: Spatial fallback failed but we still have miss budget.
+                # Do NOT silently re-lock to whatever has the highest confidence
+                # (that flips us to an unrelated leaf/animal). Return None to
+                # signal "hold position"; the caller will treat this like
+                # 'no_detection' and let _handle_no_detections run the
+                # patrol_return_delay timer.
+                PTZ_LOGGER.info(
+                    "[LOCK_HOLD] Lock %s missing (%d/%d misses) and no nearby detection; holding position",
+                    self._locked_track_id, self._consecutive_lock_misses, self._lock_miss_limit
+                )
+                return None
             else:
                 # Too many misses - release lock
                 PTZ_LOGGER.info(
                     "[LOCK_RELEASE] Releasing lock on track %s after %d misses",
                     self._locked_track_id, self._consecutive_lock_misses
                 )
-                self._locked_track_id = None
-                self._locked_bbox_center = None
-                self._consecutive_lock_misses = 0
-        
-        # 3. No lock or lock released - pick highest confidence and establish new lock
+                self._reset_lock_state_locked()
+
+        # 3. No lock - pick highest confidence and establish new lock
         best = max(detections, key=lambda d: d.confidence)
-        new_tid = getattr(best, 'track_id', None)
-        self._locked_track_id = new_tid
-        cx = (best.bbox[0] + best.bbox[2]) / 2 / frame_width
-        cy = (best.bbox[1] + best.bbox[3]) / 2 / frame_height
-        self._locked_bbox_center = (cx, cy)
-        self._consecutive_lock_misses = 0
-        self._lock_start_time = time.time()
+        _record_lock(best, is_new=True)
         PTZ_LOGGER.info(
             "[LOCK_NEW] Locked onto new target: track_id=%s, %s (%.1f%%)",
-            new_tid, best.species, best.confidence * 100
+            getattr(best, 'track_id', None), best.species, best.confidence * 100
         )
         return best
 
-    def _do_tracking(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
+    def _do_tracking(
+        self, detections: List['Detection'], frame_width: int, frame_height: int,
+        source_camera: Optional[str] = None,
+    ) -> bool:
         """Execute object tracking logic."""
         PTZ_LOGGER.info(
             "[DO_TRACKING] Called with %d detections, frame=%dx%d",
             len(detections), frame_width, frame_height
         )
 
-        # Update calibration with actual frame size
-        self.calibration.frame_width = frame_width
-        self.calibration.frame_height = frame_height
+        # Use the per-call frame size for pixel->normalized math instead of
+        # mutating self.calibration. The calibration is shared across cameras
+        # in multi-camera setups; mutating its frame_width/height per call
+        # would corrupt subsequent calls from a camera with different dims.
 
-        # Select best detection with track persistence (prevents jitter)
-        best = self._select_best_detection(detections, frame_width, frame_height)
+        # Select best detection with track persistence (prevents jitter).
+        best = self._select_best_detection(
+            detections, frame_width, frame_height,
+            source_camera=source_camera,
+        )
         if best is None:
+            # Hold position: stop the camera so it doesn't drift on stale
+            # ContinuousMove velocity. _holding_position prevents log/stop
+            # spam on subsequent frames.
+            if not self._holding_position:
+                try:
+                    self.onvif_client.ptz_stop(self.profile_token)
+                except Exception:
+                    pass
+                self._holding_position = True
             return False
+        # About to issue a move; allow next deadzone/lock-hold to issue Stop.
+        self._holding_position = False
         bbox = best.bbox
 
         PTZ_LOGGER.info(
@@ -1046,27 +1370,60 @@ class PTZTracker:
             center_x, center_y, frame_width, frame_height
         )
 
-        # Convert to PTZ coordinates
-        target_pan, target_tilt = self.calibration.pixel_to_ptz(center_x, center_y)
-        target_zoom = self.calibration.bbox_to_zoom(bbox, self.target_fill_pct)
+        # Compute zoom target directly from bbox using passed-in frame dims
+        # (avoid relying on shared calibration.frame_width/height mutation).
+        bbox_w = bbox[2] - bbox[0]
+        bbox_h = bbox[3] - bbox[1]
+        current_fill_pre = max(bbox_w / max(frame_width, 1), bbox_h / max(frame_height, 1))
+        if current_fill_pre > 0:
+            import math
+            zoom_factor = self.target_fill_pct / current_fill_pre
+            target_zoom = math.log2(max(1.0, zoom_factor)) / 4.0
+            target_zoom = max(self.calibration.zoom_min,
+                              min(self.calibration.zoom_max, target_zoom))
+        else:
+            target_zoom = 0.0
 
         PTZ_LOGGER.info(
-            "[COORD_CALC] Pixel center=(%.0f, %.0f) -> PTZ target: pan=%.3f, tilt=%.3f, zoom=%.3f",
-            center_x, center_y, target_pan, target_tilt, target_zoom
+            "[COORD_CALC] Pixel center=(%.0f, %.0f) -> zoom target=%.3f",
+            center_x, center_y, target_zoom
         )
-        
-        # Apply smoothing
-        self._target_pan = self._target_pan * self.smoothing + target_pan * (1 - self.smoothing)
-        self._target_tilt = self._target_tilt * self.smoothing + target_tilt * (1 - self.smoothing)
-        self._target_zoom = self._target_zoom * self.smoothing + target_zoom * (1 - self.smoothing)
         
         # Calculate how far we need to move (normalized center offset)
         norm_center_x = center_x / frame_width
         norm_center_y = center_y / frame_height
-        
-        # How far from center? (0.5, 0.5) = centered
-        offset_x = norm_center_x - 0.5  # Positive = object is right of center
-        offset_y = 0.5 - norm_center_y  # Positive = object is above center (inverted Y)
+
+        # Compute offset from the *PTZ's* optical-center reference point on the
+        # source frame (not the geometric center). For self-tracking this is
+        # 0.5/0.5; for cross-camera tracking pan_center_x/tilt_center_y
+        # compensates for the wide camera and PTZ camera not being perfectly
+        # bore-sighted.
+        ref_x = self.calibration.pan_center_x
+        ref_y = self.calibration.tilt_center_y
+        raw_offset_x = norm_center_x - ref_x  # Positive = object is right of PTZ axis
+        raw_offset_y = ref_y - norm_center_y  # Positive = object is above PTZ axis (Y inverted)
+
+        # pan_scale / tilt_scale describe what fraction of the wide FOV the PTZ
+        # can cover. A smaller scale means a given pixel offset corresponds to
+        # a *larger* PTZ angular movement, so divide by the scale to amplify
+        # velocity for narrow-coverage PTZs. Guard against degenerate values.
+        pan_scale = max(0.1, self.calibration.pan_scale)
+        tilt_scale = max(0.1, self.calibration.tilt_scale)
+        offset_x = raw_offset_x / pan_scale
+        offset_y = raw_offset_y / tilt_scale
+
+        # Clamp to [-1, 1] before velocity curve maps to ContinuousMove range
+        offset_x = max(-1.0, min(1.0, offset_x))
+        offset_y = max(-1.0, min(1.0, offset_y))
+
+        # Exponential smoothing on the *velocity-driving offset* itself.
+        # smoothing=0 -> instant response; smoothing=0.9 -> very smooth.
+        s = self.smoothing
+        self._target_pan = self._target_pan * s + offset_x * (1 - s)
+        self._target_tilt = self._target_tilt * s + offset_y * (1 - s)
+        self._target_zoom = self._target_zoom * s + target_zoom * (1 - s)
+        offset_x = self._target_pan
+        offset_y = self._target_tilt
         
         # Calculate offset magnitude
         offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
@@ -1089,10 +1446,12 @@ class PTZTracker:
                 'offset_magnitude': round(offset_magnitude, 4),
                 'threshold': self.min_move_threshold,
             })
-            try:
-                self.onvif_client.ptz_stop(self.profile_token)
-            except Exception:
-                pass
+            if not self._holding_position:
+                try:
+                    self.onvif_client.ptz_stop(self.profile_token)
+                except Exception:
+                    pass
+                self._holding_position = True
             return False
 
         PTZ_LOGGER.info(
@@ -1180,6 +1539,7 @@ class PTZTracker:
                 tilt_velocity,
                 zoom_velocity
             )
+            self._last_move_time = time.time()
             return True
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
@@ -1192,28 +1552,49 @@ class PTZTracker:
     
     def center_on_bbox(self, bbox: List[float], frame_width: int, frame_height: int, auto_zoom: bool = True) -> None:
         """Immediately center PTZ on a bounding box.
-        
+
         Args:
             bbox: [x1, y1, x2, y2] bounding box
             frame_width: Frame width for calibration
             frame_height: Frame height for calibration
             auto_zoom: Whether to also adjust zoom
         """
-        self.calibration.frame_width = frame_width
-        self.calibration.frame_height = frame_height
-        
-        center_x = (bbox[0] + bbox[2]) / 2
-        center_y = (bbox[1] + bbox[3]) / 2
-        
-        pan, tilt = self.calibration.pixel_to_ptz(center_x, center_y)
-        zoom = self.calibration.bbox_to_zoom(bbox, self.target_fill_pct) if auto_zoom else 0.0
-        
+        # Snapshot calibration & compute target under the lock so the
+        # streaming executor thread can't observe partially-written
+        # _target_pan/_target_tilt/_target_zoom values.
+        with self._lock:
+            cal = PTZCalibration(
+                frame_width=frame_width,
+                frame_height=frame_height,
+                pan_min=self.calibration.pan_min,
+                pan_max=self.calibration.pan_max,
+                tilt_min=self.calibration.tilt_min,
+                tilt_max=self.calibration.tilt_max,
+                zoom_min=self.calibration.zoom_min,
+                zoom_max=self.calibration.zoom_max,
+                pan_center_x=self.calibration.pan_center_x,
+                tilt_center_y=self.calibration.tilt_center_y,
+                pan_scale=self.calibration.pan_scale,
+                tilt_scale=self.calibration.tilt_scale,
+            )
+
+            center_x = (bbox[0] + bbox[2]) / 2
+            center_y = (bbox[1] + bbox[3]) / 2
+
+            pan, tilt = cal.pixel_to_ptz(center_x, center_y)
+            zoom = cal.bbox_to_zoom(bbox, self.target_fill_pct) if auto_zoom else 0.0
+
+            self._target_pan = pan
+            self._target_tilt = tilt
+            self._target_zoom = zoom
+            self._last_move_time = time.time()
+
         LOGGER.info("PTZ centering on bbox: pan=%.3f, tilt=%.3f, zoom=%.3f", pan, tilt, zoom)
-        self.onvif_client.ptz_move_absolute(self.profile_token, pan, tilt, zoom)
-        
-        self._target_pan = pan
-        self._target_tilt = tilt
-        self._target_zoom = zoom
+        # ONVIF call outside the lock (network I/O); onvif_client has its own RLock.
+        try:
+            self.onvif_client.ptz_move_absolute(self.profile_token, pan, tilt, zoom)
+        except Exception as e:
+            LOGGER.error("center_on_bbox: ptz_move_absolute failed: %s", e)
 
 
 def create_ptz_tracker(

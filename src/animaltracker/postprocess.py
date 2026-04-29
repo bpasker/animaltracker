@@ -424,9 +424,12 @@ class ClipPostProcessor:
         # When tracking is enabled, sample more frequently for better track continuity
         # Without tracking, we can sample less frequently since we just need species votes
         if self.tracking_enabled:
-            # For tracking: analyze every 3rd frame (~5-10 fps effective)
-            # This gives ByteTrack enough visual overlap to track moving animals
-            actual_sample_rate = 3
+            # For tracking, default to every 3rd frame (~5-10 fps effective) to give
+            # ByteTrack enough visual overlap. Honor an explicit config override so
+            # users can trade tracking quality for speed (e.g. sample_rate=5 cuts
+            # SpeciesNet inference cost ~40% with negligible quality loss for normal
+            # animal motion).
+            actual_sample_rate = self.sample_rate if self.sample_rate and self.sample_rate > 0 else 3
         else:
             # For non-tracking: ~1 frame per second is fine
             smart_sample_rate = max(1, min(int(fps), 30))

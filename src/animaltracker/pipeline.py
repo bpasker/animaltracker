@@ -209,9 +209,10 @@ class EventState:
 class StreamWorker:
     # Class-level semaphore to limit concurrent post-processing across ALL cameras
     # This prevents RAM explosion when multiple clips finish simultaneously
-    # Initialized by PipelineOrchestrator based on config (default: 1 concurrent job)
+    # Initialized by PipelineOrchestrator based on config (default: 2 concurrent jobs
+    # so two cameras finishing simultaneously don't serialize on the GPU).
     _postprocess_semaphore: threading.Semaphore = None
-    _postprocess_limit: int = 1
+    _postprocess_limit: int = 2
 
     @classmethod
     def set_postprocess_limit(cls, limit: int) -> None:

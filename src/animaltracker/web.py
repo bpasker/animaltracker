@@ -7167,6 +7167,14 @@ class WebServer:
         if error_msg and source in ('none', 'unknown'):
             response_data['error'] = error_msg
 
+        # Always surface debug fields — useful for diagnosing source confusion
+        # in production. These are tiny scalars and harmless to include.
+        response_data['_debug'] = {
+            'log_files_found': log_files_found,
+            'logs_root': str(self.logs_root) if self.logs_root else None,
+            'error_msg': error_msg,
+        }
+
         return web.json_response(response_data)
 
     async def handle_monitor_page(self, request):

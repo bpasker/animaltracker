@@ -98,6 +98,83 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
+# --- Pre-compiled regex patterns for /api/logs (compiled once at import) ---
+# HTTP access-log noise we always want to exclude.
+_HTTP_EXCLUDE_PATTERNS = [
+    r'GET /', r'POST /', r'DELETE /', r'PUT /',
+    r'HTTP/\d', r'\d{3} \d+ bytes', r'aiohttp',
+]
+_HTTP_EXCLUDE_RE = [re.compile(p, re.IGNORECASE) for p in _HTTP_EXCLUDE_PATTERNS]
+
+_LOG_TYPE_FILTERS_RAW = {
+    'all': None,
+    'no-http': {'exclude': _HTTP_EXCLUDE_PATTERNS},
+    'realtime': {
+        'include': [r'\[REALTIME\]', r'raw detections'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+    'detection': {
+        'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet', r'\[REALTIME\]'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+    'tracking': {
+        'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+    'ptz': {
+        'include': [r'ptz', r'PTZ', r'\[MOVE', r'\[MODE_CHANGE', r'\[TRACKING', r'\[COORD', r'\[OFFSET', r'patrol', r'preset'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+    'events': {
+        'include': [r'event', r'started tracking', r'closed', r'clip at'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+    'clips': {
+        'include': [r'clip', r'recording', r'write_clip', r'storage', r'\.mp4'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+    'errors': {
+        'include': [r'error', r'warning', r'failed', r'exception', r'traceback'],
+        'exclude': _HTTP_EXCLUDE_PATTERNS,
+    },
+}
+
+_LOG_TYPE_FILTERS_COMPILED = {}
+for _name, _cfg in _LOG_TYPE_FILTERS_RAW.items():
+    if _cfg is None:
+        _LOG_TYPE_FILTERS_COMPILED[_name] = None
+        continue
+    _LOG_TYPE_FILTERS_COMPILED[_name] = {
+        'include': [re.compile(p, re.IGNORECASE) for p in _cfg.get('include', [])] or None,
+        'exclude': [re.compile(p, re.IGNORECASE) for p in _cfg.get('exclude', [])] or None,
+    }
+
+# Timestamp parsers used by file-log fallback.
+_TS_FULL_RE = re.compile(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})')
+_TS_TIME_RE = re.compile(r'(\d{2}:\d{2}:\d{2})')
+
+
+def _matches_log_filter(message: str, filter_type: str) -> bool:
+    """Apply pre-compiled include/exclude filter patterns to a single log message."""
+    cfg = _LOG_TYPE_FILTERS_COMPILED.get(filter_type)
+    if cfg is None:
+        return True
+    excludes = cfg.get('exclude')
+    if excludes:
+        for pat in excludes:
+            if pat.search(message):
+                return False
+    includes = cfg.get('include')
+    if includes is None:
+        # Only excludes defined → pass everything not excluded.
+        return True
+    for pat in includes:
+        if pat.search(message):
+            return True
+    return False
+
+
 class WebServer:
     def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None, runtime = None):
         self.workers = workers
@@ -6812,8 +6889,7 @@ class WebServer:
 
     async def handle_get_logs(self, request):
         """Get recent logs from journalctl or log files."""
-        import subprocess
-        import re as regex
+        from collections import deque
 
         # Get query params
         camera_id = request.query.get('camera', None)
@@ -6825,71 +6901,7 @@ class WebServer:
         # Custom time range support (overrides minutes if provided)
         start_time = request.query.get('start', None)  # ISO format: 2026-01-17T10:00
         end_time = request.query.get('end', None)  # ISO format: 2026-01-17T12:00
-        
-        # Server-side filter patterns (match client-side)
-        # Patterns to exclude HTTP access logs from all filters
-        HTTP_EXCLUDE_PATTERNS = [r'GET /', r'POST /', r'DELETE /', r'PUT /', r'HTTP/\d', r'\d{3} \d+ bytes', r'aiohttp']
 
-        LOG_TYPE_FILTERS = {
-            'all': None,
-            'no-http': {
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            },
-            'realtime': {
-                'include': [r'\[REALTIME\]', r'raw detections'],
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            },
-            'detection': {
-                'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet', r'\[REALTIME\]'],
-                'exclude': HTTP_EXCLUDE_PATTERNS  # Exclude HTTP traffic that happens to contain "detect" in URL
-            },
-            'tracking': {
-                'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge'],
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            },
-            'ptz': {
-                'include': [r'ptz', r'PTZ', r'\[MOVE', r'\[MODE_CHANGE', r'\[TRACKING', r'\[COORD', r'\[OFFSET', r'patrol', r'preset'],
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            },
-            'events': {
-                'include': [r'event', r'started tracking', r'closed', r'clip at'],
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            },
-            'clips': {
-                'include': [r'clip', r'recording', r'write_clip', r'storage', r'\.mp4'],
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            },
-            'errors': {
-                'include': [r'error', r'warning', r'failed', r'exception', r'traceback'],
-                'exclude': HTTP_EXCLUDE_PATTERNS
-            }
-        }
-        
-        def matches_filter(message, filter_type):
-            """Check if message matches the filter criteria."""
-            filter_config = LOG_TYPE_FILTERS.get(filter_type)
-            if not filter_config:
-                return True
-
-            # Always check exclusions first (e.g., exclude HTTP traffic)
-            if 'exclude' in filter_config:
-                for pattern in filter_config['exclude']:
-                    if regex.search(pattern, message, regex.IGNORECASE):
-                        return False
-
-            # If only exclusions defined, pass everything not excluded
-            if 'exclude' in filter_config and 'include' not in filter_config:
-                return True
-
-            # Check inclusions - must match at least one pattern
-            if 'include' in filter_config:
-                for pattern in filter_config['include']:
-                    if regex.search(pattern, message, regex.IGNORECASE):
-                        return True
-                return False
-
-            return True
-        
         logs = []
         source = 'none'
         error_msg = None
@@ -6927,30 +6939,49 @@ class WebServer:
                 fetch_limit = max(limit * 2, 500) if log_type == 'all' else max(limit * 4, 2000)
                 cmd.extend(['-n', str(fetch_limit)])
                 cmd.extend(['--since', f'{minutes} minutes ago'])
-            
+
             # Add unit filter if specific camera requested
             if camera_id:
                 cmd.extend(['-u', f'detector@{camera_id}.service'])
             # Otherwise get all detector units using glob (works on Ubuntu 24.04)
             else:
                 cmd.extend(['-u', 'detector@*.service'])
-            
+
             # Add priority filter
             if level == 'error':
                 cmd.extend(['-p', 'err'])
             elif level == 'warning':
                 cmd.extend(['-p', 'warning'])
-            
+
             LOGGER.debug("Running journalctl: %s", ' '.join(cmd))
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            
-            LOGGER.debug("journalctl returned: code=%d, stdout_len=%d, stderr=%s", 
-                        result.returncode, len(result.stdout), result.stderr[:200] if result.stderr else '')
-            
-            if result.returncode == 0 and result.stdout.strip():
+            # Run journalctl asynchronously so we don't block the event loop
+            # while it executes (can take seconds on busy systems).
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                raise
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                raise
+            stdout = stdout_b.decode('utf-8', errors='replace')
+            stderr = stderr_b.decode('utf-8', errors='replace')
+            returncode = proc.returncode if proc.returncode is not None else -1
+
+            LOGGER.debug("journalctl returned: code=%d, stdout_len=%d, stderr=%s",
+                        returncode, len(stdout), stderr[:200] if stderr else '')
+
+            if returncode == 0 and stdout.strip():
                 source = 'journalctl'
-                import json
-                for line in result.stdout.strip().split('\n'):
+                for line in stdout.strip().split('\n'):
                     if line:
                         try:
                             entry = json.loads(line)
@@ -6963,11 +6994,11 @@ class WebServer:
                             else:
                                 ts = None
                                 time_str = '--:--:--'
-                            
+
                             message = entry.get('MESSAGE', '')
                             priority = int(entry.get('PRIORITY', 6))
                             unit = entry.get('_SYSTEMD_UNIT', '')
-                            
+
                             # Map priority to level
                             if priority <= 3:
                                 log_level = 'error'
@@ -6975,14 +7006,14 @@ class WebServer:
                                 log_level = 'warning'
                             else:
                                 log_level = 'info'
-                            
+
                             # Extract camera from unit name
                             cam = ''
                             if 'detector@' in unit:
                                 cam = unit.replace('detector@', '').replace('.service', '')
-                            
-                            # Apply server-side type filter
-                            if matches_filter(message, log_type):
+
+                            # Apply server-side type filter (uses pre-compiled patterns)
+                            if _matches_log_filter(message, log_type):
                                 logs.append({
                                     'time': time_str,
                                     'timestamp': ts,  # Unix epoch for client-side timezone conversion
@@ -6994,17 +7025,17 @@ class WebServer:
                                 skipped_count += 1
                         except json.JSONDecodeError:
                             continue
-            elif result.returncode != 0:
-                error_msg = result.stderr[:200] if result.stderr else f'Exit code {result.returncode}'
+            elif returncode != 0:
+                error_msg = stderr[:200] if stderr else f'Exit code {returncode}'
                 LOGGER.warning("journalctl failed: %s", error_msg)
         except FileNotFoundError:
             error_msg = 'journalctl not found'
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             error_msg = 'journalctl timed out'
         except Exception as e:
             error_msg = str(e)
             LOGGER.debug("journalctl failed: %s", e)
-        
+
         # Also read from log files and merge (not just fallback)
         log_files_found = 0
         if self.logs_root and self.logs_root.exists():
@@ -7015,12 +7046,11 @@ class WebServer:
             else:
                 cutoff = datetime.now(tz=CENTRAL_TZ) - timedelta(minutes=minutes)
                 cutoff_end = None
-            
-            # Helper to parse log timestamps
+
+            # Helper to parse log timestamps (uses pre-compiled regexes)
             def parse_log_timestamp(line):
                 """Try to extract datetime from log line. Returns (datetime, time_str, unix_ts) or (None, time_str, None)."""
-                # Try full datetime: 2026-01-17 10:30:45 or 2026-01-17T10:30:45
-                full_match = regex.search(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})', line)
+                full_match = _TS_FULL_RE.search(line)
                 if full_match:
                     try:
                         dt = datetime.strptime(f"{full_match.group(1)} {full_match.group(2)}", '%Y-%m-%d %H:%M:%S')
@@ -7029,8 +7059,8 @@ class WebServer:
                     except ValueError:
                         pass
 
-                # Try time only: 10:30:45 - assume today
-                time_match = regex.search(r'(\d{2}:\d{2}:\d{2})', line)
+                # Time-only fallback: assume today (best-effort; may misorder across midnight)
+                time_match = _TS_TIME_RE.search(line)
                 if time_match:
                     time_str = time_match.group(1)
                     try:
@@ -7043,61 +7073,64 @@ class WebServer:
 
                 return None, '--:--:--', None
 
-            # Look for log files
-            log_patterns = ['*.log', 'detector*.log', 'animaltracker*.log']
+            # Look for app log files only. The bare '*.log' glob would also match
+            # 'web_access.log' (HTTP access log) which can be huge and is pure
+            # noise — restrict to known app-log prefixes.
+            log_patterns = ['detector*.log', 'animaltracker*.log']
             # For custom time range, read more lines to ensure we capture the full range
             max_lines_per_file = 10000 if time_range_start else 500
             for pattern in log_patterns:
                 for log_file in self.logs_root.glob(pattern):
                     log_files_found += 1
                     try:
-                        with open(log_file, 'r') as f:
-                            # Read last N lines (more for custom range)
-                            lines = f.readlines()[-max_lines_per_file:]
-                            for line in lines:
-                                line = line.strip()
-                                if not line:
-                                    continue
+                        # deque(..., maxlen=N) keeps only the last N lines in
+                        # constant memory (vs f.readlines()[-N:] which loads
+                        # the whole file).
+                        with open(log_file, 'r', errors='replace') as f:
+                            lines = deque(f, maxlen=max_lines_per_file)
+                        for line in lines:
+                            line = line.rstrip('\n').rstrip('\r')
+                            if not line:
+                                continue
 
-                                # Parse common log formats
-                                log_level = 'info'
-                                if 'ERROR' in line or 'error' in line.lower():
-                                    log_level = 'error'
-                                elif 'WARNING' in line or 'warning' in line.lower():
-                                    log_level = 'warning'
+                            # Parse common log formats
+                            log_level = 'info'
+                            if 'ERROR' in line or 'error' in line.lower():
+                                log_level = 'error'
+                            elif 'WARNING' in line or 'warning' in line.lower():
+                                log_level = 'warning'
 
-                                # Filter by level
-                                if level == 'error' and log_level != 'error':
-                                    continue
-                                if level == 'warning' and log_level not in ('error', 'warning'):
-                                    continue
+                            # Filter by level
+                            if level == 'error' and log_level != 'error':
+                                continue
+                            if level == 'warning' and log_level not in ('error', 'warning'):
+                                continue
 
-                                # Extract and filter by timestamp
-                                log_dt, time_str, unix_ts = parse_log_timestamp(line)
+                            # Extract and filter by timestamp
+                            log_dt, time_str, unix_ts = parse_log_timestamp(line)
 
-                                # Apply time range filter if we could parse the timestamp
-                                if log_dt:
-                                    if log_dt < cutoff:
-                                        continue  # Before start time
-                                    if cutoff_end and log_dt > cutoff_end:
-                                        continue  # After end time
+                            # Apply time range filter if we could parse the timestamp
+                            if log_dt:
+                                if log_dt < cutoff:
+                                    continue  # Before start time
+                                if cutoff_end and log_dt > cutoff_end:
+                                    continue  # After end time
 
-                                # Apply server-side type filter
-                                if matches_filter(line, log_type):
-                                    logs.append({
-                                        'time': time_str,
-                                        'timestamp': unix_ts,  # Unix epoch for client-side timezone conversion
-                                        'level': log_level,
-                                        'camera': '',
-                                        'message': line[:500],  # Truncate long lines
-                                    })
-                                else:
-                                    skipped_count += 1
-                    except Exception:
+                            # Apply server-side type filter
+                            if _matches_log_filter(line, log_type):
+                                logs.append({
+                                    'time': time_str,
+                                    'timestamp': unix_ts,  # Unix epoch for client-side timezone conversion
+                                    'level': log_level,
+                                    'camera': '',
+                                    'message': line[:500],  # Truncate long lines
+                                })
+                            else:
+                                skipped_count += 1
+                    except (OSError, UnicodeDecodeError) as e:
+                        LOGGER.warning("Failed to read log file %s: %s", log_file, e)
                         continue
-            
-            # Update source based on what we found
-            if log_files_found > 0:
+
                 if source == 'journalctl':
                     source = 'journalctl+logfile'
                 else:

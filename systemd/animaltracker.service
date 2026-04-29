@@ -1,0 +1,23 @@
+[Unit]
+Description=Animal Tracker (multi-camera detector + web UI)
+After=network-online.target
+Wants=network-online.target
+# Optional; remove if you do not have an SSD mount for storage
+RequiresMountsFor=/mnt/wildlife_ssd
+
+[Service]
+Type=simple
+# Update User and paths to match your install
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/animaltracker
+EnvironmentFile=/home/YOUR_USERNAME/animaltracker/config/secrets.env
+# Runs the whole pipeline (every camera in cameras.yml) plus the web UI
+# on port 8080 in a single process. Do not run more than one instance.
+ExecStart=/home/YOUR_USERNAME/animaltracker/.venv/bin/python -m animaltracker \
+    --config /home/YOUR_USERNAME/animaltracker/config/cameras.yml \
+    run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

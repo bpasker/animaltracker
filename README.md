@@ -510,23 +510,26 @@ python -m animaltracker.cli --config config/cameras.yml reprocess --no-rename
 
 ### Linux (systemd) - Recommended for Jetson/Servers
 
+The single `animaltracker.service` unit runs the entire pipeline (every
+camera in `cameras.yml`) plus the web UI on port 8080 in one process.
+Do **not** run more than one instance — the second would fail to bind 8080.
+
 ```bash
 # 1. Copy service files
-sudo cp systemd/detector@.service /etc/systemd/system/
+sudo cp systemd/animaltracker.service /etc/systemd/system/
 sudo cp systemd/ssd-cleaner.service systemd/ssd-cleaner.timer /etc/systemd/system/
 
 # 2. Reload systemd
 sudo systemctl daemon-reload
 
-# 3. Enable and start for your camera (use camera ID from cameras.yml)
-sudo systemctl enable detector@cam1
-sudo systemctl start detector@cam1
+# 3. Enable and start
+sudo systemctl enable --now animaltracker
 
 # 4. Check status
-sudo systemctl status detector@cam1
+sudo systemctl status animaltracker
 
 # 5. View logs
-journalctl -u detector@cam1 -f
+journalctl -u animaltracker -f
 
 # 6. Enable automatic cleanup (optional)
 sudo systemctl enable --now ssd-cleaner.timer
@@ -728,7 +731,6 @@ This usually happens with H.265 streams on software decoding. Switch to the H.26
 #CHECK GPU Usage
 nvidia-smi -l 1
 
-systemctl restart detector@cam2
+sudo systemctl restart animaltracker
 
-
-journalctl -u detector@cam2 --since "30 minutes ago"
+journalctl -u animaltracker --since "30 minutes ago"

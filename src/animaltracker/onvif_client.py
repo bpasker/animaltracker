@@ -12,8 +12,22 @@ try:
 except ImportError:  # pragma: no cover
     ONVIFCamera = None  # type: ignore
 
+try:
+    # zeep ships its own transport that wraps requests; we use it to inject
+    # connect/read timeouts so a misbehaving camera or network glitch can
+    # never block an ONVIF call (and therefore the PTZTracker lock) forever.
+    from zeep.transports import Transport as _ZeepTransport  # type: ignore
+except Exception:  # pragma: no cover
+    _ZeepTransport = None  # type: ignore
+
 LOGGER = logging.getLogger(__name__)
 PTZ_LOGGER = logging.getLogger('ptz.decisions')
+
+# Hard upper bound for any single ONVIF request. The PTZTracker holds its
+# state lock across ONVIF calls in several places; if a SOAP request stalls
+# (camera reboot, switch flap, lossy Wi-Fi), the lock would otherwise be
+# held forever and every other tracker thread would pile up behind it.
+_ONVIF_TIMEOUT_SEC = 5.0
 
 
 @dataclass
@@ -40,6 +54,40 @@ class OnvifClient:
             LOGGER.warning("onvif-zeep library not installed; ONVIF features disabled")
         else:
             self._camera = ONVIFCamera(host, port, username, password)
+            # Force a connect+read timeout on the underlying zeep transport so
+            # a stalled SOAP request can never hang the PTZTracker. Without
+            # this, requests has no default timeout and a hung TCP connection
+            # would freeze every PTZ thread that takes self._call_lock.
+            self._apply_transport_timeout()
+
+    def _apply_transport_timeout(self) -> None:
+        if _ZeepTransport is None:
+            return
+        try:
+            transport = _ZeepTransport(
+                timeout=_ONVIF_TIMEOUT_SEC,
+                operation_timeout=_ONVIF_TIMEOUT_SEC,
+            )
+            # Replace the default transport on the underlying zeep client.
+            # onvif-zeep stores the zeep client on `_camera.xaddrs`-keyed
+            # service factories that are created lazily; setting transport
+            # on the master devicemgmt client propagates because all
+            # services share the same wsdl/transport in onvif-zeep.
+            services = []
+            try:
+                services.append(self._camera.devicemgmt)
+            except Exception:
+                pass
+            for svc in services:
+                client = getattr(svc, 'zeep_client', None) or getattr(svc, 'ws_client', None)
+                if client is not None and hasattr(client, 'transport'):
+                    client.transport = transport
+            # Also set on the ONVIFCamera object itself so future
+            # create_*_service() calls inherit it.
+            if hasattr(self._camera, 'transport'):
+                self._camera.transport = transport
+        except Exception as e:
+            LOGGER.warning("Could not apply ONVIF transport timeout: %s", e)
 
     def get_profiles(self) -> list[OnvifProfile]:
         if ONVIFCamera is None:

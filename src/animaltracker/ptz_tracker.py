@@ -234,6 +234,16 @@ class PTZTracker:
     # locked species/aim before declaring takeover (H8).
     _pending_takeover_frames: int = field(default=0, init=False)
     _pending_takeover_required: int = field(default=2, init=False)
+    # Static-target watchdog: real animals breathe / sway / walk. If a
+    # locked target's bbox center has not moved at all for this long,
+    # treat it as a stuck false positive (leaf, shadow, branch, log)
+    # and release the lock so patrol can resume. Without this guard a
+    # 50%-confidence "animal" detected on a stationary tree limb can
+    # keep the system "successfully tracking" indefinitely.
+    _lock_motion_anchor: Optional[Tuple[float, float]] = field(default=None, init=False)
+    _lock_motion_anchor_time: float = field(default=0.0, init=False)
+    _lock_static_release_sec: float = field(default=45.0, init=False)
+    _lock_motion_threshold: float = field(default=0.02, init=False)
 
     # Decision log buffer (for storing with clips)
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
@@ -421,6 +431,8 @@ class PTZTracker:
         self._challenger_track_id = None
         self._challenger_streak = 0
         self._pending_takeover_frames = 0
+        self._lock_motion_anchor = None
+        self._lock_motion_anchor_time = 0.0
 
     def clear_lock(self) -> None:
         """Public: clear the target lock (e.g. on event boundary)."""
@@ -1205,6 +1217,24 @@ class PTZTracker:
         if source_camera is None:
             source_camera = self._last_detection_source or None
 
+        # Static-target watchdog: real animals breathe / sway / walk. If
+        # the current lock has not seen real motion for a long time, it is
+        # almost certainly a stuck false positive (a leaf, a log, a fence
+        # post mis-classified as 'animal'). Releasing here lets patrol
+        # resume instead of "successfully tracking" a stationary blob
+        # forever (the production hang we observed).
+        if (self._lock_motion_anchor is not None
+                and self._lock_motion_anchor_time > 0):
+            stuck_for = time.time() - self._lock_motion_anchor_time
+            if stuck_for > self._lock_static_release_sec:
+                PTZ_LOGGER.warning(
+                    "[LOCK_STATIC_RELEASE] Lock has not moved >%.0fpx norm for %.1fs; "
+                    "releasing as suspected false positive (species=%s, track_id=%s)",
+                    self._lock_motion_threshold * 100, stuck_for,
+                    self._locked_species, self._locked_track_id,
+                )
+                self._reset_lock_state_locked()
+
         # H1: a lock center stored in a *different* camera's normalized
         # coordinates is meaningless (cam1 wide vs cam2 zoom). On a true
         # source change, drop the spatial center AND the track_id (each
@@ -1241,6 +1271,17 @@ class PTZTracker:
             self._consecutive_lock_misses = 0
             self._challenger_track_id = None
             self._challenger_streak = 0
+            now_t = time.time()
+            # Static-target watchdog: update the motion anchor if the target
+            # has moved more than the threshold OR if we don't have an
+            # anchor yet (new lock). Otherwise keep the old anchor so its
+            # age can grow until release.
+            if (self._lock_motion_anchor is None
+                    or is_new
+                    or abs(cx - self._lock_motion_anchor[0]) > self._lock_motion_threshold
+                    or abs(cy - self._lock_motion_anchor[1]) > self._lock_motion_threshold):
+                self._lock_motion_anchor = (cx, cy)
+                self._lock_motion_anchor_time = now_t
             if is_new:
                 self._lock_start_time = time.time()
                 # Reset smoothing so the first command after acquiring a new
@@ -1350,8 +1391,31 @@ class PTZTracker:
                 )
                 self._reset_lock_state_locked()
 
-        # 3. No lock - pick highest confidence and establish new lock
-        best = max(detections, key=lambda d: d.confidence)
+        # 3. No lock - pick highest confidence and establish new lock.
+        # Prefer a detection that ByteTrack has actually confirmed
+        # (track_id is not None). An unconfirmed detection (track_id=None)
+        # is typically a single-frame flash -- locking onto one of those
+        # produced the multi-hour stuck-on-static-leaf hang we saw in
+        # production: the spatial fallback kept matching the same dead
+        # pixel region every frame, so the system "tracked successfully"
+        # forever and never returned to patrol.
+        tracked = [d for d in detections if getattr(d, 'track_id', None) is not None]
+        if tracked:
+            best = max(tracked, key=lambda d: d.confidence)
+        else:
+            # No confirmed tracks -- only lock if confidence is very high
+            # (real, strong detection) AND log it as suspicious.
+            best = max(detections, key=lambda d: d.confidence)
+            if best.confidence < 0.75:
+                PTZ_LOGGER.info(
+                    "[LOCK_SKIP] No tracked detections and best untracked is only %.1f%% (%s); not locking",
+                    best.confidence * 100, best.species
+                )
+                return None
+            PTZ_LOGGER.warning(
+                "[LOCK_UNTRACKED] No ByteTrack-confirmed detections; locking onto untracked %s at %.1f%%",
+                best.species, best.confidence * 100
+            )
         _record_lock(best, is_new=True)
         PTZ_LOGGER.info(
             "[LOCK_NEW] Locked onto new target: track_id=%s, %s (%.1f%%)",

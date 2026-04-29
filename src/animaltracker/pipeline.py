@@ -529,6 +529,17 @@ class StreamWorker:
                     "[BLUR_SKIP] %s: frame too blurry (score=%.1f < threshold=%.1f), skipping detection",
                     self.camera.id, blur_score, blur_threshold
                 )
+                # Tick the tracker with no detections so its Kalman / lost-track
+                # buffers stay aligned with wall-clock; otherwise a long blur
+                # window desynchronizes ByteTrack from frame time and reacquired
+                # tracks get fresh IDs (breaking the PTZ lock).
+                if self.tracker is not None:
+                    try:
+                        await loop.run_in_executor(
+                            None, self.tracker.update, [], frame, frame_idx,
+                        )
+                    except Exception:
+                        pass
                 await self._maybe_close_event(ts)
                 return
 
@@ -558,6 +569,15 @@ class StreamWorker:
                 # physically moved, jerking the PTZ on stale data.
                 self.latest_detections = []
                 self.latest_detection_ts = ts
+                # Tick the tracker on settle skips too -- same reasoning as
+                # the blur-skip branch above.
+                if self.tracker is not None:
+                    try:
+                        await loop.run_in_executor(
+                            None, self.tracker.update, [], frame, frame_idx,
+                        )
+                    except Exception:
+                        pass
                 await self._maybe_close_event(ts)
                 return
 
@@ -601,14 +621,16 @@ class StreamWorker:
 
         # Store for live view overlay
         frame_h, frame_w = frame.shape[:2]
-        self.latest_detections = filtered
-        self.latest_detection_ts = ts
         self.latest_frame_size = (frame_w, frame_h)
 
-        # Run object tracker BEFORE the PTZ tracker so detections carry
-        # stable track_ids. The tracker also needs to be ticked on empty
-        # frames so its internal Kalman filter / lost-track buffer advance
-        # consistently with wall-clock; ObjectTracker.update handles [].
+        # Run object tracker BEFORE publishing latest_detections so that any
+        # other worker reading our list (multi-cam PTZ path) sees detections
+        # whose track_id has already been stamped. Otherwise that worker can
+        # observe a detection with track_id=None microseconds before our
+        # executor stamps it -- breaking lock persistence on the receiver.
+        # The tracker also needs to be ticked on empty frames so its internal
+        # Kalman filter / lost-track buffer advance consistently with
+        # wall-clock; ObjectTracker.update handles [].
         if self.tracker is not None:
             try:
                 await loop.run_in_executor(
@@ -620,6 +642,9 @@ class StreamWorker:
                 )
             except Exception as e:
                 LOGGER.warning("ObjectTracker.update failed for %s: %s", self.camera.id, e)
+
+        self.latest_detections = filtered
+        self.latest_detection_ts = ts
 
         # PTZ auto-tracking: always call update (handles patrol when no detections).
         # Only the worker designated as the tracker driver may push detections;
@@ -648,8 +673,15 @@ class StreamWorker:
                 # detections cannot drive PTZ. (Settle gate already clears
                 # latest_detections for the moved camera, but the window
                 # protects the source camera too if its inference happens
-                # to lag.)
-                staleness_window = max(0.05, min(0.2, self.camera.thresholds.ptz_settle_time / 2 - 0.05))
+                # to lag.) When settle is disabled (<=0), there is nothing
+                # to protect against -- use a generous window so single
+                # ~66ms inter-frame gaps don't spuriously discard fresh
+                # detections.
+                settle = self.camera.thresholds.ptz_settle_time
+                if settle <= 0:
+                    staleness_window = 0.5
+                else:
+                    staleness_window = max(0.1, min(0.5, settle * 0.5))
 
                 for cam_id, worker in self._ptz_detection_sources.items():
                     detection_age = ts - worker.latest_detection_ts
@@ -675,27 +707,54 @@ class StreamWorker:
                 if camera_detections:
                     contrib = ', '.join(f"{k}:{len(v[0])}" for k, v in camera_detections.items())
                     LOGGER.debug("Multi-cam PTZ update from %s: %s", self.camera.id, contrib)
-                    await loop.run_in_executor(
-                        None,
-                        self.ptz_tracker.update_multi_camera,
-                        camera_detections,
-                        self._ptz_source_camera_id,
-                        self._ptz_target_camera_id
-                    )
+                    try:
+                        await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None,
+                                self.ptz_tracker.update_multi_camera,
+                                camera_detections,
+                                self._ptz_source_camera_id,
+                                self._ptz_target_camera_id,
+                            ),
+                            timeout=3.0,
+                        )
+                    except asyncio.TimeoutError:
+                        LOGGER.warning(
+                            "[PTZ_TIMEOUT] update_multi_camera exceeded 3s on %s; skipping frame",
+                            self.camera.id,
+                        )
                 else:
                     # No recent detections from any camera
-                    await loop.run_in_executor(
-                        None,
-                        self.ptz_tracker.update,
-                        [], frame_w, frame_h
-                    )
+                    try:
+                        await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None,
+                                self.ptz_tracker.update,
+                                [], frame_w, frame_h,
+                            ),
+                            timeout=3.0,
+                        )
+                    except asyncio.TimeoutError:
+                        LOGGER.warning(
+                            "[PTZ_TIMEOUT] update([]) exceeded 3s on %s; skipping frame",
+                            self.camera.id,
+                        )
             else:
                 # Single-camera tracking mode
-                await loop.run_in_executor(
-                    None,
-                    self.ptz_tracker.update,
-                    filtered, frame_w, frame_h
-                )
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            self.ptz_tracker.update,
+                            filtered, frame_w, frame_h,
+                        ),
+                        timeout=3.0,
+                    )
+                except asyncio.TimeoutError:
+                    LOGGER.warning(
+                        "[PTZ_TIMEOUT] update exceeded 3s on %s; skipping frame",
+                        self.camera.id,
+                    )
             # Periodically trim old decisions to prevent unbounded memory growth
             # Keep last 5 minutes of decisions (enough for any reasonable clip)
             cutoff = ts - 300  # 5 minutes

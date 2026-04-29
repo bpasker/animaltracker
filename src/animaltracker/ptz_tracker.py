@@ -75,12 +75,18 @@ class PTZCalibration:
             (pan, tilt) values for PTZ absolute positioning
         """
         # Normalize pixel to 0-1 range
-        norm_x = pixel_x / self.frame_width
-        norm_y = pixel_y / self.frame_height
-        
-        # Calculate offset from center
-        offset_x = (norm_x - self.pan_center_x) / self.pan_scale
-        offset_y = (self.tilt_center_y - norm_y) / self.tilt_scale  # Y inverted (up = positive tilt)
+        fw = self.frame_width if self.frame_width > 0 else 1
+        fh = self.frame_height if self.frame_height > 0 else 1
+        norm_x = pixel_x / fw
+        norm_y = pixel_y / fh
+
+        # Calculate offset from center. Guard against pan_scale/tilt_scale
+        # being misconfigured to 0 (would otherwise raise ZeroDivisionError
+        # and crash the streaming executor thread).
+        pan_scale = self.pan_scale if self.pan_scale > 1e-6 else 1.0
+        tilt_scale = self.tilt_scale if self.tilt_scale > 1e-6 else 1.0
+        offset_x = (norm_x - self.pan_center_x) / pan_scale
+        offset_y = (self.tilt_center_y - norm_y) / tilt_scale  # Y inverted (up = positive tilt)
         
         # Map to PTZ range
         pan_range = self.pan_max - self.pan_min
@@ -777,6 +783,11 @@ class PTZTracker:
         # any unrelated cam2 detection (e.g. a different animal that
         # wandered into the zoom view) silently steals the lock.
         target_can_take_over = False
+        if not target_detections:
+            # Target lost the object (or hasn't seen it yet) -- any partial
+            # takeover sequence we were accumulating is broken; require it
+            # to start over from zero on the next confirmed sighting.
+            self._pending_takeover_frames = 0
         if target_detections and self._track_active:
             # If we already had cam2 driving, or no existing lock at all, no
             # extra confirmation needed.
@@ -791,8 +802,22 @@ class PTZTracker:
                 tw, th = target_data[1], target_data[2]
                 ok = False
                 if self._locked_species:
+                    locked = self._locked_species
                     for d in target_detections:
-                        if d.species == self._locked_species:
+                        ds = d.species or ''
+                        # Accept exact match, OR a more specific
+                        # specialization (e.g. lock='animal',
+                        # detection='animal_mammalia_carnivora_ursidae')
+                        # which commonly happens once cam2 zooms in and
+                        # the post-classifier sharpens the label. Also
+                        # accept the inverse: locked species is more
+                        # specific than what cam2 currently reports
+                        # (briefly degraded classification).
+                        if (ds == locked
+                                or (locked and ds.startswith(locked + '_'))
+                                or (ds and locked.startswith(ds + '_'))
+                                or locked == 'animal'
+                                or ds == 'animal'):
                             ok = True
                             break
                 if not ok:
@@ -924,6 +949,12 @@ class PTZTracker:
         for precise centering. The object's position in cam2's frame directly
         tells us how to move the PTZ.
         """
+        if frame_width <= 0 or frame_height <= 0:
+            PTZ_LOGGER.error(
+                "[INVALID_FRAME_SIZE] _do_tracking_from_target called with frame=%dx%d; skipping",
+                frame_width, frame_height
+            )
+            return False
         PTZ_LOGGER.info(
             "[DO_TRACKING_TARGET] Called with %d detections from PTZ camera, frame=%dx%d",
             len(detections), frame_width, frame_height
@@ -1002,9 +1033,10 @@ class PTZTracker:
             if not self._holding_position:
                 try:
                     self.onvif_client.ptz_stop(self.profile_token)
-                except Exception:
-                    pass
-                self._holding_position = True
+                    self._holding_position = True
+                except Exception as e:
+                    PTZ_LOGGER.warning("[DEADZONE_STOP_FAIL] %s", e)
+                    # Leave _holding_position False so next frame retries.
             return False
 
         # Non-linear velocity curve for smooth tracking
@@ -1066,6 +1098,10 @@ class PTZTracker:
                 zoom_velocity
             )
             self._last_move_time = time.time()
+            # We just issued an active move -- we are no longer 'holding'.
+            # Without this, a subsequent return to the deadzone would skip
+            # ptz_stop because the debounce flag was still latched True.
+            self._holding_position = False
             return True
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
@@ -1213,6 +1249,10 @@ class PTZTracker:
                 self._target_pan = 0.0
                 self._target_tilt = 0.0
                 self._target_zoom = 0.0
+                # Clear stale 'we already issued a stop' debounce flag; the
+                # new target is at a different location and any prior stop
+                # no longer reflects current intent.
+                self._holding_position = False
 
         # 1. If we have a locked track_id, try to keep tracking it
         if self._locked_track_id is not None and self._locked_track_id in track_id_map:
@@ -1324,6 +1364,12 @@ class PTZTracker:
         source_camera: Optional[str] = None,
     ) -> bool:
         """Execute object tracking logic."""
+        if frame_width <= 0 or frame_height <= 0:
+            PTZ_LOGGER.error(
+                "[INVALID_FRAME_SIZE] _do_tracking called with frame=%dx%d; skipping",
+                frame_width, frame_height
+            )
+            return False
         PTZ_LOGGER.info(
             "[DO_TRACKING] Called with %d detections, frame=%dx%d",
             len(detections), frame_width, frame_height
@@ -1449,9 +1495,10 @@ class PTZTracker:
             if not self._holding_position:
                 try:
                     self.onvif_client.ptz_stop(self.profile_token)
-                except Exception:
-                    pass
-                self._holding_position = True
+                    self._holding_position = True
+                except Exception as e:
+                    PTZ_LOGGER.warning("[DEADZONE_STOP_FAIL] %s", e)
+                    # Leave _holding_position False so next frame retries.
             return False
 
         PTZ_LOGGER.info(
@@ -1540,6 +1587,7 @@ class PTZTracker:
                 zoom_velocity
             )
             self._last_move_time = time.time()
+            self._holding_position = False
             return True
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)

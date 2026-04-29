@@ -7059,14 +7059,20 @@ class WebServer:
                     except ValueError:
                         pass
 
-                # Time-only fallback: assume today (best-effort; may misorder across midnight)
+                # Time-only fallback. Naively combining with "today" misorders
+                # entries written shortly before midnight (they look like
+                # they're in the future). If the resulting datetime is more
+                # than ~1 minute ahead of "now", assume the line was written
+                # yesterday.
                 time_match = _TS_TIME_RE.search(line)
                 if time_match:
                     time_str = time_match.group(1)
                     try:
-                        today = datetime.now(tz=CENTRAL_TZ).date()
+                        now = datetime.now(tz=CENTRAL_TZ)
                         t = datetime.strptime(time_str, '%H:%M:%S').time()
-                        dt = datetime.combine(today, t, tzinfo=CENTRAL_TZ)
+                        dt = datetime.combine(now.date(), t, tzinfo=CENTRAL_TZ)
+                        if dt - now > timedelta(minutes=1):
+                            dt -= timedelta(days=1)
                         return dt, time_str, dt.timestamp()
                     except ValueError:
                         return None, time_str, None

@@ -1,0 +1,12 @@
+/opt/speciesnet/animaltracker/logs/web_access.log
+/opt/speciesnet/animaltracker/logs/detector*.log
+/opt/speciesnet/animaltracker/logs/animaltracker*.log {
+    weekly
+    rotate 4
+    maxsize 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

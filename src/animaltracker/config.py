@@ -150,6 +150,15 @@ class PTZTrackingSettings(BaseModel):
     # Preset-based patrol (instead of continuous sweep)
     patrol_presets: list[str] = Field(default=[], description="List of preset tokens/names for patrol. Empty = continuous sweep")
     patrol_dwell_time: float = Field(default=10.0, ge=2.0, le=120.0, description="Seconds to stay at each preset position")
+    # Tracking-stability tunables
+    move_min_duration: float = Field(default=0.6, ge=0.0, le=5.0, description="Minimum seconds a tracking ContinuousMove is allowed to run before it can be ptz_stop'd by a no-detection tick")
+    cam1_fallback_delay: float = Field(default=3.0, ge=0.0, le=30.0, description="Seconds to suppress source-camera (cam1) repositioning after the target camera (cam2) drove tracking. Prevents miscalibrated cam1->cam2 swings on a single dropped cam2 frame")
+    # Investigate mode (opt-in): zoom in on small wide-angle candidates
+    investigate_enabled: bool = Field(default=False, description="If true, small cam1 detections (below min_detection_area but above investigate_min_area) cause cam2 to slew over and try to confirm with its zoom view")
+    investigate_min_area: float = Field(default=0.0005, ge=0.0, le=0.1, description="Minimum normalized area for a cam1 detection to be treated as an investigate candidate (0.0005 = 0.05% of frame)")
+    investigate_timeout: float = Field(default=4.0, ge=0.5, le=30.0, description="Seconds cam2 has to confirm an investigate candidate before it's marked as a reject")
+    investigate_cooldown: float = Field(default=30.0, ge=0.0, le=600.0, description="Seconds to suppress re-investigating a previously-rejected cam1 location")
+    investigate_cooldown_radius: float = Field(default=0.10, ge=0.0, le=0.5, description="Normalized radius around a rejected location considered the same spot")
 
 
 class CameraNotificationSettings(BaseModel):

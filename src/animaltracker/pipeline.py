@@ -1603,6 +1603,13 @@ class PipelineOrchestrator:
                                 'patrol_return_delay': ptz_cfg.patrol_return_delay,
                                 'patrol_presets': ptz_cfg.patrol_presets,
                                 'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
+                                'move_min_duration': getattr(ptz_cfg, 'move_min_duration', 0.6),
+                                'cam1_fallback_delay': getattr(ptz_cfg, 'cam1_fallback_delay', 3.0),
+                                'investigate_enabled': getattr(ptz_cfg, 'investigate_enabled', False),
+                                'investigate_min_area': getattr(ptz_cfg, 'investigate_min_area', 0.0005),
+                                'investigate_timeout': getattr(ptz_cfg, 'investigate_timeout', 4.0),
+                                'investigate_cooldown': getattr(ptz_cfg, 'investigate_cooldown', 30.0),
+                                'investigate_cooldown_radius': getattr(ptz_cfg, 'investigate_cooldown_radius', 0.10),
                             }
                         )
                         # Enable patrol and tracking based on config
@@ -1686,6 +1693,13 @@ class PipelineOrchestrator:
                                 'patrol_return_delay': ptz_cfg.patrol_return_delay,
                                 'patrol_presets': ptz_cfg.patrol_presets,
                                 'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
+                                'move_min_duration': getattr(ptz_cfg, 'move_min_duration', 0.6),
+                                'cam1_fallback_delay': getattr(ptz_cfg, 'cam1_fallback_delay', 3.0),
+                                'investigate_enabled': getattr(ptz_cfg, 'investigate_enabled', False),
+                                'investigate_min_area': getattr(ptz_cfg, 'investigate_min_area', 0.0005),
+                                'investigate_timeout': getattr(ptz_cfg, 'investigate_timeout', 4.0),
+                                'investigate_cooldown': getattr(ptz_cfg, 'investigate_cooldown', 30.0),
+                                'investigate_cooldown_radius': getattr(ptz_cfg, 'investigate_cooldown_radius', 0.10),
                             }
                         )
                         # Enable patrol and tracking separately based on config

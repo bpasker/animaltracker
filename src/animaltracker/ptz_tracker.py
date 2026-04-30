@@ -142,9 +142,10 @@ from enum import Enum
 
 class PTZMode(Enum):
     """PTZ operating mode."""
-    IDLE = "idle"           # Not active
-    PATROL = "patrol"       # Scanning for objects
-    TRACKING = "tracking"   # Following detected object
+    IDLE = "idle"               # Not active
+    PATROL = "patrol"           # Scanning for objects
+    INVESTIGATE = "investigate" # Pointed cam2 at a small cam1 candidate, awaiting confirmation
+    TRACKING = "tracking"       # Following detected object
 
 
 @dataclass
@@ -192,6 +193,21 @@ class PTZTracker:
     # produce large erroneous slews. Only fall back to cam1 if cam2 has
     # truly lost the object for longer than this window.
     cam1_fallback_delay: float = 3.0
+
+    # --- Investigate mode (opt-in) ---
+    # When the source (wide) camera has a *small* detection that is below
+    # min_detection_area but still above investigate_min_area, treat it as
+    # a candidate worth checking with the zoom camera instead of dropping
+    # it as noise. Cam2 is slewed to the candidate and given
+    # investigate_timeout seconds to confirm with its own detection. If
+    # cam2 confirms, we transition into normal TRACKING. If not, the
+    # candidate location is added to a cooldown list so we don't keep
+    # re-investigating the same patch of leaves.
+    investigate_enabled: bool = False
+    investigate_min_area: float = 0.0005   # 0.05% of frame; below this is pure noise
+    investigate_timeout: float = 4.0       # how long to wait for cam2 confirmation
+    investigate_cooldown: float = 30.0     # don't re-investigate same spot for this long
+    investigate_cooldown_radius: float = 0.10  # normalized distance considered "same spot"
     
     # Preset-based patrol
     patrol_presets: list = field(default_factory=list)  # List of preset tokens
@@ -227,6 +243,11 @@ class PTZTracker:
     # this timestamp, otherwise the worker's settle gate would permanently
     # suppress inference and tracking could never engage.
     _last_move_time: float = field(default=0.0, init=False)
+
+    # Investigate-mode state
+    _investigate_started_at: float = field(default=0.0, init=False)
+    _investigate_target: Optional[Tuple[float, float]] = field(default=None, init=False)  # normalized cam1 center being investigated
+    _investigate_rejects: list = field(default_factory=list, init=False)  # list of (norm_x, norm_y, expires_at)
 
     # Cached patrol velocity so we don't re-issue identical ContinuousMove
     # commands every tick (which both hammers the camera and refreshes
@@ -784,6 +805,31 @@ class PTZTracker:
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
 
+        # Capture "investigate candidates" BEFORE size filtering removes them.
+        # These are source-camera detections that fall in the size band
+        # [investigate_min_area, min_detection_area). Too small to drive
+        # tracking confidently from cam1 alone, but big enough that they
+        # might be a distant animal worth zooming in on.
+        investigate_candidates: List['Detection'] = []
+        if (
+            self.investigate_enabled
+            and source_detections
+            and source_data
+            and self.min_detection_area > 0
+            and self.investigate_min_area > 0
+            and self.investigate_min_area < self.min_detection_area
+        ):
+            sw, sh = source_data[1], source_data[2]
+            sf_area = max(sw * sh, 1)
+            min_px = self.min_detection_area * sf_area
+            inv_min_px = self.investigate_min_area * sf_area
+            for d in source_detections:
+                w = max(d.bbox[2] - d.bbox[0], 0)
+                h = max(d.bbox[3] - d.bbox[1], 0)
+                a = w * h
+                if inv_min_px <= a < min_px:
+                    investigate_candidates.append(d)
+
         # Filter out small detections using shared method (exempt locked target).
         #
         # While we're already in TRACKING mode we deliberately skip the size
@@ -936,6 +982,11 @@ class PTZTracker:
                     'detection_count': len(target_detections),
                     'source_camera': target_camera_id,
                 })
+                # If we got here from INVESTIGATE, the candidate has been
+                # confirmed by cam2 -- clear the investigate state so we
+                # don't subsequently log a timeout / cooldown.
+                if self._mode == PTZMode.INVESTIGATE:
+                    self._maybe_finish_investigate(now, confirmed=True)
                 self._mode = PTZMode.TRACKING
 
             # Use target camera's detections - these are most accurate since
@@ -1016,6 +1067,10 @@ class PTZTracker:
                     'detection_count': len(source_detections),
                     'source_camera': source_camera_id,
                 })
+                # If we got here from INVESTIGATE, treat the upgraded
+                # source detection as confirmation.
+                if self._mode == PTZMode.INVESTIGATE:
+                    self._maybe_finish_investigate(now, confirmed=True)
                 self._mode = PTZMode.TRACKING
 
             # Use the original tracking method for source camera detections
@@ -1025,6 +1080,31 @@ class PTZTracker:
             )
 
         else:
+            # No qualifying full-size detections from either camera.
+            # Before falling through to patrol/idle handling, check whether
+            # the source camera has an "investigate candidate" worth zooming
+            # in on with cam2.
+            if (
+                self.investigate_enabled
+                and self._track_active
+                and investigate_candidates
+                and source_data is not None
+                and self._mode in (PTZMode.PATROL, PTZMode.IDLE, PTZMode.INVESTIGATE)
+            ):
+                handled = self._maybe_investigate(
+                    investigate_candidates,
+                    source_data[1], source_data[2],
+                    source_camera_id, target_camera_id,
+                    now,
+                )
+                if handled:
+                    return True
+
+            # If we were INVESTIGATE-ing and cam2 hasn't confirmed in time,
+            # mark the candidate as a reject and fall back to patrol logic.
+            if self._mode == PTZMode.INVESTIGATE:
+                self._maybe_finish_investigate(now, confirmed=False)
+
             # No detections from either camera
             return self._handle_no_detections(now)
 
@@ -1195,6 +1275,146 @@ class PTZTracker:
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
             return False
+
+    # ------------------------------------------------------------------
+    # INVESTIGATE mode helpers
+    # ------------------------------------------------------------------
+    def _purge_investigate_rejects(self, now: float) -> None:
+        """Drop expired entries from the investigate-reject cooldown list."""
+        if not self._investigate_rejects:
+            return
+        self._investigate_rejects = [
+            r for r in self._investigate_rejects if r[2] > now
+        ]
+
+    def _is_in_investigate_cooldown(
+        self, norm_x: float, norm_y: float, now: float
+    ) -> bool:
+        """True if this normalized cam1 location is within cooldown radius
+        of any recently-rejected investigation."""
+        self._purge_investigate_rejects(now)
+        r = self.investigate_cooldown_radius
+        for rx, ry, _exp in self._investigate_rejects:
+            if abs(rx - norm_x) <= r and abs(ry - norm_y) <= r:
+                return True
+        return False
+
+    def _maybe_investigate(
+        self,
+        candidates: List['Detection'],
+        frame_width: int,
+        frame_height: int,
+        source_camera_id: str,
+        target_camera_id: str,
+        now: float,
+    ) -> bool:
+        """Either continue an in-flight investigation or start a new one
+        targeting the largest non-cooldown candidate. Returns True if PTZ
+        was driven this tick."""
+        # If we're already investigating, just keep waiting (cam2 didn't
+        # confirm yet but timeout hasn't elapsed). Hold position.
+        if self._mode == PTZMode.INVESTIGATE:
+            elapsed = now - self._investigate_started_at
+            if elapsed < self.investigate_timeout:
+                # Hold cam2 still while waiting for confirmation.
+                if not self._holding_position:
+                    try:
+                        self.onvif_client.ptz_stop(self.profile_token)
+                        self._holding_position = True
+                    except Exception:
+                        pass
+                return True
+            # Otherwise fall through; caller will mark reject + return to patrol.
+            return False
+
+        # Pick the largest candidate not in cooldown.
+        best = None
+        best_area = -1.0
+        best_cx = 0.5
+        best_cy = 0.5
+        fw = max(frame_width, 1)
+        fh = max(frame_height, 1)
+        for d in candidates:
+            cx = (d.bbox[0] + d.bbox[2]) / 2.0 / fw
+            cy = (d.bbox[1] + d.bbox[3]) / 2.0 / fh
+            if self._is_in_investigate_cooldown(cx, cy, now):
+                continue
+            a = (d.bbox[2] - d.bbox[0]) * (d.bbox[3] - d.bbox[1])
+            if a > best_area:
+                best_area = a
+                best = d
+                best_cx = cx
+                best_cy = cy
+        if best is None:
+            return False
+
+        # Slew cam2 to point at the candidate using the existing cam1->PTZ
+        # mapping. _do_tracking will issue a ContinuousMove and update
+        # _last_move_time so move_min_duration applies.
+        PTZ_LOGGER.info(
+            "[INVESTIGATE] Pointing %s at small %s candidate from %s "
+            "(conf=%.0f%%, norm_center=(%.2f, %.2f), area=%.3f%%)",
+            target_camera_id, best.species, source_camera_id,
+            best.confidence * 100, best_cx, best_cy,
+            (best_area / (fw * fh)) * 100.0,
+        )
+        self._log_decision('investigate_start', {
+            'source_camera': source_camera_id,
+            'target_camera': target_camera_id,
+            'species': best.species,
+            'confidence': round(best.confidence, 3),
+            'norm_center': [round(best_cx, 3), round(best_cy, 3)],
+            'area_pct': round((best_area / (fw * fh)) * 100.0, 3),
+            'timeout': self.investigate_timeout,
+        })
+        prev_mode = self._mode
+        self._mode = PTZMode.INVESTIGATE
+        self._investigate_started_at = now
+        self._investigate_target = (best_cx, best_cy)
+        self._holding_position = False
+        # Reuse the source-camera tracking path (single-camera pixel->PTZ
+        # mapping). Note this only repositions; it doesn't lock onto a
+        # ByteTrack id (candidate was below the normal detection threshold).
+        self._do_tracking(
+            [best], frame_width, frame_height, source_camera=source_camera_id,
+        )
+        if prev_mode != PTZMode.INVESTIGATE:
+            PTZ_LOGGER.info(
+                "[MODE_CHANGE] %s -> INVESTIGATE", prev_mode.value
+            )
+        return True
+
+    def _maybe_finish_investigate(self, now: float, confirmed: bool) -> None:
+        """Close out an in-flight investigation. If not confirmed, record
+        the candidate location in the cooldown list so we don't keep
+        re-investigating the same patch of leaves."""
+        if self._investigate_target is None:
+            return
+        cx, cy = self._investigate_target
+        if confirmed:
+            PTZ_LOGGER.info(
+                "[INVESTIGATE_CONFIRMED] cam2 confirmed candidate at (%.2f, %.2f)",
+                cx, cy
+            )
+            self._log_decision('investigate_confirmed', {
+                'norm_center': [round(cx, 3), round(cy, 3)],
+            })
+        else:
+            self._investigate_rejects.append(
+                (cx, cy, now + self.investigate_cooldown)
+            )
+            PTZ_LOGGER.info(
+                "[INVESTIGATE_TIMEOUT] cam2 did not confirm (%.2f, %.2f) "
+                "within %.1fs; cooldown %.0fs",
+                cx, cy, self.investigate_timeout, self.investigate_cooldown
+            )
+            self._log_decision('investigate_rejected', {
+                'norm_center': [round(cx, 3), round(cy, 3)],
+                'timeout': self.investigate_timeout,
+                'cooldown': self.investigate_cooldown,
+            })
+        self._investigate_target = None
+        self._investigate_started_at = 0.0
 
     def _handle_no_detections(self, now: float) -> bool:
         """Handle case when no detections from any camera."""
@@ -1851,6 +2071,11 @@ def create_ptz_tracker(
         patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
         move_min_duration=config.get('move_min_duration', 0.6),
         cam1_fallback_delay=config.get('cam1_fallback_delay', 3.0),
+        investigate_enabled=config.get('investigate_enabled', False),
+        investigate_min_area=config.get('investigate_min_area', 0.0005),
+        investigate_timeout=config.get('investigate_timeout', 4.0),
+        investigate_cooldown=config.get('investigate_cooldown', 30.0),
+        investigate_cooldown_radius=config.get('investigate_cooldown_radius', 0.10),
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
         secondary_cameras=config.get('secondary_cameras', []),

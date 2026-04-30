@@ -6907,6 +6907,12 @@ class WebServer:
         error_msg = None
         skipped_count = 0
 
+        # Known camera IDs for message-body camera attribution and filtering
+        # (the whole pipeline now runs in a single systemd unit, so we can't
+        # rely on the unit name).
+        known_camera_ids = list(self.workers.keys()) if hasattr(self, 'workers') else []
+        _camera_token_re_cache: dict = {}
+
         # Parse custom time range if provided
         time_range_start = None
         time_range_end = None
@@ -6940,12 +6946,10 @@ class WebServer:
                 cmd.extend(['-n', str(fetch_limit)])
                 cmd.extend(['--since', f'{minutes} minutes ago'])
 
-            # Add unit filter if specific camera requested
-            if camera_id:
-                cmd.extend(['-u', f'detector@{camera_id}.service'])
-            # Otherwise get all detector units using glob (works on Ubuntu 24.04)
-            else:
-                cmd.extend(['-u', 'detector@*.service'])
+            # Single unified service runs the whole pipeline. Per-camera
+            # filtering is done via message substring match below since all
+            # cameras log to the same systemd unit.
+            cmd.extend(['-u', 'animaltracker.service'])
 
             # Add priority filter
             if level == 'error':
@@ -7007,10 +7011,24 @@ class WebServer:
                             else:
                                 log_level = 'info'
 
-                            # Extract camera from unit name
+                            # Extract camera ID from the message body. The
+                            # whole pipeline now runs in one systemd unit, so
+                            # we look for any known camera id appearing as a
+                            # whole-word token in the message.
                             cam = ''
-                            if 'detector@' in unit:
-                                cam = unit.replace('detector@', '').replace('.service', '')
+                            if known_camera_ids:
+                                for cid in known_camera_ids:
+                                    if _camera_token_re_cache.setdefault(
+                                        cid, re.compile(rf'\b{re.escape(cid)}\b')
+                                    ).search(message):
+                                        cam = cid
+                                        break
+
+                            # Per-camera filter: skip messages that don't
+                            # mention the requested camera.
+                            if camera_id and cam != camera_id:
+                                skipped_count += 1
+                                continue
 
                             # Apply server-side type filter (uses pre-compiled patterns)
                             if _matches_log_filter(message, log_type):
@@ -7122,13 +7140,27 @@ class WebServer:
                                 if cutoff_end and log_dt > cutoff_end:
                                     continue  # After end time
 
+                            # Camera attribution from message body
+                            cam = ''
+                            if known_camera_ids:
+                                for cid in known_camera_ids:
+                                    if _camera_token_re_cache.setdefault(
+                                        cid, re.compile(rf'\b{re.escape(cid)}\b')
+                                    ).search(line):
+                                        cam = cid
+                                        break
+
+                            if camera_id and cam != camera_id:
+                                skipped_count += 1
+                                continue
+
                             # Apply server-side type filter
                             if _matches_log_filter(line, log_type):
                                 logs.append({
                                     'time': time_str,
                                     'timestamp': unix_ts,  # Unix epoch for client-side timezone conversion
                                     'level': log_level,
-                                    'camera': '',
+                                    'camera': cam,
                                     'message': line[:500],  # Truncate long lines
                                 })
                             else:

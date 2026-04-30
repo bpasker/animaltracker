@@ -784,8 +784,23 @@ class PTZTracker:
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
 
-        # Filter out small detections using shared method (exempt locked target)
-        if source_detections and source_data:
+        # Filter out small detections using shared method (exempt locked target).
+        #
+        # While we're already in TRACKING mode we deliberately skip the size
+        # filter for the SOURCE (wide) camera. The intent of the filter is to
+        # ignore wind-blown leaves / noise during patrol; once we have an
+        # actual subject being tracked, the same animal at distance often
+        # shrinks below min_detection_area in cam1's wide view (e.g. a dog
+        # walking away). Dropping it then makes the tracker think the
+        # object disappeared and prematurely return to PATROL even though
+        # cam1 is detecting the subject continuously. The locked-track
+        # exemption alone doesn't help when the lock was previously held by
+        # the target (cam2) and the subject only re-appears in cam1.
+        skip_source_size_filter = (
+            self._mode == PTZMode.TRACKING
+            and self._track_active
+        )
+        if source_detections and source_data and not skip_source_size_filter:
             source_detections = self._filter_small_detections(
                 source_detections, source_data[1], source_data[2],
                 protect_track_id=self._locked_track_id if self._locked_source_camera == source_camera_id else None,

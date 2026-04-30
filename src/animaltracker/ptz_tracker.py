@@ -174,6 +174,15 @@ class PTZTracker:
     patrol_tilt: float = 0.0    # Tilt position during patrol
     patrol_zoom: float = 0.0    # Zoom level during patrol (wide)
     patrol_return_delay: float = 2.0  # Faster return to patrol (was 3.0)
+
+    # Minimum time (seconds) a ContinuousMove issued by tracking should be
+    # allowed to run before _handle_no_detections is permitted to ptz_stop it.
+    # With sparse detections (e.g. SpeciesNet at ~2 fps on a small bird that
+    # only matches a fraction of frames) we frequently issue a move and then
+    # have an immediate "no detections" tick which used to halt the camera
+    # before it physically moved. Holding the move for at least this long
+    # lets the slew actually happen.
+    move_min_duration: float = 0.6
     
     # Preset-based patrol
     patrol_presets: list = field(default_factory=list)  # List of preset tokens
@@ -1175,7 +1184,20 @@ class PTZTracker:
             else:
                 # Still within delay, hold position. Only issue Stop once;
                 # repeating it every tick spams the camera unnecessarily.
-                if not self._holding_position:
+                #
+                # IMPORTANT: when detections are sparse (e.g. a bird showing up
+                # every ~1s) we will fall into this branch on the very next
+                # tick after issuing a ContinuousMove. Calling ptz_stop
+                # immediately kills that move before the camera has had a
+                # chance to physically reposition, which makes tracking
+                # ineffective. Give the in-flight ContinuousMove a minimum
+                # run-time (move_min_duration) before halting it so the
+                # camera can actually slew toward the target.
+                time_since_move = now - self._last_move_time
+                if (
+                    not self._holding_position
+                    and time_since_move >= self.move_min_duration
+                ):
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)
                     except Exception:
@@ -1759,6 +1781,7 @@ def create_ptz_tracker(
         patrol_enabled=config.get('patrol_enabled', True),
         patrol_speed=config.get('patrol_speed', 0.15),
         patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
+        move_min_duration=config.get('move_min_duration', 0.6),
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
         secondary_cameras=config.get('secondary_cameras', []),

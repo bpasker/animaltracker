@@ -208,6 +208,18 @@ class PTZTracker:
     investigate_timeout: float = 4.0       # how long to wait for cam2 confirmation
     investigate_cooldown: float = 30.0     # don't re-investigate same spot for this long
     investigate_cooldown_radius: float = 0.10  # normalized distance considered "same spot"
+    # Stepped slew during investigate: instead of one full-velocity move that
+    # overshoots a small target (especially when cam2 is already zoomed in),
+    # break the approach into short capped pulses with stop-and-detect gaps
+    # so cam2 can confirm before we move further.
+    investigate_velocity_cap: float = 0.25  # max |pan|/|tilt| velocity during investigate (vs. ~1.0 normally)
+    investigate_step_duration: float = 0.35  # max ContinuousMove duration per step before auto-stop
+    investigate_settle_delay: float = 0.25   # pause after stop to let cam2 detect before next step
+    # Zoom out while investigating so the candidate is more likely to fall in
+    # cam2's frame after a coarse slew. Cam2 will zoom back in once tracking
+    # confirms (normal _do_tracking handles zoom-in).
+    investigate_zoom_out: bool = True
+    investigate_zoom_velocity: float = -0.5  # negative = zoom out
     
     # Preset-based patrol
     patrol_presets: list = field(default_factory=list)  # List of preset tokens
@@ -248,6 +260,9 @@ class PTZTracker:
     _investigate_started_at: float = field(default=0.0, init=False)
     _investigate_target: Optional[Tuple[float, float]] = field(default=None, init=False)  # normalized cam1 center being investigated
     _investigate_rejects: list = field(default_factory=list, init=False)  # list of (norm_x, norm_y, expires_at)
+    _investigate_step_started_at: float = field(default=0.0, init=False)  # when current capped slew began
+    _investigate_step_stopped_at: float = field(default=0.0, init=False)  # when last step was halted (for settle delay)
+    _investigate_step_active: bool = field(default=False, init=False)     # is a capped slew in flight?
 
     # Cached patrol velocity so we don't re-issue identical ContinuousMove
     # commands every tick (which both hammers the camera and refreshes
@@ -1311,21 +1326,62 @@ class PTZTracker:
         """Either continue an in-flight investigation or start a new one
         targeting the largest non-cooldown candidate. Returns True if PTZ
         was driven this tick."""
-        # If we're already investigating, just keep waiting (cam2 didn't
-        # confirm yet but timeout hasn't elapsed). Hold position.
+        # If we're already investigating, run the stepped-slew state machine:
+        # capped pulse -> stop -> settle (let cam2 detect) -> next pulse if
+        # cam1 still sees the candidate. This avoids the original behaviour
+        # of slewing once at full velocity and overshooting a small target.
         if self._mode == PTZMode.INVESTIGATE:
             elapsed = now - self._investigate_started_at
-            if elapsed < self.investigate_timeout:
-                # Hold cam2 still while waiting for confirmation.
-                if not self._holding_position:
+            if elapsed >= self.investigate_timeout:
+                # Caller will mark reject + return to patrol.
+                return False
+
+            # If a capped slew is in flight and its step duration has elapsed,
+            # halt it so cam2 has a still frame to detect on.
+            if self._investigate_step_active:
+                step_elapsed = now - self._investigate_step_started_at
+                if step_elapsed >= self.investigate_step_duration:
                     try:
                         self.onvif_client.ptz_stop(self.profile_token)
-                        self._holding_position = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        PTZ_LOGGER.warning("[INVESTIGATE_STOP_FAIL] %s", e)
+                    self._investigate_step_active = False
+                    self._investigate_step_stopped_at = now
+                    self._holding_position = True
+                    PTZ_LOGGER.debug(
+                        "[INVESTIGATE_STEP_END] stopped after %.2fs", step_elapsed
+                    )
                 return True
-            # Otherwise fall through; caller will mark reject + return to patrol.
-            return False
+
+            # Step is not active. Wait for settle delay, then issue next
+            # capped pulse if cam1 still has a candidate near our target.
+            since_stop = now - self._investigate_step_stopped_at
+            if since_stop < self.investigate_settle_delay:
+                return True  # holding, letting cam2 detect
+
+            # Try to refine: re-evaluate candidates and slew toward the one
+            # closest to our original investigation target. If none survive
+            # the cooldown filter, just hold and wait for confirmation/timeout.
+            tgt = self._investigate_target
+            if tgt is not None and candidates:
+                fw = max(frame_width, 1)
+                fh = max(frame_height, 1)
+                best = None
+                best_dist = 1e9
+                for d in candidates:
+                    cx = (d.bbox[0] + d.bbox[2]) / 2.0 / fw
+                    cy = (d.bbox[1] + d.bbox[3]) / 2.0 / fh
+                    dist = ((cx - tgt[0]) ** 2 + (cy - tgt[1]) ** 2) ** 0.5
+                    if dist < best_dist:
+                        best_dist = dist
+                        best = d
+                # Only re-slew if candidate is reasonably close to original
+                # target (avoid chasing unrelated noise that pops up elsewhere).
+                if best is not None and best_dist <= self.investigate_cooldown_radius:
+                    self._do_investigate_slew(
+                        best, frame_width, frame_height, source_camera_id, now,
+                    )
+            return True
 
         # Pick the largest candidate not in cooldown.
         best = None
@@ -1371,18 +1427,92 @@ class PTZTracker:
         self._mode = PTZMode.INVESTIGATE
         self._investigate_started_at = now
         self._investigate_target = (best_cx, best_cy)
+        self._investigate_step_stopped_at = 0.0
+        self._investigate_step_active = False
         self._holding_position = False
-        # Reuse the source-camera tracking path (single-camera pixel->PTZ
-        # mapping). Note this only repositions; it doesn't lock onto a
-        # ByteTrack id (candidate was below the normal detection threshold).
-        self._do_tracking(
-            [best], frame_width, frame_height, source_camera=source_camera_id,
+        # Use a capped, stepped slew (with optional zoom-out) instead of the
+        # normal full-velocity tracking move so we don't overshoot a small
+        # candidate when cam2 is already zoomed in.
+        self._do_investigate_slew(
+            best, frame_width, frame_height, source_camera_id, now,
         )
         if prev_mode != PTZMode.INVESTIGATE:
             PTZ_LOGGER.info(
                 "[MODE_CHANGE] %s -> INVESTIGATE", prev_mode.value
             )
         return True
+
+    def _do_investigate_slew(
+        self,
+        det: 'Detection',
+        frame_width: int,
+        frame_height: int,
+        source_camera_id: str,
+        now: float,
+    ) -> None:
+        """Issue a single capped pulse toward `det`, optionally zooming out.
+
+        Uses the same pixel->offset math as `_do_tracking` but caps the
+        pan/tilt velocity at `investigate_velocity_cap` so the camera takes
+        a short, controlled step and can stop in time for cam2's detector
+        to see the candidate. The step is auto-halted by `_maybe_investigate`
+        once `investigate_step_duration` elapses.
+        """
+        fw = max(frame_width, 1)
+        fh = max(frame_height, 1)
+        bbox = det.bbox
+        norm_cx = ((bbox[0] + bbox[2]) / 2.0) / fw
+        norm_cy = ((bbox[1] + bbox[3]) / 2.0) / fh
+
+        ref_x = self.calibration.pan_center_x
+        ref_y = self.calibration.tilt_center_y
+        raw_off_x = norm_cx - ref_x
+        raw_off_y = ref_y - norm_cy  # Y inverted
+
+        pan_scale = max(0.1, self.calibration.pan_scale)
+        tilt_scale = max(0.1, self.calibration.tilt_scale)
+        off_x = max(-1.0, min(1.0, raw_off_x / pan_scale))
+        off_y = max(-1.0, min(1.0, raw_off_y / tilt_scale))
+
+        # Velocity proportional to offset, but capped so we move in small
+        # increments. Sign preserved.
+        cap = max(0.05, min(1.0, self.investigate_velocity_cap))
+        def _capped(off: float) -> float:
+            v = abs(off) * 1.5  # mild proportional response
+            v = min(cap, v)
+            return v if off >= 0 else -v
+
+        pan_v = _capped(off_x)
+        tilt_v = _capped(off_y)
+        zoom_v = self.investigate_zoom_velocity if self.investigate_zoom_out else 0.0
+
+        try:
+            self.onvif_client.ptz_move(
+                self.profile_token, pan_v, tilt_v, zoom_v,
+            )
+            self._investigate_step_started_at = now
+            self._investigate_step_active = True
+            self._last_move_time = now
+            self._holding_position = False
+            PTZ_LOGGER.info(
+                "[INVESTIGATE_STEP] cam=%s vel=(pan=%.2f, tilt=%.2f, zoom=%.2f) "
+                "offset=(%.2f, %.2f) cap=%.2f dur=%.2fs",
+                source_camera_id, pan_v, tilt_v, zoom_v, off_x, off_y,
+                cap, self.investigate_step_duration,
+            )
+            self._log_decision('investigate_step', {
+                'velocity': {
+                    'pan': round(pan_v, 3),
+                    'tilt': round(tilt_v, 3),
+                    'zoom': round(zoom_v, 3),
+                },
+                'offset': {'x': round(off_x, 3), 'y': round(off_y, 3)},
+                'cap': cap,
+                'step_duration': self.investigate_step_duration,
+            })
+        except Exception as e:
+            PTZ_LOGGER.error("[INVESTIGATE_MOVE_FAIL] %s", e)
+            self._investigate_step_active = False
 
     def _maybe_finish_investigate(self, now: float, confirmed: bool) -> None:
         """Close out an in-flight investigation. If not confirmed, record
@@ -1415,6 +1545,9 @@ class PTZTracker:
             })
         self._investigate_target = None
         self._investigate_started_at = 0.0
+        self._investigate_step_active = False
+        self._investigate_step_started_at = 0.0
+        self._investigate_step_stopped_at = 0.0
 
     def _handle_no_detections(self, now: float) -> bool:
         """Handle case when no detections from any camera."""
@@ -2076,6 +2209,11 @@ def create_ptz_tracker(
         investigate_timeout=config.get('investigate_timeout', 4.0),
         investigate_cooldown=config.get('investigate_cooldown', 30.0),
         investigate_cooldown_radius=config.get('investigate_cooldown_radius', 0.10),
+        investigate_velocity_cap=config.get('investigate_velocity_cap', 0.25),
+        investigate_step_duration=config.get('investigate_step_duration', 0.35),
+        investigate_settle_delay=config.get('investigate_settle_delay', 0.25),
+        investigate_zoom_out=config.get('investigate_zoom_out', True),
+        investigate_zoom_velocity=config.get('investigate_zoom_velocity', -0.5),
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
         secondary_cameras=config.get('secondary_cameras', []),

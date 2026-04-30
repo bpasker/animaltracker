@@ -252,6 +252,8 @@ class StreamWorker:
         self.pending_detection_gap: int = 0  # Frames without detection during pending period
         self._snapshot_taken = False
         self.latest_frame: Optional[np.ndarray] = None
+        self.latest_frame_ts: float = 0.0  # Wall-clock time the latest frame was received
+        self.stream_connected: bool = False  # True when an RTSP capture is currently open
         self.latest_detections: List[Detection] = []  # Current detections for live view overlay
         self.latest_detection_ts: float = 0.0  # Timestamp of latest detections
         self.latest_frame_size: tuple = (0, 0)  # (width, height) of latest frame
@@ -426,14 +428,17 @@ class StreamWorker:
                     cap = await loop.run_in_executor(None, _open_capture, rtsp_uri, False)
                     if not cap.isOpened():
                         LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                        self.stream_connected = False
                         await asyncio.sleep(5)
                         continue
                 else:
                     LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                    self.stream_connected = False
                     await asyncio.sleep(5)
                     continue
 
             LOGGER.info("Connected to stream for %s", self.camera.id)
+            self.stream_connected = True
             try:
                 while not stop_event.is_set():
                     # Offload blocking OpenCV read to thread to keep web server responsive
@@ -441,9 +446,11 @@ class StreamWorker:
                     
                     if not ret:
                         LOGGER.warning("Stream lost for %s; reconnecting...", self.camera.id)
+                        self.stream_connected = False
                         break
                     
                     self.latest_frame = frame
+                    self.latest_frame_ts = time.time()
                     
                     if not self._snapshot_taken:
                         # Offload snapshot saving to thread
@@ -500,6 +507,7 @@ class StreamWorker:
                     inference_task.cancel()
                 # Offload release to thread
                 await loop.run_in_executor(None, cap.release)
+                self.stream_connected = False
             
             if not stop_event.is_set():
                 await asyncio.sleep(1)  # Brief pause before reconnect

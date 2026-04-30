@@ -23,6 +23,68 @@ from .tracker import ObjectTracker, create_tracker
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _verified_write(path: "Path", write_fn, *, min_bytes: int = 1, label: str = "file") -> bool:
+    """Run ``write_fn()`` then verify ``path`` exists with at least ``min_bytes``.
+
+    If verification fails, retry once after a short pause. This works around
+    occasional silent loss of small writes on some NFS shares (where the
+    write call returns success but the file is not durable yet because of
+    attribute-cache / negative-dentry races shortly after a rename).
+
+    ``write_fn`` may return ``False`` to signal it failed (e.g. ``cv2.imwrite``);
+    any other return value is treated as success.
+
+    Returns ``True`` if the file is present and non-empty after the attempt(s).
+    """
+    import time
+
+    for attempt in (1, 2):
+        wrote_ok = True
+        try:
+            result = write_fn()
+            if result is False:
+                wrote_ok = False
+                LOGGER.warning(
+                    "%s write returned False (attempt %d): %s", label, attempt, path
+                )
+        except Exception as e:
+            wrote_ok = False
+            LOGGER.warning(
+                "%s write raised on attempt %d for %s: %s", label, attempt, path, e
+            )
+
+        if wrote_ok:
+            try:
+                size = path.stat().st_size
+                if size >= min_bytes:
+                    if attempt > 1:
+                        LOGGER.info(
+                            "%s verified after retry: %s (%d bytes)",
+                            label, path, size,
+                        )
+                    return True
+                LOGGER.warning(
+                    "%s wrote %d bytes (< %d) on attempt %d: %s",
+                    label, size, min_bytes, attempt, path,
+                )
+            except FileNotFoundError:
+                LOGGER.warning(
+                    "%s missing after write (attempt %d): %s", label, attempt, path
+                )
+            except Exception as e:
+                LOGGER.warning(
+                    "%s stat failed (attempt %d) for %s: %s",
+                    label, attempt, path, e,
+                )
+
+        if attempt == 1:
+            time.sleep(0.1)  # brief settle before retry (NFS attr cache)
+
+    LOGGER.error("%s FAILED to persist after retry: %s", label, path)
+    return False
+
+
 # Default configuration values
 DEFAULT_SAMPLE_RATE = 3  # Analyze every Nth frame (lower = more accurate tracking)
 DEFAULT_CONFIDENCE_THRESHOLD = 0.3  # Minimum confidence for specific species
@@ -398,10 +460,17 @@ class ClipPostProcessor:
                 "log_entries": [asdict(entry) for entry in processing_log],
             }
             
-            with open(log_path, 'w') as f:
-                json.dump(log_data, f, indent=2, default=str)
-            
-            LOGGER.info("Saved processing log: %s", log_path)
+            def _do_write():
+                with open(log_path, 'w') as f:
+                    json.dump(log_data, f, indent=2, default=str)
+                return True
+
+            if _verified_write(log_path, _do_write, min_bytes=2, label="processing log"):
+                try:
+                    size = log_path.stat().st_size
+                except Exception:
+                    size = -1
+                LOGGER.info("Saved processing log: %s (%d bytes)", log_path, size)
         except Exception as e:
             LOGGER.warning("Failed to save processing log: %s", e)
 
@@ -1176,17 +1245,22 @@ class ClipPostProcessor:
                             idx + 1 if len(result.key_frames) > 1 else None
                         )
                     
-                    # Save thumbnail
-                    if cv2.imwrite(str(thumb_path), output_frame):
+                    # Save thumbnail with verify+retry (NFS-safe)
+                    if _verified_write(
+                        thumb_path,
+                        lambda: cv2.imwrite(str(thumb_path), output_frame),
+                        min_bytes=512,
+                        label="thumbnail",
+                    ):
                         saved.append(thumb_path)
-                        LOGGER.debug("Saved thumbnail: %s", thumb_path)
+                        LOGGER.info("Saved thumbnail: %s", thumb_path)
                     else:
                         LOGGER.error("Failed to save thumbnail: %s", thumb_path)
                     
                 except Exception as e:
                     LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e)
         
-        LOGGER.debug("Saved %d thumbnails for %s", len(saved), clip_path.name)
+        LOGGER.info("Saved %d thumbnails for %s", len(saved), clip_path.name)
         return saved
     
     def _save_track_thumbnails(
@@ -1273,17 +1347,28 @@ class ClipPostProcessor:
                     LOGGER.error("Failed to process frame for track %d (%s)", track_id, best_species)
                     continue
                 
-                # Save thumbnail
-                if cv2.imwrite(str(thumb_path), output_frame):
+                # Save thumbnail with verify+retry (some NFS shares silently
+                # drop tiny writes that occur right after a rename in the same
+                # directory; verify the file landed and retry once if not).
+                if _verified_write(
+                    thumb_path,
+                    lambda: cv2.imwrite(str(thumb_path), output_frame),
+                    min_bytes=512,
+                    label="track thumbnail",
+                ):
                     saved.append(thumb_path)
-                    LOGGER.debug("Saved track thumbnail: %s (track %d, frames %d-%d)",
-                                thumb_path, track_id, 
-                                track_info.first_seen_frame, track_info.last_seen_frame)
+                    LOGGER.info(
+                        "Saved track thumbnail: %s (track %d, frames %d-%d)",
+                        thumb_path, track_id,
+                        track_info.first_seen_frame, track_info.last_seen_frame,
+                    )
                 else:
-                    LOGGER.error("Failed to save track thumbnail: %s (cv2.imwrite returned False, output shape: %s, dtype: %s)", 
-                                thumb_path, 
-                                output_frame.shape if output_frame is not None else 'None',
-                                output_frame.dtype if output_frame is not None else 'None')
+                    LOGGER.error(
+                        "Failed to save track thumbnail: %s (output shape: %s, dtype: %s)",
+                        thumb_path,
+                        output_frame.shape if output_frame is not None else 'None',
+                        output_frame.dtype if output_frame is not None else 'None',
+                    )
                     
             except Exception as e:
                 LOGGER.error("Failed to save track thumbnail %s: %s (frame shape: %s, bbox: %s)", 
@@ -1291,7 +1376,7 @@ class ClipPostProcessor:
                             frame.shape if frame is not None else 'None',
                             bbox)
         
-        LOGGER.debug("Saved %d track thumbnails for %s", len(saved), clip_path.name)
+        LOGGER.info("Saved %d track thumbnails for %s", len(saved), clip_path.name)
         return saved
 
     def _extract_sample_frames(
@@ -1368,10 +1453,15 @@ class ClipPostProcessor:
                         font, font_scale, (255, 255, 255), thickness
                     )
                     
-                    # Save thumbnail
-                    if cv2.imwrite(str(thumb_path), annotated):
+                    # Save thumbnail with verify+retry (NFS-safe)
+                    if _verified_write(
+                        thumb_path,
+                        lambda: cv2.imwrite(str(thumb_path), annotated),
+                        min_bytes=512,
+                        label="sample thumbnail",
+                    ):
                         saved.append(thumb_path)
-                        LOGGER.debug("Saved sample frame thumbnail: %s", thumb_path)
+                        LOGGER.info("Saved sample frame thumbnail: %s", thumb_path)
                     else:
                         LOGGER.error("Failed to save sample thumbnail: %s", thumb_path)
                     
@@ -1381,7 +1471,7 @@ class ClipPostProcessor:
         finally:
             cap.release()
         
-        LOGGER.debug("Extracted %d sample frames for %s", len(saved), clip_path.name)
+        LOGGER.info("Extracted %d sample frames for %s", len(saved), clip_path.name)
         return saved
     
     def _crop_to_detection(

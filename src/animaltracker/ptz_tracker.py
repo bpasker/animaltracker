@@ -183,6 +183,15 @@ class PTZTracker:
     # before it physically moved. Holding the move for at least this long
     # lets the slew actually happen.
     move_min_duration: float = 0.6
+
+    # When the target camera (cam2) has been driving tracking, suppress
+    # cam1-driven repositioning for this many seconds after the last cam2
+    # detection. Cam2's view is more accurate for fine tracking, and the
+    # cam1->cam2 PTZ mapping is only valid when cam2 is near its calibration
+    # zero pose -- once cam2 has slewed, cam1 pixel offsets miscompute and
+    # produce large erroneous slews. Only fall back to cam1 if cam2 has
+    # truly lost the object for longer than this window.
+    cam1_fallback_delay: float = 3.0
     
     # Preset-based patrol
     patrol_presets: list = field(default_factory=list)  # List of preset tokens
@@ -922,7 +931,51 @@ class PTZTracker:
             )
 
         elif source_detections and self._track_active:
-            # Only source camera sees the object - need to reposition PTZ
+            # Only source camera (cam1) sees the object - need to reposition PTZ.
+            #
+            # IMPORTANT: if the target camera (cam2) was driving tracking
+            # very recently, suppress cam1-driven repositioning for a short
+            # window. Cam2's view is always more accurate for fine tracking
+            # once it has the object framed; falling back to cam1's wide-
+            # frame pixel offset immediately on a single dropped cam2 frame
+            # produces large, miscalibrated slews that throw the bird out
+            # of cam2's FOV (the cam1->cam2 mapping assumes cam2 is at PTZ
+            # 0,0 and stops being valid once cam2 has moved).
+            if (
+                self._last_detection_source == target_camera_id
+                and self._last_detection_time > 0.0
+                and (now - self._last_detection_time) < self.cam1_fallback_delay
+            ):
+                PTZ_LOGGER.info(
+                    "[CAM1_SUPPRESSED] %s drove tracking %.2fs ago (<%.1fs); "
+                    "ignoring %d cam1 detections, holding cam2 position",
+                    target_camera_id,
+                    now - self._last_detection_time,
+                    self.cam1_fallback_delay,
+                    len(source_detections),
+                )
+                self._log_decision('cam1_suppressed', {
+                    'source_camera': source_camera_id,
+                    'target_camera': target_camera_id,
+                    'time_since_target': round(now - self._last_detection_time, 2),
+                    'fallback_delay': self.cam1_fallback_delay,
+                    'detection_count': len(source_detections),
+                })
+                # Hold position rather than slewing on stale cam1 data.
+                # Respect move_min_duration so we don't kill an in-flight
+                # cam2-driven ContinuousMove.
+                time_since_move = now - self._last_move_time
+                if (
+                    not self._holding_position
+                    and time_since_move >= self.move_min_duration
+                ):
+                    try:
+                        self.onvif_client.ptz_stop(self.profile_token)
+                    except Exception:
+                        pass
+                    self._holding_position = True
+                return False
+
             frame_width, frame_height = source_data[1], source_data[2]
 
             PTZ_LOGGER.info(
@@ -1782,6 +1835,7 @@ def create_ptz_tracker(
         patrol_speed=config.get('patrol_speed', 0.15),
         patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
         move_min_duration=config.get('move_min_duration', 0.6),
+        cam1_fallback_delay=config.get('cam1_fallback_delay', 3.0),
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
         secondary_cameras=config.get('secondary_cameras', []),

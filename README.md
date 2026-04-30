@@ -655,7 +655,7 @@ chmod 600 ~/.kaggle/kaggle.json
 ### "numpy.core.multiarray failed to import"
 ```bash
 pip uninstall -y opencv-python opencv-python-headless numpy
-pip install "numpy<2" "opencv-python-headless<4.10"
+pip install "numpy<2" "opencv-python-headless<4.11"
 ```
 
 ### Camera connection fails / No video

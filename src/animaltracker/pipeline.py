@@ -1139,13 +1139,28 @@ class StreamWorker:
                             # If delete_if_no_animal is enabled, clean up and skip notification
                             # Note: raw_detections counts blank frames too, so check species_results instead
                             delete_if_no_animal = getattr(clip_cfg, 'delete_if_no_animal', True)
-                            no_animal_found = (not result.species_results or len(result.species_results) == 0) and result.tracks_detected == 0
+                            min_detection_frames = max(1, int(getattr(clip_cfg, 'min_detection_frames', 2) or 1))
+                            # Count distinct sampled frames where a detection survived filtering.
+                            # "tracked" = detection assigned to a ByteTrack track (tracking path)
+                            # "accepted" = detection passed filters (non-tracking fallback path)
+                            detection_frame_idxs = {
+                                e.frame_idx for e in (result.processing_log or [])
+                                if e.event in ("tracked", "accepted") and e.frame_idx >= 0
+                            }
+                            detection_frame_count = len(detection_frame_idxs)
+                            no_species = (not result.species_results or len(result.species_results) == 0) and result.tracks_detected == 0
+                            too_few_detections = (
+                                detection_frame_count < min_detection_frames
+                                and result.frames_analyzed >= min_detection_frames
+                            )
+                            no_animal_found = no_species or too_few_detections
                             if delete_if_no_animal and no_animal_found:
                                 LOGGER.info(
-                                    "FALSE POSITIVE CLEANUP: Post-processing found NO animal in clip for %s "
-                                    "(species_results=%d, tracks=%d, raw_detections=%d) - deleting clip and skipping notification",
+                                    "FALSE POSITIVE CLEANUP: Post-processing found no real animal in clip for %s "
+                                    "(species_results=%d, tracks=%d, detection_frames=%d/%d, min_required=%d, raw_detections=%d) - deleting clip and skipping notification",
                                     camera_id, len(result.species_results) if result.species_results else 0,
-                                    result.tracks_detected, result.raw_detections
+                                    result.tracks_detected, detection_frame_count, result.frames_analyzed,
+                                    min_detection_frames, result.raw_detections
                                 )
                                 # Delete the clip file and any associated files
                                 try:

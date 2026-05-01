@@ -1095,6 +1095,26 @@ class StreamWorker:
                 if species_key_frames and not use_unified_processor:
                     self.storage.save_detection_thumbnails(clip_path, species_key_frames)
 
+                # MEMORY LEAK FIX: release the in-memory frame list (and key
+                # frame buffer) as soon as everything that needs raw frames
+                # has run. Subsequent steps (unified post-processor,
+                # notification, log writing) all operate on the *saved* clip
+                # file, not the in-memory frames. With max_event_seconds=300
+                # at 15 fps these lists can hold ~4500 numpy frames
+                # (~25 GB at 1080p), which previously stayed alive through
+                # the entire SpeciesNet analysis under the post-process
+                # semaphore -- pinning tens of GB of RSS for the duration of
+                # post-processing and stacking up across concurrent jobs.
+                frames_count_for_log = len(frames)
+                frames = None
+                species_key_frames = None
+                import gc as _gc
+                _gc.collect()
+                LOGGER.debug(
+                    "Released in-memory frames after clip write for %s (%d frames freed)",
+                    camera_id, frames_count_for_log,
+                )
+
                 # Step 5: Run UNIFIED post-processor if enabled (NEW approach - analyze saved file)
                 # Uses SpeciesNet for accurate species identification (split-model architecture)
                 if use_unified_processor:

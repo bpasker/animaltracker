@@ -1204,23 +1204,59 @@ class StreamWorker:
                                     result.tracks_detected, detection_frame_count, result.frames_analyzed,
                                     min_detection_frames, result.raw_detections
                                 )
-                                # Delete the clip file and any associated files
+                                # Delete the clip file and any associated files.
+                                # Use unlink(missing_ok=True) and log success/failure
+                                # at INFO level -- previously we used `if exists():`
+                                # which is racy on NFS (stale attribute cache can
+                                # return False) and silently skipped the delete,
+                                # leaving orphan .mp4 files on disk.
+                                cleaned = []
+                                failures = []
                                 try:
-                                    if clip_path.exists():
-                                        clip_path.unlink()
-                                        LOGGER.debug("Deleted false positive clip: %s", clip_path)
-                                    # Delete associated thumbnails
-                                    thumb_pattern = clip_path.stem + "_thumb*.jpg"
-                                    for thumb_file in clip_path.parent.glob(thumb_pattern):
-                                        thumb_file.unlink()
-                                        LOGGER.debug("Deleted thumbnail: %s", thumb_file)
-                                    # Delete processing log
-                                    log_file = clip_path.with_suffix('.log.json')
-                                    if log_file.exists():
-                                        log_file.unlink()
-                                        LOGGER.debug("Deleted log file: %s", log_file)
+                                    clip_path.unlink(missing_ok=True)
+                                    cleaned.append(clip_path.name)
                                 except Exception as e:
-                                    LOGGER.warning("Failed to clean up false positive clip files: %s", e)
+                                    failures.append((clip_path.name, str(e)))
+                                # Delete associated thumbnails
+                                thumb_pattern = clip_path.stem + "_thumb*.jpg"
+                                for thumb_file in clip_path.parent.glob(thumb_pattern):
+                                    try:
+                                        thumb_file.unlink(missing_ok=True)
+                                        cleaned.append(thumb_file.name)
+                                    except Exception as e:
+                                        failures.append((thumb_file.name, str(e)))
+                                # Delete processing log
+                                log_file = clip_path.with_suffix('.log.json')
+                                try:
+                                    log_file.unlink(missing_ok=True)
+                                    cleaned.append(log_file.name)
+                                except Exception as e:
+                                    failures.append((log_file.name, str(e)))
+                                # Verify the clip really is gone (NFS attribute
+                                # cache can lie about delete success). Retry once
+                                # if it still resolves.
+                                try:
+                                    import os as _os
+                                    if _os.path.lexists(str(clip_path)):
+                                        time.sleep(0.2)
+                                        try:
+                                            clip_path.unlink(missing_ok=True)
+                                        except Exception as e:
+                                            failures.append((clip_path.name, f"retry: {e}"))
+                                        if _os.path.lexists(str(clip_path)):
+                                            failures.append((clip_path.name, "still present after retry"))
+                                except Exception:
+                                    pass
+                                if failures:
+                                    LOGGER.warning(
+                                        "False-positive cleanup left %d file(s) for %s: %s",
+                                        len(failures), camera_id, failures,
+                                    )
+                                else:
+                                    LOGGER.info(
+                                        "False-positive cleanup removed %d file(s) for %s",
+                                        len(cleaned), camera_id,
+                                    )
                                 return  # Skip notification - no animal detected
                     except Exception as e:
                         LOGGER.error("Unified post-processing failed: %s", e)

@@ -5158,7 +5158,7 @@ class WebServer:
         last_ts = float(getattr(worker, 'latest_frame_ts', 0.0) or 0.0)
         stream_connected = bool(getattr(worker, 'stream_connected', False))
         age = now - last_ts if last_ts > 0 else float('inf')
-        STALE_AFTER_SEC = 10.0
+        STALE_AFTER_SEC = 5.0
         is_stale = (not stream_connected) or age > STALE_AFTER_SEC
 
         # If we have no frame at all, return a generated "STREAM DOWN" placeholder

@@ -47,12 +47,26 @@ def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp", hwaccel: bool = Fals
         # Format: "key1;value1|key2;value2"
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
             f"rtsp_transport;{transport}|"
+            f"stimeout;5000000|"            # 5s socket timeout (was 30s default)
+            f"timeout;5000000|"             # 5s read timeout
+            f"reconnect;1|"                 # auto-reconnect on EOF/error
+            f"reconnect_streamed;1|"        # reconnect for streamed media
+            f"reconnect_delay_max;2|"       # max 2s between reconnect attempts
+            f"buffer_size;1048576|"         # 1MB UDP socket buffer
             f"hwaccel;cuda|"
             f"hwaccel_output_format;cuda"
         )
     else:
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}"
-    
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            f"rtsp_transport;{transport}|"
+            f"stimeout;5000000|"
+            f"timeout;5000000|"
+            f"reconnect;1|"
+            f"reconnect_streamed;1|"
+            f"reconnect_delay_max;2|"
+            f"buffer_size;1048576"
+        )
+
     return rtsp_uri
 
 

@@ -168,6 +168,16 @@ class PTZTracker:
     # Optimized defaults for real-time tracking with YOLO
     smoothing: float = 0.15  # Lower = faster response (was 0.3)
     update_interval: float = 0.1  # 10 updates/sec for responsive tracking (was 0.2)
+
+    # Velocity capping for slow / small / distant targets.
+    # When the bbox fills less than ``low_fill_threshold`` of the frame, the
+    # commanded |pan|/|tilt| velocity is clamped to ``low_fill_velocity_cap``.
+    # ContinuousMove keeps slewing at the commanded velocity until the next
+    # decision; for slow-moving animals (deer, etc.) the previous full-speed
+    # corrections caused overshoot followed by a swing back. Capping prevents
+    # the camera from outpacing the target between detections.
+    low_fill_threshold: float = 0.15        # bbox max-dim / frame-dim fraction
+    low_fill_velocity_cap: float = 0.35     # cap on |pan|/|tilt| when below threshold
     
     # Patrol settings
     patrol_enabled: bool = True  # Enable patrol when no detections
@@ -364,6 +374,50 @@ class PTZTracker:
         while the camera is still moving/stabilizing after a PTZ command.
         """
         return self._last_move_time
+
+    @staticmethod
+    def _velocity_curve(offset: float) -> float:
+        """Map a normalized offset in [-1, 1] to a ContinuousMove velocity.
+
+        Softer low-end response than the previous curve to avoid overshooting
+        slow-moving targets. The previous curve jumped to 0.30 at |offset|=0.10
+        which, combined with continuous-velocity actuation between detection
+        ticks, caused the camera to outpace slow-moving deer.
+
+        Profile (|offset| -> |velocity|):
+            0.00 -> 0.00
+            0.10 -> 0.15   (was 0.30)
+            0.25 -> 0.51   (was 0.75)
+            1.00 -> 1.00
+        """
+        abs_offset = abs(offset)
+        if abs_offset < 0.10:
+            speed = abs_offset * 1.5            # 0.00 -> 0.15
+        elif abs_offset < 0.25:
+            speed = 0.15 + (abs_offset - 0.10) * 2.4   # 0.15 -> 0.51
+        else:
+            speed = 0.51 + (abs_offset - 0.25) * 0.6533  # 0.51 -> 1.00
+        speed = max(-1.0, min(1.0, speed if offset >= 0 else -speed))
+        return speed
+
+    def _apply_low_fill_cap(
+        self, pan_velocity: float, tilt_velocity: float, current_fill: float
+    ) -> Tuple[float, float, bool]:
+        """Cap |pan|/|tilt| velocity when the target is small in frame.
+
+        Returns the (possibly clamped) velocities and whether a cap was applied.
+        """
+        if current_fill <= 0 or current_fill >= self.low_fill_threshold:
+            return pan_velocity, tilt_velocity, False
+        cap = max(0.0, min(1.0, self.low_fill_velocity_cap))
+        capped = False
+        if abs(pan_velocity) > cap:
+            pan_velocity = cap if pan_velocity > 0 else -cap
+            capped = True
+        if abs(tilt_velocity) > cap:
+            tilt_velocity = cap if tilt_velocity > 0 else -cap
+            capped = True
+        return pan_velocity, tilt_velocity, capped
 
     def is_settling(self, settle_time: float = 0.5) -> bool:
         """Check if the PTZ camera is still settling after a move.
@@ -1223,24 +1277,22 @@ class PTZTracker:
                     # Leave _holding_position False so next frame retries.
             return False
 
-        # Non-linear velocity curve for smooth tracking
-        def velocity_curve(offset: float) -> float:
-            abs_offset = abs(offset)
-            if abs_offset < 0.1:
-                speed = abs_offset * 3.0
-            elif abs_offset < 0.25:
-                speed = 0.3 + (abs_offset - 0.1) * 3.0
-            else:
-                speed = 0.75 + (abs_offset - 0.25) * 1.0
-            return max(-1.0, min(1.0, speed if offset >= 0 else -speed))
-
-        pan_velocity = velocity_curve(offset_x)
-        tilt_velocity = velocity_curve(offset_y)
+        # Shared velocity curve (softened low-end to avoid overshoot on
+        # slow-moving / distant targets).
+        pan_velocity = self._velocity_curve(offset_x)
+        tilt_velocity = self._velocity_curve(offset_y)
 
         # Calculate zoom velocity based on current vs target fill
         bbox_width = bbox[2] - bbox[0]
         bbox_height = bbox[3] - bbox[1]
         current_fill = max(bbox_width / frame_width, bbox_height / frame_height)
+
+        # Cap pan/tilt velocity when target is small in frame to prevent
+        # the camera from outpacing slow-moving distant animals between
+        # detection ticks.
+        pan_velocity, tilt_velocity, _capped = self._apply_low_fill_cap(
+            pan_velocity, tilt_velocity, current_fill
+        )
 
         if current_fill > 0:
             fill_error = self.target_fill_pct - current_fill
@@ -2012,37 +2064,21 @@ class PTZTracker:
             "[WILL_MOVE] Target NOT centered - offset=%.3f >= threshold=%.3f, will send MOVE command",
             offset_magnitude, self.min_move_threshold
         )
-        
-        # Non-linear velocity curve:
-        # - Small offset (< 0.1): slow tracking to maintain center
-        # - Medium offset (0.1-0.25): moderate speed
-        # - Large offset (> 0.25): fast catch-up mode
-        
-        def velocity_curve(offset: float) -> float:
-            """Convert offset to velocity with non-linear response."""
-            abs_offset = abs(offset)
-            
-            if abs_offset < 0.1:
-                # Fine tracking: slow and smooth
-                speed = abs_offset * 3.0  # Max 0.3 at 0.1 offset
-            elif abs_offset < 0.25:
-                # Normal tracking: moderate speed
-                speed = 0.3 + (abs_offset - 0.1) * 3.0  # 0.3 to 0.75
-            else:
-                # Catch-up mode: fast movement
-                speed = 0.75 + (abs_offset - 0.25) * 1.0  # 0.75 to 1.0
-            
-            # Apply sign and clamp
-            return max(-1.0, min(1.0, speed if offset >= 0 else -speed))
-        
-        pan_velocity = velocity_curve(offset_x)
-        tilt_velocity = velocity_curve(offset_y)
-        
+
+        pan_velocity = self._velocity_curve(offset_x)
+        tilt_velocity = self._velocity_curve(offset_y)
+
         # Calculate zoom velocity based on current vs target fill
         bbox_width = bbox[2] - bbox[0]
         bbox_height = bbox[3] - bbox[1]
         current_fill = max(bbox_width / frame_width, bbox_height / frame_height)
-        
+
+        # Cap pan/tilt velocity when target is small in frame to prevent
+        # overshooting slow-moving distant animals between detection ticks.
+        pan_velocity, tilt_velocity, _capped = self._apply_low_fill_cap(
+            pan_velocity, tilt_velocity, current_fill
+        )
+
         if current_fill > 0:
             fill_error = self.target_fill_pct - current_fill
             # Slower zoom adjustments - zoom changes are more jarring

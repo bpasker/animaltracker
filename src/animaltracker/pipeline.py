@@ -17,7 +17,7 @@ from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector, cleanup_gpu_memory
 from .notification import NotificationContext, PushoverNotifier
-from .storage import StorageManager
+from .storage import StorageManager, StreamingClipWriter
 from .onvif_client import OnvifClient
 from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
@@ -122,7 +122,14 @@ class EventState:
     species: set[str]
     max_confidence: float
     last_detection_ts: float
+    # Frames are streamed straight to disk via ``clip_writer`` rather than
+    # being accumulated in memory; this list is kept only because a few
+    # legacy/diagnostic call sites still reference ``.frames`` and expect a
+    # list. It must remain empty during normal operation.
     frames: List[tuple[float, np.ndarray]] = field(default_factory=list)
+    # Streaming MJPG writer; opened in the stream loop on first event frame
+    # and closed in ``_maybe_close_event`` before transcoding to MP4.
+    clip_writer: Optional["StreamingClipWriter"] = field(default=None)
     # Track top N detection frames for each species (for thumbnails)
     # species -> list of (frame, confidence, bbox) tuples, sorted by confidence desc
     species_key_frames: dict = field(default_factory=dict)
@@ -474,12 +481,33 @@ class StreamWorker:
                     frame_ts = time.time()
                     self.clip_buffer.push(frame_ts, frame)
                     
-                    # Capture every frame for active events (even if inference is skipped).
-                    # Copy because OpenCV may reuse the underlying buffer for the next read,
-                    # and downstream consumers (clip writer, key-frame storage) read these
-                    # frames asynchronously.
+                    # Stream every captured frame straight to the active
+                    # event's MJPG temp AVI on disk. Previously we appended
+                    # ``frame.copy()`` to ``EventState.frames``; with
+                    # ``max_event_seconds=300`` at 15 fps and 1080p that
+                    # could grow to ~28 GB of resident RAM per camera and
+                    # was the proximate cause of the OOM-kill that wiped
+                    # mid-postprocess sidecars.
                     if self.event_state is not None:
-                        self.event_state.frames.append((frame_ts, frame.copy()))
+                        if self.event_state.clip_writer is None:
+                            self.event_state.clip_writer = StreamingClipWriter(
+                                temp_path=self.storage.build_event_temp_avi(
+                                    self.camera.id, self.event_state.start_ts
+                                ),
+                                fps=15,
+                            )
+                            # Seed with the pre-event rolling buffer so the
+                            # saved clip still includes pre_seconds of
+                            # context. ``clip_buffer`` holds frames by
+                            # reference -- they were not copied on push --
+                            # so this is cheap.
+                            cutoff = self.event_state.start_ts - self.runtime.general.clip.pre_seconds
+                            for _ts, _frame in self.clip_buffer.dump():
+                                if _ts >= cutoff:
+                                    self.event_state.clip_writer.write(_frame)
+                        # cap.read() returns a fresh ndarray each call, so
+                        # writing by reference is safe -- no copy needed.
+                        self.event_state.clip_writer.write(frame)
 
                         # Force-close events that exceed max duration (prevents memory leak)
                         max_duration = self.runtime.general.clip.max_event_seconds
@@ -487,7 +515,8 @@ class StreamWorker:
                         if event_elapsed > max_duration:
                             LOGGER.warning(
                                 "Event for %s exceeded max duration (%.1fs > %.1fs, %d frames) - force closing to prevent memory leak",
-                                self.camera.id, event_elapsed, max_duration, len(self.event_state.frames)
+                                self.camera.id, event_elapsed, max_duration,
+                                self.event_state.clip_writer.frame_count,
                             )
                             await self._maybe_close_event(frame_ts, force=True)
 
@@ -838,10 +867,12 @@ class StreamWorker:
                 last_detection_ts=ts,
                 tracker=event_tracker,
             )
-            # Add pre-event frames from buffer, filtered by pre_seconds
-            buffered = self.clip_buffer.dump()
-            cutoff = ts - self.runtime.general.clip.pre_seconds
-            self.event_state.frames.extend([f for f in buffered if f[0] >= cutoff])
+            # Pre-event frames are flushed into the streaming clip writer
+            # the next time the stream loop sees a frame for this event
+            # (see the ``clip_writer is None`` branch above). The stream
+            # loop owns the writer because pre-event seeding has to happen
+            # in the same thread that subsequently writes live frames --
+            # otherwise OpenCV's writer can race.
             
         self.event_state.update(filtered, ts, frame, frame_idx=frame_idx)
 
@@ -1064,7 +1095,7 @@ class StreamWorker:
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
         
-        def finalize_event(frames, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions, detector_config):
+        def finalize_event(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions, detector_config):
             """Finalize event with optional post-clip species analysis.
 
             Split-model architecture:
@@ -1073,26 +1104,27 @@ class StreamWorker:
 
             Uses class-level semaphore to limit concurrent post-processing and prevent
             RAM explosion when multiple clips finish simultaneously.
+
+            ``temp_avi`` is the streaming MJPG file already written
+            frame-by-frame by ``StreamingClipWriter`` during the event.
+            We transcode it once here and then immediately delete it; no
+            full-resolution frame buffer is ever held in RAM.
             """
             # Acquire semaphore to limit concurrent post-processing (prevents RAM explosion)
             # This will block if too many clips are already being processed
             with StreamWorker._ensure_postprocess_semaphore():
-                LOGGER.debug("Post-processing started for %s (%d frames)",
-                            camera_id, len(frames))
+                LOGGER.debug("Post-processing started for %s (%d frames streamed)",
+                            camera_id, frame_count)
 
                 final_species = ctx_base['species']
                 final_confidence = ctx_base['confidence']
                 tracks_count = 1  # Default assumption
 
-                # Step 1: Run post-clip analysis if enabled (OLD approach - analyze in memory)
-                if post_analysis_enabled and not use_unified_processor:
-                    refined_species, refined_confidence = self._analyze_clip_frames(
-                        frames, num_samples=post_analysis_frames
-                    )
-                    # Use refined species if we got a more specific identification
-                    if refined_species:
-                        final_species = refined_species
-                        final_confidence = max(refined_confidence, ctx_base['confidence'])
+                # NOTE: legacy in-memory ``_analyze_clip_frames`` path was
+                # removed -- it required holding every event frame in RAM,
+                # which caused the OOM-kill that wiped sidecars. The
+                # default config has ``unified_post_processing=True`` so
+                # SpeciesNet runs on the saved MP4 below instead.
 
                 # Step 2: Build clip path with (potentially refined) species
                 clip_path = self.storage.build_clip_path(
@@ -1102,32 +1134,23 @@ class StreamWorker:
                     clip_format,
                 )
 
-                # Step 3: Write the clip
-                self.storage.write_clip(frames, clip_path)
+                # Step 3: Transcode the streamed MJPG AVI -> browser-friendly MP4
+                if temp_avi is None or not self.storage.transcode_avi_to_mp4(temp_avi, clip_path):
+                    LOGGER.error(
+                        "No clip file produced for %s event @ %s; skipping post-processing",
+                        camera_id, start_ts,
+                    )
+                    return
 
                 # Step 4: Save detection thumbnails for each species (skip if unified processor will regenerate)
                 if species_key_frames and not use_unified_processor:
                     self.storage.save_detection_thumbnails(clip_path, species_key_frames)
 
-                # MEMORY LEAK FIX: release the in-memory frame list (and key
-                # frame buffer) as soon as everything that needs raw frames
-                # has run. Subsequent steps (unified post-processor,
-                # notification, log writing) all operate on the *saved* clip
-                # file, not the in-memory frames. With max_event_seconds=300
-                # at 15 fps these lists can hold ~4500 numpy frames
-                # (~25 GB at 1080p), which previously stayed alive through
-                # the entire SpeciesNet analysis under the post-process
-                # semaphore -- pinning tens of GB of RSS for the duration of
-                # post-processing and stacking up across concurrent jobs.
-                frames_count_for_log = len(frames)
-                frames = None
+                # Drop the (small) key-frame buffer too; subsequent steps
+                # operate on the saved MP4.
                 species_key_frames = None
                 import gc as _gc
                 _gc.collect()
-                LOGGER.debug(
-                    "Released in-memory frames after clip write for %s (%d frames freed)",
-                    camera_id, frames_count_for_log,
-                )
 
                 # Step 5: Run UNIFIED post-processor if enabled (NEW approach - analyze saved file)
                 # Uses SpeciesNet for accurate species identification (split-model architecture)
@@ -1361,11 +1384,23 @@ class StreamWorker:
         
         # Use tracked key frames if available
         species_key_frames = self.event_state.get_tracked_key_frames()
-        
+
+        # Close the streaming MJPG writer NOW (before handing off to the
+        # executor) so the temp AVI is fully flushed when the executor
+        # picks it up. This must happen on the same thread that wrote
+        # frames to it.
+        temp_avi_path: Optional[Path] = None
+        frame_count = 0
+        if self.event_state.clip_writer is not None:
+            temp_avi_path = self.event_state.clip_writer.close()
+            frame_count = self.event_state.clip_writer.frame_count
+            self.event_state.clip_writer = None
+
         loop.run_in_executor(
-            None, 
-            finalize_event, 
-            self.event_state.frames,
+            None,
+            finalize_event,
+            temp_avi_path,
+            frame_count,
             self.camera.id,
             self.event_state.start_ts,
             self.runtime.general.clip.format,

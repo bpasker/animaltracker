@@ -7,14 +7,90 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 import cv2
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+
+import numpy as np
 
 from .species_names import get_common_name
 
 LOGGER = logging.getLogger(__name__)
+
+
+class StreamingClipWriter:
+    """Streams frames straight to a temp MJPG AVI as they arrive.
+
+    Replaces the previous approach of buffering every event frame in a
+    Python list (which could grow to ~28 GB per camera at 1080p15 with a
+    300 s ``max_event_seconds``). The MJPG AVI is later transcoded to a
+    browser-friendly MP4 by ``StorageManager.transcode_avi_to_mp4``.
+
+    Lazily picks (width, height) from the first frame so no resolution
+    needs to be threaded in from the caller.
+    """
+
+    def __init__(self, temp_path: Path, fps: int = 15) -> None:
+        self.temp_path = temp_path
+        self.fps = fps
+        self._writer: Optional[cv2.VideoWriter] = None
+        self._size: Optional[tuple[int, int]] = None  # (width, height)
+        self.frame_count: int = 0
+        self._failed: bool = False
+
+    def _ensure_open(self, frame: np.ndarray) -> bool:
+        if self._writer is not None:
+            return True
+        if self._failed:
+            return False
+        height, width = frame.shape[:2]
+        self.temp_path.parent.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        writer = cv2.VideoWriter(str(self.temp_path), fourcc, self.fps, (width, height))
+        if not writer.isOpened():
+            LOGGER.error("Failed to open streaming MJPG writer for %s", self.temp_path)
+            self._failed = True
+            return False
+        self._writer = writer
+        self._size = (width, height)
+        return True
+
+    def write(self, frame: np.ndarray) -> None:
+        if frame is None:
+            return
+        if not self._ensure_open(frame):
+            return
+        # Guard against camera resolution change mid-event
+        h, w = frame.shape[:2]
+        if self._size != (w, h):
+            return
+        self._writer.write(frame)
+        self.frame_count += 1
+
+    def close(self) -> Optional[Path]:
+        """Release the writer and return the temp AVI path (or None on failure)."""
+        if self._writer is not None:
+            try:
+                self._writer.release()
+            except Exception as e:  # pragma: no cover
+                LOGGER.warning("Error releasing streaming writer: %s", e)
+            self._writer = None
+        if self._failed or self.frame_count == 0:
+            self.discard()
+            return None
+        if not self.temp_path.exists() or self.temp_path.stat().st_size == 0:
+            return None
+        return self.temp_path
+
+    def discard(self) -> None:
+        """Best-effort delete of the temp AVI."""
+        try:
+            if self.temp_path.exists():
+                self.temp_path.unlink()
+        except OSError:
+            pass
 
 # Default storage thresholds
 DEFAULT_MIN_FREE_BYTES = 500 * 1024 * 1024  # 500 MB minimum free space
@@ -31,6 +107,16 @@ class StorageManager:
     def __post_init__(self) -> None:
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.logs_root.mkdir(parents=True, exist_ok=True)
+        # Clean up any orphan streaming temp AVIs left behind by a previous
+        # crash / OOM-kill so they do not accumulate forever.
+        tmp_dir = self.logs_root / "event_temp"
+        if tmp_dir.is_dir():
+            for stale in tmp_dir.glob("*.temp.avi"):
+                try:
+                    stale.unlink()
+                    LOGGER.info("Removed orphan event temp AVI: %s", stale)
+                except OSError:
+                    pass
 
     def build_clip_path(self, camera_id: str, species: str, event_ts: float, ext: str = "mp4") -> Path:
         ts = time.strftime("%Y/%m/%d", time.localtime(event_ts))
@@ -193,6 +279,107 @@ class StorageManager:
         cv2.imwrite(str(path), frame)
         LOGGER.info("Saved startup snapshot to %s", path)
         return path
+
+    def build_event_temp_avi(self, camera_id: str, event_ts: float) -> Path:
+        """Build a path for the streaming temp AVI for an in-progress event.
+
+        Stored under ``logs_root/event_temp/`` so they sit on local fast
+        storage (not the NFS clip mount) while the event is recording.
+        Cleaned up after transcode.
+        """
+        tmp_dir = self.logs_root / "event_temp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        # Add a uuid suffix so a previous crashed event can't collide with a
+        # new one from the same (camera, second).
+        return tmp_dir / f"{camera_id}_{int(event_ts)}_{uuid.uuid4().hex[:8]}.temp.avi"
+
+    def transcode_avi_to_mp4(self, temp_avi: Path, output_path: Path) -> bool:
+        """Transcode a finished MJPG AVI into a browser-friendly MP4.
+
+        Counterpart to ``StreamingClipWriter``; the AVI is written
+        frame-by-frame in the streaming loop, then this is invoked once at
+        event close. Always deletes the temp AVI on the way out.
+
+        Returns True on success.
+        """
+        if not temp_avi.exists() or temp_avi.stat().st_size == 0:
+            LOGGER.error("Temp AVI missing or empty for %s", output_path)
+            try:
+                if temp_avi.exists():
+                    temp_avi.unlink()
+            except OSError:
+                pass
+            return False
+
+        tmp_mp4 = output_path.with_suffix(".tmp.mp4")
+        ok = False
+        try:
+            if shutil.which("ffmpeg") is not None:
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel", "error",
+                    "-i", str(temp_avi),
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    str(tmp_mp4),
+                ]
+                LOGGER.info("Transcoding clip to %s", output_path)
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True)
+                    if tmp_mp4.exists() and tmp_mp4.stat().st_size > 0:
+                        tmp_mp4.rename(output_path)
+                        LOGGER.info(
+                            "Saved clip %s (%d bytes)", output_path, output_path.stat().st_size
+                        )
+                        ok = True
+                    else:
+                        LOGGER.error("FFmpeg produced empty file for %s", output_path)
+                except subprocess.CalledProcessError as e:
+                    err_msg = e.stderr.decode() if e.stderr else str(e)
+                    LOGGER.error("FFmpeg failed: %s", err_msg)
+            else:
+                LOGGER.warning(
+                    "ffmpeg not found; falling back to OpenCV avc1 transcode for %s",
+                    output_path,
+                )
+                cap = cv2.VideoCapture(str(temp_avi))
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS) or 15
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                out = cv2.VideoWriter(str(tmp_mp4), fourcc, fps, (width, height))
+                if not out.isOpened():
+                    LOGGER.error("Failed to open fallback VideoWriter for %s", tmp_mp4)
+                    cap.release()
+                else:
+                    try:
+                        while True:
+                            ret, frame = cap.read()
+                            if not ret:
+                                break
+                            out.write(frame)
+                    finally:
+                        cap.release()
+                        out.release()
+                    if tmp_mp4.exists() and tmp_mp4.stat().st_size > 0:
+                        tmp_mp4.rename(output_path)
+                        LOGGER.info("Saved clip %s (fallback encoding)", output_path)
+                        ok = True
+        finally:
+            try:
+                if temp_avi.exists():
+                    temp_avi.unlink()
+            except OSError as e:
+                LOGGER.warning("Failed to remove temp AVI %s: %s", temp_avi, e)
+            if not ok and tmp_mp4.exists():
+                try:
+                    tmp_mp4.unlink()
+                except OSError:
+                    pass
+        return ok
 
     def write_clip(self, frames: List, output_path: Path, fps: int = 15) -> None:
         """Encode frames using two-step process for browser compatibility.

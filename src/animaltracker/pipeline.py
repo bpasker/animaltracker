@@ -428,7 +428,27 @@ class StreamWorker:
             if user and password:
                 try:
                     import concurrent.futures
-                    
+                    import socket
+
+                    # Fast TCP preflight: if the camera ONVIF port is not
+                    # reachable in ~2s, skip ONVIF init entirely. Without this,
+                    # an unreachable host causes the underlying SOAP client to
+                    # block on connect for minutes, which would also block
+                    # process startup (since ThreadPoolExecutor.__exit__ waits
+                    # for the in-flight task even after our future timeout).
+                    preflight_ok = True
+                    try:
+                        with socket.create_connection(
+                            (camera.onvif.host, camera.onvif.port), timeout=2.0
+                        ):
+                            pass
+                    except OSError as preflight_err:
+                        preflight_ok = False
+                        LOGGER.warning(
+                            "ONVIF preflight failed for %s (%s:%s): %s -- skipping ONVIF init",
+                            camera.id, camera.onvif.host, camera.onvif.port, preflight_err,
+                        )
+
                     def init_onvif():
                         client = OnvifClient(
                             host=camera.onvif.host,
@@ -438,15 +458,30 @@ class StreamWorker:
                         )
                         profiles = client.get_profiles()
                         return client, profiles
-                    
-                    # Use ThreadPoolExecutor with timeout to prevent blocking
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+
+                    profiles = []
+                    if preflight_ok:
+                        # Submit on a daemon executor and DO NOT use a `with`
+                        # block: the context manager's shutdown(wait=True)
+                        # would block startup waiting for a stuck SOAP call
+                        # even after our future timeout fires.
+                        executor = concurrent.futures.ThreadPoolExecutor(
+                            max_workers=1,
+                            thread_name_prefix=f"onvif-init-{camera.id}",
+                        )
                         future = executor.submit(init_onvif)
                         try:
-                            self.onvif_client, profiles = future.result(timeout=10)  # 10 second timeout
+                            self.onvif_client, profiles = future.result(timeout=10)
                         except concurrent.futures.TimeoutError:
-                            LOGGER.warning(f"ONVIF initialization timed out for {camera.id} (10s)")
+                            LOGGER.warning(
+                                "ONVIF initialization timed out for %s (10s); "
+                                "leaving ONVIF disabled for this camera",
+                                camera.id,
+                            )
                             profiles = []
+                        finally:
+                            # Don't wait for the (possibly stuck) worker thread.
+                            executor.shutdown(wait=False)
                     
                     if profiles:
                         available_tokens = [p.metadata.get('token') for p in profiles]

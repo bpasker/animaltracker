@@ -115,6 +115,117 @@ def build_gstreamer_pipeline_nvdec(rtsp_uri: str, transport: str = "tcp", latenc
 MAX_KEY_FRAMES_PER_SPECIES = 3
 
 
+async def _memory_watchdog(
+    stop_event: asyncio.Event,
+    interval_seconds: float = 30.0,
+    warn_gb: float = 40.0,
+    danger_gb: float = 55.0,
+) -> None:
+    """Log periodic memory pressure warnings.
+
+    Reads our own ``/proc/self/status`` (no extra deps) and the cgroup
+    ``memory.current`` / ``memory.high`` / ``memory.max`` if present.
+    Logs WARNING once we cross ``warn_gb`` and ERROR above ``danger_gb``
+    so an operator gets a heads-up in the journal *before* the cgroup
+    OOM-kills us. The 2026-05-02 incident silently grew to 56 GB RSS
+    over 18 hours with no log line until the kill -- this is what
+    closes that visibility gap.
+    """
+    GB = 1024 ** 3
+
+    def _read_int(path: str) -> Optional[int]:
+        try:
+            with open(path, "r") as fh:
+                val = fh.read().strip()
+            if not val or val == "max":
+                return None
+            return int(val)
+        except (OSError, ValueError):
+            return None
+
+    def _self_rss_bytes() -> int:
+        try:
+            with open("/proc/self/status", "r") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        kb = int(line.split()[1])
+                        return kb * 1024
+        except (OSError, ValueError, IndexError):
+            pass
+        return 0
+
+    # Find our cgroup v2 memory dir (best-effort)
+    cgroup_dir: Optional[str] = None
+    try:
+        with open("/proc/self/cgroup", "r") as fh:
+            for line in fh:
+                # cgroup v2 line looks like "0::/system.slice/animaltracker.service"
+                if line.startswith("0::"):
+                    rel = line.strip().split("::", 1)[1]
+                    candidate = "/sys/fs/cgroup" + rel
+                    if os.path.isdir(candidate):
+                        cgroup_dir = candidate
+                    break
+    except OSError:
+        pass
+
+    last_state = "ok"  # ok / warn / danger
+    while not stop_event.is_set():
+        try:
+            rss = _self_rss_bytes()
+            cg_current = _read_int(f"{cgroup_dir}/memory.current") if cgroup_dir else None
+            cg_high = _read_int(f"{cgroup_dir}/memory.high") if cgroup_dir else None
+            cg_max = _read_int(f"{cgroup_dir}/memory.max") if cgroup_dir else None
+
+            rss_gb = rss / GB
+            cg_gb = (cg_current / GB) if cg_current else rss_gb
+
+            new_state = "ok"
+            if cg_max and cg_current and cg_current >= 0.90 * cg_max:
+                new_state = "danger"
+            elif rss_gb >= danger_gb:
+                new_state = "danger"
+            elif cg_high and cg_current and cg_current >= cg_high:
+                new_state = "warn"
+            elif rss_gb >= warn_gb:
+                new_state = "warn"
+
+            extras = []
+            if cg_current is not None:
+                extras.append(f"cgroup={cg_gb:.1f}G")
+            if cg_high is not None:
+                extras.append(f"high={cg_high / GB:.0f}G")
+            if cg_max is not None:
+                extras.append(f"max={cg_max / GB:.0f}G")
+            extra_str = (" " + " ".join(extras)) if extras else ""
+
+            if new_state == "danger":
+                LOGGER.error(
+                    "MEMORY DANGER: rss=%.1fGB%s -- approaching cgroup limit; "
+                    "expect cgroup OOM-kill if this keeps climbing",
+                    rss_gb, extra_str,
+                )
+            elif new_state == "warn":
+                LOGGER.warning(
+                    "Memory pressure: rss=%.1fGB%s -- above warn threshold (%.0fGB)",
+                    rss_gb, extra_str, warn_gb,
+                )
+            elif last_state != "ok":
+                LOGGER.info(
+                    "Memory recovered: rss=%.1fGB%s (back below warn threshold)",
+                    rss_gb, extra_str,
+                )
+
+            last_state = new_state
+        except Exception as e:  # never let the watchdog kill the orchestrator
+            LOGGER.debug("memory watchdog tick failed: %s", e)
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 @dataclass
 class EventState:
     camera: CameraConfig
@@ -1657,6 +1768,11 @@ class PipelineOrchestrator:
         # Initialize post-processing concurrency limit from config
         postprocess_limit = getattr(self.runtime.general.clip, 'max_concurrent_postprocess', 1)
         StreamWorker.set_postprocess_limit(postprocess_limit)
+
+        # Spawn periodic memory watchdog; it just logs WARNING/ERROR so
+        # operators see RSS climbing toward the cgroup MemoryHigh/Max
+        # ceilings *before* the kernel has to kill us.
+        asyncio.create_task(_memory_watchdog(stop_event))
 
         # Check if tracking is enabled in config
         tracking_enabled = getattr(self.runtime.general.clip, 'tracking_enabled', True)

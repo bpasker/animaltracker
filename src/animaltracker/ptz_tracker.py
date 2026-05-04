@@ -176,8 +176,18 @@ class PTZTracker:
     # decision; for slow-moving animals (deer, etc.) the previous full-speed
     # corrections caused overshoot followed by a swing back. Capping prevents
     # the camera from outpacing the target between detections.
-    low_fill_threshold: float = 0.15        # bbox max-dim / frame-dim fraction
-    low_fill_velocity_cap: float = 0.35     # cap on |pan|/|tilt| when below threshold
+    # Raised threshold (was 0.15) so distant animals filling 15-30% of the
+    # frame still get the velocity cap applied -- previously a dog at ~17%
+    # fill bypassed the cap, got vel ~0.6 on recovery, and the camera flew
+    # past the target between detection ticks.
+    low_fill_threshold: float = 0.30        # bbox max-dim / frame-dim fraction
+    # Lowered cap (was 0.35) so a single 250 ms continuous-move tick can't
+    # slew far enough to lose a small target.
+    low_fill_velocity_cap: float = 0.22     # cap on |pan|/|tilt| when below threshold
+    # When the target is more than this far off-center, suppress positive
+    # (zoom-in) zoom velocity. Zooming in while still chasing narrows the
+    # FOV exactly when we need it wide. Zoom-out is still allowed.
+    zoom_in_offset_gate: float = 0.10
     
     # Patrol settings
     patrol_enabled: bool = True  # Enable patrol when no detections
@@ -1309,6 +1319,9 @@ class PTZTracker:
             fill_error = self.target_fill_pct - current_fill
             zoom_velocity = fill_error * 1.5
             zoom_velocity = max(-0.3, min(0.3, zoom_velocity))
+            # Suppress zoom-in while target is off-center (see _do_tracking).
+            if zoom_velocity > 0 and offset_magnitude > self.zoom_in_offset_gate:
+                zoom_velocity = 0.0
         else:
             zoom_velocity = 0.0
 
@@ -2095,6 +2108,10 @@ class PTZTracker:
             # Slower zoom adjustments - zoom changes are more jarring
             zoom_velocity = fill_error * 1.5
             zoom_velocity = max(-0.3, min(0.3, zoom_velocity))
+            # Suppress zoom-in while target is off-center: chasing with a
+            # narrowing FOV is how we lose small fast-walking animals.
+            if zoom_velocity > 0 and offset_magnitude > self.zoom_in_offset_gate:
+                zoom_velocity = 0.0
         else:
             zoom_velocity = 0.0
         

@@ -287,7 +287,7 @@ class PTZTracker:
     _locked_species: Optional[str] = field(default=None, init=False)  # Species we are locked onto (for handoff continuity)
     _lock_start_time: float = field(default=0.0, init=False)  # When we locked onto current target
     _consecutive_lock_misses: int = field(default=0, init=False)  # Frames since locked target was last seen
-    _lock_miss_limit: int = field(default=5, init=False)  # Misses before releasing lock
+    _lock_miss_limit: int = field(default=3, init=False)  # Misses before releasing lock (was 5; lower = faster recovery on mismatched stale lock)
     # Hysteresis for switching to a *different* (non-locked) max-confidence target.
     # H4: prevents flickering between two similar-confidence detections.
     _challenger_track_id: Optional[int] = field(default=None, init=False)
@@ -1056,6 +1056,12 @@ class PTZTracker:
                 # don't subsequently log a timeout / cooldown.
                 if self._mode == PTZMode.INVESTIGATE:
                     self._maybe_finish_investigate(now, confirmed=True)
+                # Fresh event: drop any lock state left over from a previous
+                # subject. Otherwise the new sighting must spatially match
+                # the stale _locked_bbox_center within 15% of frame, or burn
+                # _lock_miss_limit ticks before a fresh lock can form.
+                else:
+                    self._reset_lock_state_locked()
                 self._mode = PTZMode.TRACKING
 
             # Use target camera's detections - these are most accurate since
@@ -1140,6 +1146,11 @@ class PTZTracker:
                 # source detection as confirmation.
                 if self._mode == PTZMode.INVESTIGATE:
                     self._maybe_finish_investigate(now, confirmed=True)
+                # Fresh event: clear stale lock so the new subject can
+                # establish its own lock immediately (see counterpart in
+                # the target-camera branch above).
+                else:
+                    self._reset_lock_state_locked()
                 self._mode = PTZMode.TRACKING
 
             # Use the original tracking method for source camera detections

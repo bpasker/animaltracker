@@ -876,11 +876,19 @@ class StreamWorker:
                 # to protect against -- use a generous window so single
                 # ~66ms inter-frame gaps don't spuriously discard fresh
                 # detections.
+                # Multi-camera contributions are read by both drivers (cam1
+                # and cam2 when promoted as co-driver). Cam1 sub-stream often
+                # ticks at ~3 fps (frame_skip=10) so a 0.25s window dropped
+                # most of cam2's contributions. Use a wider window: at least
+                # one source frame interval, capped at 1.0s. The settle gate
+                # on the moved camera (above) already invalidates that
+                # camera's published detections during settle, so a wider
+                # window cannot resurrect post-move stale data.
                 settle = self.camera.thresholds.ptz_settle_time
                 if settle <= 0:
-                    staleness_window = 0.5
+                    staleness_window = 1.0
                 else:
-                    staleness_window = max(0.1, min(0.5, settle * 0.5))
+                    staleness_window = max(0.5, min(1.0, settle * 2.0))
 
                 for cam_id, worker in self._ptz_detection_sources.items():
                     detection_age = ts - worker.latest_detection_ts
@@ -2008,12 +2016,34 @@ class PipelineOrchestrator:
                 existing_tracker = shared_ptz_trackers.get(worker.camera.id)
                 if existing_tracker:
                     worker.ptz_tracker = existing_tracker
+                    # Find the source camera (if any) that targets this worker
+                    # with multi_camera_tracking enabled. If so, promote this
+                    # worker (the target/zoom camera) to a co-driver of the
+                    # shared tracker so cam2 can keep ticking when cam1's
+                    # wide stream goes silent on tiny/distant subjects.
+                    multi_cam_takeover = any(
+                        (other.camera.ptz_tracking.enabled
+                         and other.camera.ptz_tracking.target_camera_id == worker.camera.id
+                         and other.camera.ptz_tracking.multi_camera_tracking)
+                        for other in workers if other is not worker
+                    )
                     if ptz_cfg.self_track:
                         # Target camera is configured for self-track; it may
                         # drive the shared tracker with its own detections.
                         worker.ptz_drives_tracking = True
                         LOGGER.info(
                             "PTZ self-tracking enabled: %s shares tracker (cam2 detections will also trigger tracking)",
+                            worker.camera.id
+                        )
+                    elif multi_cam_takeover:
+                        # Multi-camera takeover: target ticks the shared
+                        # tracker too. update_multi_camera() is internally
+                        # locked & rate-limited, so concurrent calls from
+                        # cam1 and cam2 are safe and naturally throttled.
+                        worker.ptz_drives_tracking = True
+                        LOGGER.info(
+                            "PTZ multi-cam co-driver: %s will also tick the shared tracker "
+                            "(keeps tracking alive when source camera goes silent)",
                             worker.camera.id
                         )
                     else:

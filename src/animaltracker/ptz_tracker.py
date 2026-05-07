@@ -184,10 +184,20 @@ class PTZTracker:
     # Lowered cap (was 0.35) so a single 250 ms continuous-move tick can't
     # slew far enough to lose a small target.
     low_fill_velocity_cap: float = 0.22     # cap on |pan|/|tilt| when below threshold
+    # Offset magnitude at which the low-fill cap is allowed to reach its
+    # full value. Below this, the per-axis cap is scaled proportionally to
+    # |offset| so we taper toward zero velocity as we approach center,
+    # instead of slamming the same 0.22 pulse for both 0.13 and 0.46
+    # offsets (which causes overshoot of small offsets and undershoot of
+    # large ones with sparse detection ticks).
+    low_fill_cap_full_offset: float = 0.40
     # When the target is more than this far off-center, suppress positive
     # (zoom-in) zoom velocity. Zooming in while still chasing narrows the
     # FOV exactly when we need it wide. Zoom-out is still allowed.
-    zoom_in_offset_gate: float = 0.10
+    # Tightened (was 0.10) because borderline offsets like 0.08 were
+    # squeaking through the gate and the next detection often showed the
+    # animal had already left the now-narrower FOV.
+    zoom_in_offset_gate: float = 0.05
     
     # Patrol settings
     patrol_enabled: bool = True  # Enable patrol when no detections
@@ -203,7 +213,10 @@ class PTZTracker:
     # have an immediate "no detections" tick which used to halt the camera
     # before it physically moved. Holding the move for at least this long
     # lets the slew actually happen.
-    move_min_duration: float = 0.6
+    # Lowered (was 0.6) because at ~2 fps detection cadence a 0.6 s floor
+    # meant every gap was a full 0.6 s of free slew at the last commanded
+    # velocity, causing repeated overshoot of slow-moving targets.
+    move_min_duration: float = 0.3
 
     # When the target camera (cam2) has been driving tracking, suppress
     # cam1-driven repositioning for this many seconds after the last cam2
@@ -411,21 +424,37 @@ class PTZTracker:
         return speed
 
     def _apply_low_fill_cap(
-        self, pan_velocity: float, tilt_velocity: float, current_fill: float
+        self,
+        pan_velocity: float,
+        tilt_velocity: float,
+        current_fill: float,
+        offset_x: float = 1.0,
+        offset_y: float = 1.0,
     ) -> Tuple[float, float, bool]:
         """Cap |pan|/|tilt| velocity when the target is small in frame.
+
+        The cap is applied per-axis and scales proportionally to |offset|
+        on that axis: at |offset| >= ``low_fill_cap_full_offset`` the full
+        cap is allowed; below that, the cap is reduced linearly so the
+        commanded velocity tapers toward zero as we approach center. This
+        prevents the controller from issuing the same maximum pulse for a
+        0.13 offset and a 0.46 offset (which produced overshoot of small
+        offsets and undershoot of large ones with sparse detection ticks).
 
         Returns the (possibly clamped) velocities and whether a cap was applied.
         """
         if current_fill <= 0 or current_fill >= self.low_fill_threshold:
             return pan_velocity, tilt_velocity, False
-        cap = max(0.0, min(1.0, self.low_fill_velocity_cap))
+        base_cap = max(0.0, min(1.0, self.low_fill_velocity_cap))
+        full_off = max(1e-3, self.low_fill_cap_full_offset)
+        cap_pan = base_cap * max(0.0, min(1.0, abs(offset_x) / full_off))
+        cap_tilt = base_cap * max(0.0, min(1.0, abs(offset_y) / full_off))
         capped = False
-        if abs(pan_velocity) > cap:
-            pan_velocity = cap if pan_velocity > 0 else -cap
+        if abs(pan_velocity) > cap_pan:
+            pan_velocity = cap_pan if pan_velocity > 0 else -cap_pan
             capped = True
-        if abs(tilt_velocity) > cap:
-            tilt_velocity = cap if tilt_velocity > 0 else -cap
+        if abs(tilt_velocity) > cap_tilt:
+            tilt_velocity = cap_tilt if tilt_velocity > 0 else -cap_tilt
             capped = True
         return pan_velocity, tilt_velocity, capped
 
@@ -1310,9 +1339,11 @@ class PTZTracker:
 
         # Cap pan/tilt velocity when target is small in frame to prevent
         # the camera from outpacing slow-moving distant animals between
-        # detection ticks.
+        # detection ticks. Cap is scaled by |offset| so velocity tapers
+        # as we near center.
         pan_velocity, tilt_velocity, _capped = self._apply_low_fill_cap(
-            pan_velocity, tilt_velocity, current_fill
+            pan_velocity, tilt_velocity, current_fill,
+            offset_x=offset_x, offset_y=offset_y,
         )
 
         if current_fill > 0:
@@ -2099,8 +2130,10 @@ class PTZTracker:
 
         # Cap pan/tilt velocity when target is small in frame to prevent
         # overshooting slow-moving distant animals between detection ticks.
+        # Cap is scaled by |offset| so velocity tapers as we near center.
         pan_velocity, tilt_velocity, _capped = self._apply_low_fill_cap(
-            pan_velocity, tilt_velocity, current_fill
+            pan_velocity, tilt_velocity, current_fill,
+            offset_x=offset_x, offset_y=offset_y,
         )
 
         if current_fill > 0:

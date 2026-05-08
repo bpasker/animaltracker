@@ -181,9 +181,13 @@ class PTZTracker:
     # fill bypassed the cap, got vel ~0.6 on recovery, and the camera flew
     # past the target between detection ticks.
     low_fill_threshold: float = 0.30        # bbox max-dim / frame-dim fraction
-    # Lowered cap (was 0.35) so a single 250 ms continuous-move tick can't
-    # slew far enough to lose a small target.
-    low_fill_velocity_cap: float = 0.22     # cap on |pan|/|tilt| when below threshold
+    # Lowered again (was 0.22, originally 0.35) because real-world Reolink
+    # ContinuousMove + Stop has ~200-400 ms of mechanical lag, so the
+    # *effective* slew per step exceeds the commanded duration. Capping the
+    # commanded velocity lower keeps the actual displacement per detection
+    # tick small enough that we don't fly past slow / distant targets when
+    # cam2 detection cadence drops to ~1 Hz.
+    low_fill_velocity_cap: float = 0.15     # cap on |pan|/|tilt| when below threshold
     # Offset magnitude at which the low-fill cap is allowed to reach its
     # full value. Below this, the per-axis cap is scaled proportionally to
     # |offset| so we taper toward zero velocity as we approach center,
@@ -216,7 +220,21 @@ class PTZTracker:
     # Lowered (was 0.6) because at ~2 fps detection cadence a 0.6 s floor
     # meant every gap was a full 0.6 s of free slew at the last commanded
     # velocity, causing repeated overshoot of slow-moving targets.
-    move_min_duration: float = 0.3
+    # Lowered again (was 0.3) -- combined with tracking_step_duration we
+    # never want a slew to free-run for more than ~150 ms after the last
+    # detection, otherwise mechanical Stop latency carries the camera past
+    # the target.
+    move_min_duration: float = 0.15
+
+    # Hard cap on how long a *tracking* ContinuousMove is allowed to run
+    # before the controller proactively issues a Stop, regardless of
+    # whether new detections have arrived. With sparse detection cadence
+    # (e.g. SpeciesNet ~1 Hz on small targets) the previous behaviour was
+    # to let the last commanded velocity run until either a new detection
+    # or the no-detections path expired, which routinely overshot. By
+    # auto-stopping after a short step, each detection only authorises a
+    # bounded amount of slew, then the camera waits for the next detection.
+    tracking_step_duration: float = 0.20
 
     # When the target camera (cam2) has been driving tracking, suppress
     # cam1-driven repositioning for this many seconds after the last cam2
@@ -301,6 +319,10 @@ class PTZTracker:
     # commands every tick (which both hammers the camera and refreshes
     # _last_move_time, causing the settle deadlock).
     _patrol_velocity: Optional[Tuple[float, float, float]] = field(default=None, init=False)
+
+    # Wall-clock time at which the current tracking ContinuousMove should
+    # be auto-stopped (0 = no pending stop). See ``tracking_step_duration``.
+    _tracking_step_stop_at: float = field(default=0.0, init=False)
 
     # Track persistence: Once we lock onto a target, keep tracking it
     # to prevent jitter from switching between detections every frame.
@@ -397,6 +419,48 @@ class PTZTracker:
         while the camera is still moving/stabilizing after a PTZ command.
         """
         return self._last_move_time
+
+    def _arm_tracking_step(self, now: float) -> None:
+        """Schedule an automatic Stop after ``tracking_step_duration``.
+
+        Called immediately after issuing a tracking ContinuousMove so the
+        camera only slews a bounded amount per detection. Without this,
+        the last commanded velocity continues to run between detections
+        (especially with sparse SpeciesNet cadence on small targets) and
+        the camera flies past the animal.
+        """
+        if self.tracking_step_duration > 0:
+            self._tracking_step_stop_at = now + self.tracking_step_duration
+        else:
+            self._tracking_step_stop_at = 0.0
+
+    def _check_tracking_step_expiry(self, now: float) -> None:
+        """If a previously-armed tracking step has elapsed, Stop the PTZ.
+
+        Must be called with ``self._lock`` held. Idempotent: clears the
+        scheduled stop time so subsequent ticks don't re-issue Stop.
+        """
+        if self._tracking_step_stop_at <= 0.0:
+            return
+        if now < self._tracking_step_stop_at:
+            return
+        self._tracking_step_stop_at = 0.0
+        # Only Stop if we believe the camera is still slewing (i.e. we
+        # haven't already issued a Stop via deadzone / hold path).
+        if self._holding_position:
+            return        try:
+            self.onvif_client.ptz_stop(self.profile_token)
+        except Exception as e:
+            PTZ_LOGGER.warning("[STEP_STOP_FAIL] %s", e)
+            return
+        self._holding_position = True
+        PTZ_LOGGER.debug(
+            "[TRACKING_STEP_STOP] auto-stopped after %.2fs step",
+            self.tracking_step_duration
+        )
+        self._log_decision('tracking_step_stop', {
+            'step_duration': round(self.tracking_step_duration, 3),
+        })
 
     @staticmethod
     def _velocity_curve(offset: float) -> float:
@@ -734,6 +798,9 @@ class PTZTracker:
 
         # Rate limit updates
         now = time.time()
+        # Auto-stop expired tracking step BEFORE rate-limiting so it always
+        # fires within ~1 worker tick of the scheduled time.
+        self._check_tracking_step_expiry(now)
         if now - self._last_update < self.update_interval:
             PTZ_LOGGER.debug(
                 "[RATE_LIMIT] Skipping update, %.2fs since last (interval=%.2fs)",
@@ -901,6 +968,9 @@ class PTZTracker:
 
         # Rate limit updates
         now = time.time()
+        # Auto-stop expired tracking step BEFORE rate-limiting so it always
+        # fires within ~1 worker tick of the scheduled time.
+        self._check_tracking_step_expiry(now)
         if now - self._last_update < self.update_interval:
             return False
 
@@ -1393,6 +1463,8 @@ class PTZTracker:
             # Without this, a subsequent return to the deadzone would skip
             # ptz_stop because the debounce flag was still latched True.
             self._holding_position = False
+            # Bound the slew distance per detection by scheduling an auto-Stop.
+            self._arm_tracking_step(self._last_move_time)
             return True
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)
@@ -2192,6 +2264,8 @@ class PTZTracker:
             )
             self._last_move_time = time.time()
             self._holding_position = False
+            # Bound the slew distance per detection by scheduling an auto-Stop.
+            self._arm_tracking_step(self._last_move_time)
             return True
         except Exception as e:
             PTZ_LOGGER.error("[ONVIF_ERROR] ContinuousMove failed: %s", e)

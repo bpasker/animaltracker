@@ -324,6 +324,23 @@ class PTZTracker:
     # be auto-stopped (0 = no pending stop). See ``tracking_step_duration``.
     _tracking_step_stop_at: float = field(default=0.0, init=False)
 
+    # Diagnostic context for decision log enrichment.
+    # _current_capture_ts: capture_ts of the frame whose detections we are
+    #   reacting to in the *current* update_locked / update_multi_camera_locked
+    #   call. Set at the top of those methods, cleared at end. Used by the
+    #   move/deadzone log sites to record frame_age_ms (decision_ts - capture_ts)
+    #   so we can tell when the controller acted on stale frames.
+    # _last_move_capture_ts: capture_ts of the frame that drove the most
+    #   recent issued ContinuousMove. Lets us compute the inter-detection gap
+    #   (capture-to-capture) at the next move, which is the actual interval
+    #   the camera was free-slewing under the previous velocity.
+    # _tracking_step_armed_at: wall-clock time _arm_tracking_step() was called.
+    #   Logged on tracking_step_stop so we can see how long the auto-stop
+    #   actually took to fire vs the configured tracking_step_duration.
+    _current_capture_ts: float = field(default=0.0, init=False)
+    _last_move_capture_ts: float = field(default=0.0, init=False)
+    _tracking_step_armed_at: float = field(default=0.0, init=False)
+
     # Track persistence: Once we lock onto a target, keep tracking it
     # to prevent jitter from switching between detections every frame.
     _locked_track_id: Optional[int] = field(default=None, init=False)  # Currently locked track ID
@@ -431,8 +448,10 @@ class PTZTracker:
         """
         if self.tracking_step_duration > 0:
             self._tracking_step_stop_at = now + self.tracking_step_duration
+            self._tracking_step_armed_at = now
         else:
             self._tracking_step_stop_at = 0.0
+            self._tracking_step_armed_at = 0.0
 
     def _check_tracking_step_expiry(self, now: float) -> None:
         """If a previously-armed tracking step has elapsed, Stop the PTZ.
@@ -444,7 +463,10 @@ class PTZTracker:
             return
         if now < self._tracking_step_stop_at:
             return
+        scheduled_at = self._tracking_step_stop_at
+        armed_at = self._tracking_step_armed_at
         self._tracking_step_stop_at = 0.0
+        self._tracking_step_armed_at = 0.0
         # Only Stop if we believe the camera is still slewing (i.e. we
         # haven't already issued a Stop via deadzone / hold path).
         if self._holding_position:
@@ -455,12 +477,21 @@ class PTZTracker:
             PTZ_LOGGER.warning("[STEP_STOP_FAIL] %s", e)
             return
         self._holding_position = True
+        # How late were we vs the scheduled stop time? Latency here directly
+        # measures the worker tick rate -- a high value means the camera
+        # over-slewed because we couldn't issue Stop on time.
+        late_ms = max(0.0, (now - scheduled_at)) * 1000.0
+        # Total wall-clock that the PTZ was actually slewing under the last
+        # ContinuousMove velocity, including this late dispatch.
+        slew_ms = max(0.0, (now - armed_at)) * 1000.0 if armed_at > 0 else 0.0
         PTZ_LOGGER.debug(
-            "[TRACKING_STEP_STOP] auto-stopped after %.2fs step",
-            self.tracking_step_duration
+            "[TRACKING_STEP_STOP] auto-stopped after %.2fs step (late %.0fms)",
+            self.tracking_step_duration, late_ms,
         )
         self._log_decision('tracking_step_stop', {
-            'step_duration': round(self.tracking_step_duration, 3),
+            'step_duration_s': round(self.tracking_step_duration, 3),
+            'actual_slew_ms': round(slew_ms, 1),
+            'dispatch_late_ms': round(late_ms, 1),
         })
 
     @staticmethod
@@ -772,7 +803,13 @@ class PTZTracker:
             pan_scale, tilt_scale, pan_center_x, tilt_center_y
         )
     
-    def update(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
+    def update(
+        self,
+        detections: List['Detection'],
+        frame_width: int,
+        frame_height: int,
+        frame_capture_ts: Optional[float] = None,
+    ) -> bool:
         """Process detections and move PTZ if needed.
 
         State machine:
@@ -784,12 +821,20 @@ class PTZTracker:
             detections: List of Detection objects from wide-angle camera
             frame_width: Width of the detection frame
             frame_height: Height of the detection frame
+            frame_capture_ts: Wall-clock timestamp when the frame these
+                detections came from was pulled off the RTSP stream. Used
+                only for diagnostic logging (frame_age_ms on each move /
+                deadzone decision). Pass None when unknown.
 
         Returns:
             True if PTZ was moved, False otherwise
         """
         with self._lock:
-            return self._update_locked(detections, frame_width, frame_height)
+            self._current_capture_ts = frame_capture_ts or 0.0
+            try:
+                return self._update_locked(detections, frame_width, frame_height)
+            finally:
+                self._current_capture_ts = 0.0
 
     def _update_locked(self, detections: List['Detection'], frame_width: int, frame_height: int) -> bool:
         """Internal update method, must be called with lock held."""
@@ -934,6 +979,7 @@ class PTZTracker:
         camera_detections: Dict[str, Tuple[List['Detection'], int, int]],
         source_camera_id: str,
         target_camera_id: str,
+        frame_capture_ts: Optional[float] = None,
     ) -> bool:
         """Process detections from multiple cameras for PTZ tracking.
 
@@ -947,14 +993,20 @@ class PTZTracker:
             camera_detections: Dict mapping camera_id -> (detections, frame_width, frame_height)
             source_camera_id: ID of the wide-angle source camera (typically 'cam1')
             target_camera_id: ID of the PTZ target camera (typically 'cam2')
+            frame_capture_ts: Wall-clock timestamp of the freshest contributing
+                frame. Used only for diagnostic frame_age_ms logging.
 
         Returns:
             True if PTZ was moved, False otherwise
         """
         with self._lock:
-            return self._update_multi_camera_locked(
-                camera_detections, source_camera_id, target_camera_id
-            )
+            self._current_capture_ts = frame_capture_ts or 0.0
+            try:
+                return self._update_multi_camera_locked(
+                    camera_detections, source_camera_id, target_camera_id
+                )
+            finally:
+                self._current_capture_ts = 0.0
 
     def _update_multi_camera_locked(
         self,
@@ -1382,12 +1434,24 @@ class PTZTracker:
                 "[DEADZONE] Target centered in cam2 - offset=%.3f < threshold=%.3f",
                 offset_magnitude, self.min_move_threshold
             )
+            _now = time.time()
+            _frame_age_ms = (
+                round((_now - self._current_capture_ts) * 1000.0, 1)
+                if self._current_capture_ts > 0 else None
+            )
             self._log_decision('deadzone', {
                 'species': best.species,
                 'track_id': getattr(best, 'track_id', None),
                 'offset_magnitude': round(offset_magnitude, 4),
                 'threshold': self.min_move_threshold,
                 'source': 'target_camera',
+                # Diagnostic context (H, B): bbox in pixels + frame size lets
+                # us overlay the decision on the saved MP4 and prove the
+                # detection was where the controller thought it was.
+                'bbox_px': [round(bbox[0], 1), round(bbox[1], 1),
+                            round(bbox[2], 1), round(bbox[3], 1)],
+                'frame_size': [frame_width, frame_height],
+                'frame_age_ms': _frame_age_ms,
             })
             if not self._holding_position:
                 try:
@@ -1402,6 +1466,11 @@ class PTZTracker:
         # slow-moving / distant targets).
         pan_velocity = self._velocity_curve(offset_x)
         tilt_velocity = self._velocity_curve(offset_y)
+        # Capture pre-cap values so the decision log can show whether the
+        # low-fill cap actually intervened (C). If raw == capped, the cap
+        # is loose; if they diverge often, the cap is doing the work.
+        pan_velocity_raw = pan_velocity
+        tilt_velocity_raw = tilt_velocity
 
         # Calculate zoom velocity based on current vs target fill
         bbox_width = bbox[2] - bbox[0]
@@ -1436,6 +1505,26 @@ class PTZTracker:
         )
 
         try:
+            _now = time.time()
+            _frame_age_ms = (
+                round((_now - self._current_capture_ts) * 1000.0, 1)
+                if self._current_capture_ts > 0 else None
+            )
+            # D: time since previous *issued* move. Captures how long the
+            # camera was free-slewing under the prior velocity, including\n            # tracking_step_stop dispatch slop. 0 means first move.
+            _gap_since_last_move_ms = (
+                round((_now - self._last_move_time) * 1000.0, 1)
+                if self._last_move_time > 0 else None
+            )
+            # Capture-to-capture gap between the frame that drove the last
+            # move and the frame driving this one. This is the *actual*
+            # interval the controller had to react across, independent of
+            # ONVIF dispatch latency.
+            _gap_capture_to_capture_ms = (
+                round((self._current_capture_ts - self._last_move_capture_ts) * 1000.0, 1)
+                if (self._current_capture_ts > 0 and self._last_move_capture_ts > 0)
+                else None
+            )
             self._log_decision('move', {
                 'species': best.species,
                 'track_id': getattr(best, 'track_id', None),
@@ -1445,6 +1534,14 @@ class PTZTracker:
                     'tilt': round(tilt_velocity, 3),
                     'zoom': round(zoom_velocity, 3),
                 },
+                # C: pre-cap velocity + cap-active flag. If raw and capped
+                # diverge, the low-fill cap actively reduced the command;
+                # if equal, the cap was inert.
+                'velocity_raw': {
+                    'pan': round(pan_velocity_raw, 3),
+                    'tilt': round(tilt_velocity_raw, 3),
+                },
+                'cap_active': bool(_capped),
                 'offset': {
                     'x': round(offset_x, 3),
                     'y': round(offset_y, 3),
@@ -1452,6 +1549,15 @@ class PTZTracker:
                 },
                 'fill_pct': round(current_fill * 100, 1),
                 'source': 'target_camera',
+                # A: pixel-space bbox + frame size for direct overlay.
+                'bbox_px': [round(bbox[0], 1), round(bbox[1], 1),
+                            round(bbox[2], 1), round(bbox[3], 1)],
+                'frame_size': [frame_width, frame_height],
+                # B: how stale was the frame at the moment of decision?
+                'frame_age_ms': _frame_age_ms,
+                # D: inter-move timing.
+                'gap_since_last_move_ms': _gap_since_last_move_ms,
+                'gap_capture_to_capture_ms': _gap_capture_to_capture_ms,
             })
             self.onvif_client.ptz_move(
                 self.profile_token,
@@ -1460,6 +1566,7 @@ class PTZTracker:
                 zoom_velocity
             )
             self._last_move_time = time.time()
+            self._last_move_capture_ts = self._current_capture_ts
             # We just issued an active move -- we are no longer 'holding'.
             # Without this, a subsequent return to the deadzone would skip
             # ptz_stop because the debounce flag was still latched True.
@@ -2173,11 +2280,21 @@ class PTZTracker:
                 "[DEADZONE] Target centered - offset=%.3f < threshold=%.3f, stopping PTZ",
                 offset_magnitude, self.min_move_threshold
             )
+            _now = time.time()
+            _frame_age_ms = (
+                round((_now - self._current_capture_ts) * 1000.0, 1)
+                if self._current_capture_ts > 0 else None
+            )
             self._log_decision('deadzone', {
                 'species': best.species,
                 'track_id': getattr(best, 'track_id', None),
                 'offset_magnitude': round(offset_magnitude, 4),
                 'threshold': self.min_move_threshold,
+                # H, B: pixel context + frame staleness for forensics.
+                'bbox_px': [round(bbox[0], 1), round(bbox[1], 1),
+                            round(bbox[2], 1), round(bbox[3], 1)],
+                'frame_size': [frame_width, frame_height],
+                'frame_age_ms': _frame_age_ms,
             })
             if not self._holding_position:
                 try:
@@ -2195,6 +2312,10 @@ class PTZTracker:
 
         pan_velocity = self._velocity_curve(offset_x)
         tilt_velocity = self._velocity_curve(offset_y)
+        # Capture pre-cap velocity (C) so we can see whether the low-fill
+        # cap actually constrained the command vs being inert.
+        pan_velocity_raw = pan_velocity
+        tilt_velocity_raw = tilt_velocity
 
         # Calculate zoom velocity based on current vs target fill
         bbox_width = bbox[2] - bbox[0]
@@ -2250,12 +2371,35 @@ class PTZTracker:
                     'tilt': round(tilt_velocity, 3),
                     'zoom': round(zoom_velocity, 3),
                 },
+                # C: pre-cap velocity + cap-active flag.
+                'velocity_raw': {
+                    'pan': round(pan_velocity_raw, 3),
+                    'tilt': round(tilt_velocity_raw, 3),
+                },
+                'cap_active': bool(_capped),
                 'offset': {
                     'x': round(offset_x, 3),
                     'y': round(offset_y, 3),
                     'magnitude': round(offset_magnitude, 3),
                 },
                 'fill_pct': round(current_fill * 100, 1),
+                # A, B, D: pixel bbox + frame staleness + inter-move gaps.
+                'bbox_px': [round(bbox[0], 1), round(bbox[1], 1),
+                            round(bbox[2], 1), round(bbox[3], 1)],
+                'frame_size': [frame_width, frame_height],
+                'frame_age_ms': (
+                    round((time.time() - self._current_capture_ts) * 1000.0, 1)
+                    if self._current_capture_ts > 0 else None
+                ),
+                'gap_since_last_move_ms': (
+                    round((time.time() - self._last_move_time) * 1000.0, 1)
+                    if self._last_move_time > 0 else None
+                ),
+                'gap_capture_to_capture_ms': (
+                    round((self._current_capture_ts - self._last_move_capture_ts) * 1000.0, 1)
+                    if (self._current_capture_ts > 0 and self._last_move_capture_ts > 0)
+                    else None
+                ),
             })
             self.onvif_client.ptz_move(
                 self.profile_token,
@@ -2264,6 +2408,7 @@ class PTZTracker:
                 zoom_velocity
             )
             self._last_move_time = time.time()
+            self._last_move_capture_ts = self._current_capture_ts
             self._holding_position = False
             # Bound the slew distance per detection by scheduling an auto-Stop.
             self._arm_tracking_step(self._last_move_time)

@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+import functools
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -1040,15 +1041,26 @@ class StreamWorker:
                 # Log which cameras are contributing
                 if camera_detections:
                     contrib = ', '.join(f"{k}:{len(v[0])}" for k, v in camera_detections.items())
+                    # Pick the freshest contributing capture timestamp so the
+                    # tracker can compute frame_age_ms relative to *that*
+                    # frame. Falls back to current ts (this worker's frame)
+                    # if no contributor has a more recent detection.
+                    _src_capture_ts = ts
+                    for _w in self._ptz_detection_sources.values():
+                        if _w.latest_detection_ts and _w.latest_detection_ts > _src_capture_ts:
+                            _src_capture_ts = _w.latest_detection_ts
                     LOGGER.debug("Multi-cam PTZ update from %s: %s", self.camera.id, contrib)
                     try:
                         await asyncio.wait_for(
                             loop.run_in_executor(
                                 None,
-                                self.ptz_tracker.update_multi_camera,
-                                camera_detections,
-                                self._ptz_source_camera_id,
-                                self._ptz_target_camera_id,
+                                functools.partial(
+                                    self.ptz_tracker.update_multi_camera,
+                                    camera_detections,
+                                    self._ptz_source_camera_id,
+                                    self._ptz_target_camera_id,
+                                    frame_capture_ts=_src_capture_ts,
+                                ),
                             ),
                             timeout=3.0,
                         )
@@ -1063,8 +1075,11 @@ class StreamWorker:
                         await asyncio.wait_for(
                             loop.run_in_executor(
                                 None,
-                                self.ptz_tracker.update,
-                                [], frame_w, frame_h,
+                                functools.partial(
+                                    self.ptz_tracker.update,
+                                    [], frame_w, frame_h,
+                                    frame_capture_ts=ts,
+                                ),
                             ),
                             timeout=3.0,
                         )
@@ -1079,8 +1094,11 @@ class StreamWorker:
                     await asyncio.wait_for(
                         loop.run_in_executor(
                             None,
-                            self.ptz_tracker.update,
-                            filtered, frame_w, frame_h,
+                            functools.partial(
+                                self.ptz_tracker.update,
+                                filtered, frame_w, frame_h,
+                                frame_capture_ts=ts,
+                            ),
                         ),
                         timeout=3.0,
                     )

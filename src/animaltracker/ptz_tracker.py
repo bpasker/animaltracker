@@ -448,7 +448,8 @@ class PTZTracker:
         # Only Stop if we believe the camera is still slewing (i.e. we
         # haven't already issued a Stop via deadzone / hold path).
         if self._holding_position:
-            return        try:
+            return
+        try:
             self.onvif_client.ptz_stop(self.profile_token)
         except Exception as e:
             PTZ_LOGGER.warning("[STEP_STOP_FAIL] %s", e)

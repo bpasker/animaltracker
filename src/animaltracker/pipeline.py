@@ -893,14 +893,48 @@ class StreamWorker:
                 await self._maybe_close_event(ts)
                 return
 
-        detections = await loop.run_in_executor(
-            None,
-            lambda: self.detector.infer(
-                frame,
-                conf_threshold=self.camera.thresholds.confidence,
-                generic_confidence=self.camera.thresholds.generic_confidence
+        # --- Inference (with optional pre-inference downscale) ---
+        # If the camera config sets inference_max_width and the captured
+        # frame is wider, run inference on a CPU-resized copy and scale the
+        # returned pixel bboxes back to the original frame's coordinate
+        # space. The original `frame` is left untouched so trackers, the
+        # clip buffer, the PTZ tracker, and the live snapshot all continue
+        # to operate at the camera's native resolution.
+        max_w = int(getattr(self.camera, "inference_max_width", 0) or 0)
+        h_orig, w_orig = frame.shape[:2]
+        if max_w > 0 and w_orig > max_w:
+            scale = max_w / float(w_orig)
+            new_w = max_w
+            new_h = max(1, int(round(h_orig * scale)))
+            small = await loop.run_in_executor(
+                None,
+                lambda: cv2.resize(
+                    frame, (new_w, new_h), interpolation=cv2.INTER_AREA
+                ),
             )
-        )
+            small_dets = await loop.run_in_executor(
+                None,
+                lambda: self.detector.infer(
+                    small,
+                    conf_threshold=self.camera.thresholds.confidence,
+                    generic_confidence=self.camera.thresholds.generic_confidence,
+                ),
+            )
+            inv = 1.0 / scale
+            detections = []
+            for d in small_dets:
+                x1, y1, x2, y2 = d.bbox
+                d.bbox = [x1 * inv, y1 * inv, x2 * inv, y2 * inv]
+                detections.append(d)
+        else:
+            detections = await loop.run_in_executor(
+                None,
+                lambda: self.detector.infer(
+                    frame,
+                    conf_threshold=self.camera.thresholds.confidence,
+                    generic_confidence=self.camera.thresholds.generic_confidence,
+                ),
+            )
 
         # --- Latency / backpressure telemetry ---
         # frame_age = wall-clock seconds between when the frame was captured

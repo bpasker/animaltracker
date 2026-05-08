@@ -178,6 +178,19 @@ class CameraConfig(BaseModel):
     include_species: List[str] = Field(default_factory=list)
     exclude_species: List[str] = Field(default_factory=list)
     notification: CameraNotificationSettings = CameraNotificationSettings()
+    inference_max_width: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "If > 0 and the captured frame is wider than this, downscale the "
+            "frame (preserving aspect ratio) before realtime inference. "
+            "Returned bboxes are scaled back to the original frame size, so "
+            "trackers, clips, and PTZ math are unaffected. Use to reduce CPU "
+            "prep cost on a high-resolution stream. Note: most of the GPU "
+            "inference cost is fixed (the model letterboxes internally), so "
+            "savings are modest. 0 = disabled."
+        ),
+    )
 
     @validator("id")
     def _validate_id(cls, value: str) -> str:

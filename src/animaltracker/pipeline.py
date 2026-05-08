@@ -391,6 +391,22 @@ class StreamWorker:
         self.latest_detection_ts: float = 0.0  # Timestamp of latest detections
         self.latest_frame_size: tuple = (0, 0)  # (width, height) of latest frame
 
+        # --- Realtime latency / backpressure telemetry ---
+        # Updated by _process_frame and the busy-skip branch of run(); sampled
+        # by _maybe_log_perf_stats() every ``_perf_log_interval`` seconds and
+        # exposed on the /api/cameras endpoint via get_perf_stats().
+        self.perf_infer_count: int = 0           # successful inferences in window
+        self.perf_infer_time_total: float = 0.0  # cumulative seconds
+        self.perf_infer_time_max: float = 0.0    # worst-case seconds in window
+        self.perf_frame_age_total: float = 0.0   # cumulative now-frame_ts at inference end
+        self.perf_frame_age_max: float = 0.0
+        self.perf_frames_read: int = 0           # frames pulled off cap.read() in window
+        self.perf_frames_dropped_busy: int = 0   # frames skipped because previous inference still running
+        self._perf_window_start: float = time.time()
+        self._perf_log_interval: float = 10.0    # seconds
+        # Last published per-window snapshot (for /api/cameras).
+        self.perf_last_snapshot: Dict[str, float] = {}
+
         # Initialize ONVIF client if configured (with timeout to prevent blocking)
         self.onvif_client: Optional[OnvifClient] = None
         self.onvif_profile_token: Optional[str] = None
@@ -619,6 +635,8 @@ class StreamWorker:
                     
                     self.latest_frame = frame
                     self.latest_frame_ts = time.time()
+                    self.perf_frames_read += 1
+                    self._maybe_log_perf_stats()
                     
                     if not self._snapshot_taken:
                         # Offload snapshot saving to thread
@@ -685,6 +703,7 @@ class StreamWorker:
                                 inference_task = None
                             else:
                                 # Still running - drop this frame for inference (but it's still buffered)
+                                self.perf_frames_dropped_busy += 1
                                 continue
                         
                         # Start new inference task
@@ -701,6 +720,72 @@ class StreamWorker:
             
             if not stop_event.is_set():
                 await asyncio.sleep(1)  # Brief pause before reconnect
+
+    def _maybe_log_perf_stats(self) -> None:
+        """Periodically log realtime processing latency / backpressure stats.
+
+        Called from the read loop. Computes a rolling window summary of:
+            - capture_fps: frames pulled off cap.read() per second
+            - inferred_fps: frames that completed detection per second
+            - drop_pct: fraction of capture frames skipped because the
+              previous inference was still running (key backpressure signal;
+              a sustained high value means the detector is slower than the
+              stream and the PTZ tracker is reacting to stale frames)
+            - frame_age_avg/max: seconds between capture and detection
+              completion. Tracking quality degrades sharply once this gets
+              above the inverse of detection cadence.
+
+        Also stores the snapshot on ``self.perf_last_snapshot`` so the web
+        UI / API can surface it without parsing logs.
+        """
+        now = time.time()
+        elapsed = now - self._perf_window_start
+        if elapsed < self._perf_log_interval:
+            return
+        infer_count = self.perf_infer_count
+        capture_count = self.perf_frames_read
+        dropped = self.perf_frames_dropped_busy
+        capture_fps = capture_count / elapsed if elapsed > 0 else 0.0
+        infer_fps = infer_count / elapsed if elapsed > 0 else 0.0
+        # drop_pct measured against capture frames that were *eligible* for
+        # inference (i.e. not skipped by the user-configured frame_skip).
+        eligible = infer_count + dropped
+        drop_pct = (dropped / eligible * 100.0) if eligible > 0 else 0.0
+        frame_age_avg = (
+            self.perf_frame_age_total / infer_count if infer_count > 0 else 0.0
+        )
+        snapshot = {
+            'window_sec': round(elapsed, 1),
+            'capture_fps': round(capture_fps, 2),
+            'inferred_fps': round(infer_fps, 2),
+            'frames_dropped_busy': dropped,
+            'drop_pct': round(drop_pct, 1),
+            'frame_age_avg_ms': round(frame_age_avg * 1000.0, 1),
+            'frame_age_max_ms': round(self.perf_frame_age_max * 1000.0, 1),
+        }
+        self.perf_last_snapshot = snapshot
+        # Always log so it shows up alongside detection logs; level INFO
+        # because users explicitly want to know if processing is keeping up.
+        LOGGER.info(
+            "[PERF] %s: capture=%.1ffps infer=%.1ffps drop=%d (%.1f%%) "
+            "frame_age avg=%.0fms max=%.0fms",
+            self.camera.id,
+            capture_fps, infer_fps, dropped, drop_pct,
+            frame_age_avg * 1000.0, self.perf_frame_age_max * 1000.0,
+        )
+        # Reset window
+        self._perf_window_start = now
+        self.perf_infer_count = 0
+        self.perf_infer_time_total = 0.0
+        self.perf_infer_time_max = 0.0
+        self.perf_frame_age_total = 0.0
+        self.perf_frame_age_max = 0.0
+        self.perf_frames_read = 0
+        self.perf_frames_dropped_busy = 0
+
+    def get_perf_stats(self) -> Dict[str, float]:
+        """Return the most recent perf snapshot (empty dict before first window)."""
+        return dict(self.perf_last_snapshot)
 
     @staticmethod
     def _compute_blur_score(frame: np.ndarray) -> float:
@@ -788,6 +873,21 @@ class StreamWorker:
                 generic_confidence=self.camera.thresholds.generic_confidence
             )
         )
+
+        # --- Latency / backpressure telemetry ---
+        # frame_age = wall-clock seconds between when the frame was captured
+        # off the RTSP socket and when inference for it finished. Anything
+        # consistently > ~0.3s here means the PTZ tracker is acting on a
+        # stale view of the world (camera has already moved past where the
+        # detection says the animal was), which manifests as overshoot.
+        frame_age = max(0.0, time.time() - ts)
+        self.perf_infer_count += 1
+        self.perf_infer_time_total += frame_age
+        if frame_age > self.perf_infer_time_max:
+            self.perf_infer_time_max = frame_age
+        self.perf_frame_age_total += frame_age
+        if frame_age > self.perf_frame_age_max:
+            self.perf_frame_age_max = frame_age
 
         # Log raw detections from MegaDetector (before species filtering)
         if detections:

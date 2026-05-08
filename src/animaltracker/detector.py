@@ -218,10 +218,56 @@ class MegaDetectorBackend(BaseDetector):
             "MegaDetector loaded on %s (in-memory inference path)",
             getattr(self._detector, "device", "?"),
         )
-    
+
+        # Per-stage timing accumulators (seconds). Reset by pop_perf_stats().
+        # _stage_count is the number of infer() calls covered by the totals.
+        # We split the per-call cost into three buckets so the [PERF] log can
+        # tell us whether time is being spent in CPU pre-processing
+        # (BGR->RGB + PIL + letterbox), the GPU forward + NMS, or our own
+        # bbox post-processing loop.
+        self._stage_t_prep: float = 0.0
+        self._stage_t_infer: float = 0.0
+        self._stage_t_post: float = 0.0
+        self._stage_t_prep_max: float = 0.0
+        self._stage_t_infer_max: float = 0.0
+        self._stage_t_post_max: float = 0.0
+        self._stage_count: int = 0
+
     @property
     def backend_name(self) -> str:
         return "megadetector"
+
+    def pop_perf_stats(self) -> Dict[str, float]:
+        """Return per-stage timing averages for the calls since last pop, then reset.
+
+        Returns a dict with millisecond averages and maxima for each stage:
+            prep_avg_ms, prep_max_ms,
+            infer_avg_ms, infer_max_ms,
+            post_avg_ms, post_max_ms,
+            count
+
+        Empty dict if no calls have been made since the last reset.
+        """
+        n = self._stage_count
+        if n == 0:
+            return {}
+        stats = {
+            'count': n,
+            'prep_avg_ms': self._stage_t_prep / n * 1000.0,
+            'prep_max_ms': self._stage_t_prep_max * 1000.0,
+            'infer_avg_ms': self._stage_t_infer / n * 1000.0,
+            'infer_max_ms': self._stage_t_infer_max * 1000.0,
+            'post_avg_ms': self._stage_t_post / n * 1000.0,
+            'post_max_ms': self._stage_t_post_max * 1000.0,
+        }
+        self._stage_t_prep = 0.0
+        self._stage_t_infer = 0.0
+        self._stage_t_post = 0.0
+        self._stage_t_prep_max = 0.0
+        self._stage_t_infer_max = 0.0
+        self._stage_t_post_max = 0.0
+        self._stage_count = 0
+        return stats
 
     def infer(
         self, 
@@ -248,6 +294,10 @@ class MegaDetectorBackend(BaseDetector):
             List of Detection objects with species="animal" and bounding boxes,
             or tuple (detections, []) if return_filtered=True
         """
+        import time as _time
+
+        # --- Stage 1: prep (BGR->RGB view, PIL wrap, letterbox to 1280) ---
+        _t0 = _time.perf_counter()
         # OpenCV gives us BGR; PIL/SpeciesNet expect RGB.
         if frame.ndim == 3 and frame.shape[2] == 3:
             rgb = frame[:, :, ::-1]
@@ -255,15 +305,30 @@ class MegaDetectorBackend(BaseDetector):
             rgb = frame
         pil_img = self._PILImage.fromarray(rgb)
         preprocessed = self._detector.preprocess(pil_img)
+        _t1 = _time.perf_counter()
 
+        # --- Stage 2: infer (GPU forward + NMS + bbox scaling inside SN) ---
         # filepath is used only for reporting in the result dict; we don't
-        # need it because we never look at it.
+        # need it because we never look at it. predict() reads the result
+        # tensor on CPU (NMS, .item() for conf), which implicitly
+        # synchronises CUDA so the elapsed time here is real wall clock.
         pred = self._detector.predict("inmem", preprocessed)
+        _t2 = _time.perf_counter()
 
         detections: List[Detection] = []
         h, w = frame.shape[:2]
 
         if pred is None or pred.get("failures"):
+            # Still record the timing for the two stages we did run.
+            t_prep = _t1 - _t0
+            t_infer = _t2 - _t1
+            self._stage_t_prep += t_prep
+            self._stage_t_infer += t_infer
+            if t_prep > self._stage_t_prep_max:
+                self._stage_t_prep_max = t_prep
+            if t_infer > self._stage_t_infer_max:
+                self._stage_t_infer_max = t_infer
+            self._stage_count += 1
             if return_filtered:
                 return detections, []
             return detections
@@ -305,6 +370,22 @@ class MegaDetectorBackend(BaseDetector):
                 confidence=conf,
                 bbox=bbox,
             ))
+
+        # --- Record per-stage timings for this call ---
+        _t3 = _time.perf_counter()
+        t_prep = _t1 - _t0
+        t_infer = _t2 - _t1
+        t_post = _t3 - _t2
+        self._stage_t_prep += t_prep
+        self._stage_t_infer += t_infer
+        self._stage_t_post += t_post
+        if t_prep > self._stage_t_prep_max:
+            self._stage_t_prep_max = t_prep
+        if t_infer > self._stage_t_infer_max:
+            self._stage_t_infer_max = t_infer
+        if t_post > self._stage_t_post_max:
+            self._stage_t_post_max = t_post
+        self._stage_count += 1
 
         if return_filtered:
             return detections, []  # MegaDetector doesn't filter species

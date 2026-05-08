@@ -764,14 +764,41 @@ class StreamWorker:
             'frame_age_max_ms': round(self.perf_frame_age_max * 1000.0, 1),
         }
         self.perf_last_snapshot = snapshot
+        # Pull per-stage timing from the realtime detector if it exposes
+        # the optional pop_perf_stats() hook (added on MegaDetectorBackend
+        # so we can see whether wall-clock per call is dominated by CPU
+        # preprocess, GPU forward, or our own bbox post-processing).
+        stage_str = ""
+        try:
+            stage_stats = self.detector.pop_perf_stats()  # type: ignore[attr-defined]
+        except AttributeError:
+            stage_stats = None
+        if stage_stats:
+            snapshot.update({
+                'stage_prep_avg_ms': round(stage_stats['prep_avg_ms'], 1),
+                'stage_prep_max_ms': round(stage_stats['prep_max_ms'], 1),
+                'stage_infer_avg_ms': round(stage_stats['infer_avg_ms'], 1),
+                'stage_infer_max_ms': round(stage_stats['infer_max_ms'], 1),
+                'stage_post_avg_ms': round(stage_stats['post_avg_ms'], 1),
+                'stage_post_max_ms': round(stage_stats['post_max_ms'], 1),
+            })
+            stage_str = (
+                " | stages avg(max) ms: prep=%.0f(%.0f) infer=%.0f(%.0f) post=%.0f(%.0f)"
+                % (
+                    stage_stats['prep_avg_ms'], stage_stats['prep_max_ms'],
+                    stage_stats['infer_avg_ms'], stage_stats['infer_max_ms'],
+                    stage_stats['post_avg_ms'], stage_stats['post_max_ms'],
+                )
+            )
         # Always log so it shows up alongside detection logs; level INFO
         # because users explicitly want to know if processing is keeping up.
         LOGGER.info(
             "[PERF] %s: capture=%.1ffps infer=%.1ffps drop=%d (%.1f%%) "
-            "frame_age avg=%.0fms max=%.0fms",
+            "frame_age avg=%.0fms max=%.0fms%s",
             self.camera.id,
             capture_fps, infer_fps, dropped, drop_pct,
             frame_age_avg * 1000.0, self.perf_frame_age_max * 1000.0,
+            stage_str,
         )
         # Reset window
         self._perf_window_start = now

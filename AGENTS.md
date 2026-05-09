@@ -37,6 +37,11 @@ revert any `*.bak` files and reconcile to git before continuing.
 
 - A single `animaltracker.service` unit runs both cameras and the web UI.
   Any code change in `src/`, `config/`, or `systemd/` requires restarting it.
+- For PTZ tracking incidents (overshoot, missed centering, stale detections,
+  cam1/cam2 handoff problems, or requests to review a clip), use the
+  `ptz-incident-review` skill and the `scripts/ptz_review.py` tool to
+  correlate the video, sidecar `.log.json`, PTZ decisions, and journal logs
+  before changing controller logic.
 - For config-only edits to `/opt/speciesnet/animaltracker/config/cameras.yml`
   done directly on the remote (e.g. via the Web UI), commit the result back to
   git on the remote and push, so local stays in sync.

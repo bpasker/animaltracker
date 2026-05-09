@@ -20,6 +20,7 @@ build/
 # Runtime outputs
 logs/
 clips/
+tmp/
 *.log
 
 # Sensitive config overrides

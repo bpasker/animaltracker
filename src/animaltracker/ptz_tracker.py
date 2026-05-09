@@ -189,16 +189,11 @@ class PTZTracker:
     # fill bypassed the cap, got vel ~0.6 on recovery, and the camera flew
     # past the target between detection ticks.
     low_fill_threshold: float = 0.30        # bbox max-dim / frame-dim fraction
-    # Lowered again (was 0.22, originally 0.35) because real-world Reolink
-    # ContinuousMove + Stop has ~200-400 ms of mechanical lag, so the
-    # *effective* slew per step exceeds the commanded duration. Capping the
-    # commanded velocity lower keeps the actual displacement per detection
-    # tick small enough that we don't fly past slow / distant targets when
-    # cam2 detection cadence drops to ~1 Hz.
-    # Raised (was 0.15) because at typical cam2 detection cadence the
-    # commanded slew per step was ~0.06 pan units, far too small to keep
-    # up with a walking raccoon/coyote that crossed the frame in <2 s.
-    low_fill_velocity_cap: float = 0.30     # cap on |pan|/|tilt| when below threshold
+    # Keep low-fill pulses conservative. The timer-backed step stop below
+    # makes each pulse reliable; if we need more catch-up speed, tune this
+    # in config instead of letting a single stale detection authorize a long
+    # slew.
+    low_fill_velocity_cap: float = 0.15     # cap on |pan|/|tilt| when below threshold
     # Offset magnitude at which the low-fill cap is allowed to reach its
     # full value. Below this, the per-axis cap is scaled proportionally to
     # |offset| so we taper toward zero velocity as we approach center,
@@ -245,10 +240,9 @@ class PTZTracker:
     # or the no-detections path expired, which routinely overshot. By
     # auto-stopping after a short step, each detection only authorises a
     # bounded amount of slew, then the camera waits for the next detection.
-    # Raised (was 0.20) so each authorised step covers more ground; combined
-    # with the higher low_fill_velocity_cap this lets cam2 actually catch
-    # subjects walking across its zoomed-in FOV between sparse detections.
-    tracking_step_duration: float = 0.35
+    # A timer enforces this duration even if the detector does not call back
+    # into the tracker until much later.
+    tracking_step_duration: float = 0.20
 
     # When the target camera (cam2) has been driving tracking, suppress
     # cam1-driven repositioning for this many seconds after the last cam2
@@ -337,6 +331,7 @@ class PTZTracker:
     # Wall-clock time at which the current tracking ContinuousMove should
     # be auto-stopped (0 = no pending stop). See ``tracking_step_duration``.
     _tracking_step_stop_at: float = field(default=0.0, init=False)
+    _tracking_step_timer: Optional[threading.Timer] = field(default=None, init=False)
 
     # Diagnostic context for decision log enrichment.
     # _current_capture_ts: capture_ts of the frame whose detections we are
@@ -354,6 +349,8 @@ class PTZTracker:
     _current_capture_ts: float = field(default=0.0, init=False)
     _last_move_capture_ts: float = field(default=0.0, init=False)
     _tracking_step_armed_at: float = field(default=0.0, init=False)
+    _last_move_source: str = field(default="", init=False)
+    _last_move_bbox_signature: Optional[Tuple[int, int, int, int]] = field(default=None, init=False)
 
     # Track persistence: Once we lock onto a target, keep tracking it
     # to prevent jitter from switching between detections every frame.
@@ -460,12 +457,68 @@ class PTZTracker:
         (especially with sparse SpeciesNet cadence on small targets) and
         the camera flies past the animal.
         """
-        if self.tracking_step_duration > 0:
-            self._tracking_step_stop_at = now + self.tracking_step_duration
-            self._tracking_step_armed_at = now
-        else:
+        if self._tracking_step_timer is not None:
+            self._tracking_step_timer.cancel()
+            self._tracking_step_timer = None
+
+        if self.tracking_step_duration <= 0:
             self._tracking_step_stop_at = 0.0
             self._tracking_step_armed_at = 0.0
+            return
+
+        scheduled_at = now + self.tracking_step_duration
+        self._tracking_step_stop_at = scheduled_at
+        self._tracking_step_armed_at = now
+
+        timer = threading.Timer(
+            self.tracking_step_duration,
+            self._tracking_step_timer_fire,
+            args=(scheduled_at, now),
+        )
+        timer.daemon = True
+        self._tracking_step_timer = timer
+        timer.start()
+
+    def _tracking_step_timer_fire(self, scheduled_at: float, armed_at: float) -> None:
+        """Stop an in-flight tracking step from a timer thread.
+
+        The worker loop may not call back into the tracker for several hundred
+        milliseconds when realtime inference is sparse. A timer keeps a short
+        tracking pulse short instead of letting it free-run until the next
+        detection tick.
+        """
+        with self._lock:
+            if self._tracking_step_stop_at != scheduled_at:
+                return
+            self._stop_tracking_step_locked(time.time(), scheduled_at, armed_at)
+
+    def _stop_tracking_step_locked(self, now: float, scheduled_at: float, armed_at: float) -> None:
+        """Stop the current tracking step and log timing diagnostics.
+
+        Caller must hold ``self._lock``.
+        """
+        self._tracking_step_stop_at = 0.0
+        self._tracking_step_armed_at = 0.0
+        self._tracking_step_timer = None
+        if self._holding_position:
+            return
+        try:
+            self.onvif_client.ptz_stop(self.profile_token)
+        except Exception as e:
+            PTZ_LOGGER.warning("[STEP_STOP_FAIL] %s", e)
+            return
+        self._holding_position = True
+        late_ms = max(0.0, (now - scheduled_at)) * 1000.0
+        slew_ms = max(0.0, (now - armed_at)) * 1000.0 if armed_at > 0 else 0.0
+        PTZ_LOGGER.debug(
+            "[TRACKING_STEP_STOP] auto-stopped after %.2fs step (late %.0fms)",
+            self.tracking_step_duration, late_ms,
+        )
+        self._log_decision('tracking_step_stop', {
+            'step_duration_s': round(self.tracking_step_duration, 3),
+            'actual_slew_ms': round(slew_ms, 1),
+            'dispatch_late_ms': round(late_ms, 1),
+        })
 
     def _check_tracking_step_expiry(self, now: float) -> None:
         """If a previously-armed tracking step has elapsed, Stop the PTZ.
@@ -477,36 +530,36 @@ class PTZTracker:
             return
         if now < self._tracking_step_stop_at:
             return
-        scheduled_at = self._tracking_step_stop_at
-        armed_at = self._tracking_step_armed_at
-        self._tracking_step_stop_at = 0.0
-        self._tracking_step_armed_at = 0.0
-        # Only Stop if we believe the camera is still slewing (i.e. we
-        # haven't already issued a Stop via deadzone / hold path).
-        if self._holding_position:
-            return
-        try:
-            self.onvif_client.ptz_stop(self.profile_token)
-        except Exception as e:
-            PTZ_LOGGER.warning("[STEP_STOP_FAIL] %s", e)
-            return
-        self._holding_position = True
-        # How late were we vs the scheduled stop time? Latency here directly
-        # measures the worker tick rate -- a high value means the camera
-        # over-slewed because we couldn't issue Stop on time.
-        late_ms = max(0.0, (now - scheduled_at)) * 1000.0
-        # Total wall-clock that the PTZ was actually slewing under the last
-        # ContinuousMove velocity, including this late dispatch.
-        slew_ms = max(0.0, (now - armed_at)) * 1000.0 if armed_at > 0 else 0.0
-        PTZ_LOGGER.debug(
-            "[TRACKING_STEP_STOP] auto-stopped after %.2fs step (late %.0fms)",
-            self.tracking_step_duration, late_ms,
+        self._stop_tracking_step_locked(now, self._tracking_step_stop_at, self._tracking_step_armed_at)
+
+    @staticmethod
+    def _bbox_signature(bbox: List[float]) -> Tuple[int, int, int, int]:
+        return tuple(int(round(v)) for v in bbox)  # type: ignore[return-value]
+
+    def _is_duplicate_move_frame_locked(self, bbox: List[float], source: str) -> bool:
+        """Return True when this move is for the exact frame already commanded.
+
+        Multi-camera co-drivers can both tick the shared tracker. If they read
+        the same published cam2 detection, issuing a second ContinuousMove just
+        refreshes the velocity and extends the slew for stale evidence.
+        """
+        if self._current_capture_ts <= 0 or self._last_move_capture_ts <= 0:
+            return False
+        if abs(self._current_capture_ts - self._last_move_capture_ts) > 1e-3:
+            return False
+        signature = self._bbox_signature(bbox)
+        if source != self._last_move_source or signature != self._last_move_bbox_signature:
+            return False
+        PTZ_LOGGER.info(
+            "[DUPLICATE_FRAME_SKIP] Skipping duplicate move for source=%s capture_ts=%.3f bbox=%s",
+            source, self._current_capture_ts, signature,
         )
-        self._log_decision('tracking_step_stop', {
-            'step_duration_s': round(self.tracking_step_duration, 3),
-            'actual_slew_ms': round(slew_ms, 1),
-            'dispatch_late_ms': round(late_ms, 1),
+        self._log_decision('duplicate_frame_skip', {
+            'source': source,
+            'capture_ts': round(self._current_capture_ts, 3),
+            'bbox_px': list(signature),
         })
+        return True
 
     @staticmethod
     def _velocity_curve(offset: float) -> float:
@@ -1523,6 +1576,10 @@ class PTZTracker:
         else:
             zoom_velocity = 0.0
 
+        move_source = source_camera or 'target_camera'
+        if self._is_duplicate_move_frame_locked(bbox, move_source):
+            return False
+
         PTZ_LOGGER.info(
             "[MOVE_TARGET] %s: vel=(pan=%.2f, tilt=%.2f, zoom=%.2f) | "
             "offset=(%.1f%%, %.1f%%) | fill=%.0f%% (target=%.0f%%)",
@@ -1594,6 +1651,8 @@ class PTZTracker:
             )
             self._last_move_time = time.time()
             self._last_move_capture_ts = self._current_capture_ts
+            self._last_move_source = move_source
+            self._last_move_bbox_signature = self._bbox_signature(bbox)
             # We just issued an active move -- we are no longer 'holding'.
             # Without this, a subsequent return to the deadzone would skip
             # ptz_stop because the debounce flag was still latched True.
@@ -2368,6 +2427,10 @@ class PTZTracker:
                 zoom_velocity = 0.0
         else:
             zoom_velocity = 0.0
+
+        move_source = source_camera or 'source_camera'
+        if self._is_duplicate_move_frame_locked(bbox, move_source):
+            return False
         
         LOGGER.debug(
             "PTZ tracking %s: offset=(%.2f, %.2f) mag=%.2f, vel=(%.2f, %.2f, %.2f), fill=%.1f%%",
@@ -2436,6 +2499,8 @@ class PTZTracker:
             )
             self._last_move_time = time.time()
             self._last_move_capture_ts = self._current_capture_ts
+            self._last_move_source = move_source
+            self._last_move_bbox_signature = self._bbox_signature(bbox)
             self._holding_position = False
             # Bound the slew distance per detection by scheduling an auto-Stop.
             self._arm_tracking_step(self._last_move_time)
@@ -2547,6 +2612,10 @@ def create_ptz_tracker(
         patrol_speed=config.get('patrol_speed', 0.15),
         patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
         move_min_duration=config.get('move_min_duration', 0.6),
+        tracking_step_duration=config.get('tracking_step_duration', 0.2),
+        low_fill_threshold=config.get('low_fill_threshold', 0.30),
+        low_fill_velocity_cap=config.get('low_fill_velocity_cap', 0.15),
+        low_fill_cap_full_offset=config.get('low_fill_cap_full_offset', 0.40),
         cam1_fallback_delay=config.get('cam1_fallback_delay', 3.0),
         investigate_enabled=config.get('investigate_enabled', False),
         investigate_min_area=config.get('investigate_min_area', 0.0005),

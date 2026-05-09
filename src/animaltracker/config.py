@@ -152,6 +152,10 @@ class PTZTrackingSettings(BaseModel):
     patrol_dwell_time: float = Field(default=10.0, ge=2.0, le=120.0, description="Seconds to stay at each preset position")
     # Tracking-stability tunables
     move_min_duration: float = Field(default=0.6, ge=0.0, le=5.0, description="Minimum seconds a tracking ContinuousMove is allowed to run before it can be ptz_stop'd by a no-detection tick")
+    tracking_step_duration: float = Field(default=0.2, ge=0.05, le=2.0, description="Maximum seconds a tracking ContinuousMove pulse may run before an automatic Stop is issued")
+    low_fill_threshold: float = Field(default=0.30, ge=0.01, le=1.0, description="Apply low-fill pan/tilt velocity caps when target max dimension is below this fraction of the frame")
+    low_fill_velocity_cap: float = Field(default=0.15, ge=0.01, le=1.0, description="Maximum pan/tilt velocity for low-fill targets before per-axis offset scaling")
+    low_fill_cap_full_offset: float = Field(default=0.40, ge=0.01, le=1.0, description="Offset magnitude where the low-fill velocity cap reaches its full configured value")
     cam1_fallback_delay: float = Field(default=3.0, ge=0.0, le=30.0, description="Seconds to suppress source-camera (cam1) repositioning after the target camera (cam2) drove tracking. Prevents miscalibrated cam1->cam2 swings on a single dropped cam2 frame")
     # Investigate mode (opt-in): zoom in on small wide-angle candidates
     investigate_enabled: bool = Field(default=False, description="If true, small cam1 detections (below min_detection_area but above investigate_min_area) cause cam2 to slew over and try to confirm with its zoom view")

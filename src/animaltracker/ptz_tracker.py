@@ -187,7 +187,10 @@ class PTZTracker:
     # commanded velocity lower keeps the actual displacement per detection
     # tick small enough that we don't fly past slow / distant targets when
     # cam2 detection cadence drops to ~1 Hz.
-    low_fill_velocity_cap: float = 0.15     # cap on |pan|/|tilt| when below threshold
+    # Raised (was 0.15) because at typical cam2 detection cadence the
+    # commanded slew per step was ~0.06 pan units, far too small to keep
+    # up with a walking raccoon/coyote that crossed the frame in <2 s.
+    low_fill_velocity_cap: float = 0.30     # cap on |pan|/|tilt| when below threshold
     # Offset magnitude at which the low-fill cap is allowed to reach its
     # full value. Below this, the per-axis cap is scaled proportionally to
     # |offset| so we taper toward zero velocity as we approach center,
@@ -234,7 +237,10 @@ class PTZTracker:
     # or the no-detections path expired, which routinely overshot. By
     # auto-stopping after a short step, each detection only authorises a
     # bounded amount of slew, then the camera waits for the next detection.
-    tracking_step_duration: float = 0.20
+    # Raised (was 0.20) so each authorised step covers more ground; combined
+    # with the higher low_fill_velocity_cap this lets cam2 actually catch
+    # subjects walking across its zoomed-in FOV between sparse detections.
+    tracking_step_duration: float = 0.35
 
     # When the target camera (cam2) has been driving tracking, suppress
     # cam1-driven repositioning for this many seconds after the last cam2

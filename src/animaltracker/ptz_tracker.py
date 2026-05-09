@@ -548,16 +548,17 @@ class PTZTracker:
         if abs(self._current_capture_ts - self._last_move_capture_ts) > 1e-3:
             return False
         signature = self._bbox_signature(bbox)
-        if source != self._last_move_source or signature != self._last_move_bbox_signature:
+        if source != self._last_move_source:
             return False
         PTZ_LOGGER.info(
-            "[DUPLICATE_FRAME_SKIP] Skipping duplicate move for source=%s capture_ts=%.3f bbox=%s",
-            source, self._current_capture_ts, signature,
+            "[DUPLICATE_FRAME_SKIP] Skipping duplicate move for source=%s capture_ts=%.3f bbox=%s previous_bbox=%s",
+            source, self._current_capture_ts, signature, self._last_move_bbox_signature,
         )
         self._log_decision('duplicate_frame_skip', {
             'source': source,
             'capture_ts': round(self._current_capture_ts, 3),
             'bbox_px': list(signature),
+            'previous_bbox_px': list(self._last_move_bbox_signature) if self._last_move_bbox_signature else None,
         })
         return True
 

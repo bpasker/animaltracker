@@ -165,6 +165,14 @@ class PTZTracker:
     target_fill_pct: float = 0.6  # Target 60% frame fill
     min_move_threshold: float = 0.05  # Don't move if offset < 5% of range
     min_detection_area: float = 0.005  # Ignore detections smaller than 0.5% of frame (filters leaves/noise)
+    # Reject detections whose bbox covers more than this fraction of the
+    # frame. A real wildlife subject in a zoomed PTZ view does not fill the
+    # whole frame; high-fill bboxes are MegaDetector mis-fires on motion
+    # blur, lens artefacts, or stationary high-contrast features (stone
+    # walls, brick edges). Driving the PTZ on these caused multi-second
+    # full-velocity overshoots once the velocity-cap (which only applies
+    # below low_fill_threshold) was bypassed.
+    max_detection_area: float = 0.70
     # Optimized defaults for real-time tracking with YOLO
     smoothing: float = 0.15  # Lower = faster response (was 0.3)
     update_interval: float = 0.1  # 10 updates/sec for responsive tracking (was 0.2)
@@ -935,16 +943,29 @@ class PTZTracker:
         silently dropped, the lock is released after _lock_miss_limit, and
         tracking gives up exactly when the operator most wants it to hold.
         """
-        if not detections or self.min_detection_area <= 0:
+        if not detections or (self.min_detection_area <= 0 and self.max_detection_area <= 0):
             return detections
 
         frame_area = frame_width * frame_height
         min_area_pixels = self.min_detection_area * frame_area
+        max_area_pixels = self.max_detection_area * frame_area if self.max_detection_area > 0 else None
         filtered: List['Detection'] = []
         for det in detections:
             det_width = det.bbox[2] - det.bbox[0]
             det_height = det.bbox[3] - det.bbox[1]
             det_area = det_width * det_height
+
+            # Reject impossibly-large detections (no exemption -- a real
+            # subject does not fill 70%+ of a zoomed PTZ frame; this is a
+            # MegaDetector misfire on motion blur or a static feature).
+            if max_area_pixels is not None and det_area > max_area_pixels:
+                PTZ_LOGGER.debug(
+                    "[SIZE_FILTER] Rejecting oversized detection: %s area=%.0fpx (%.1f%%) > max=%.1f%%",
+                    det.species, det_area, (det_area/frame_area)*100,
+                    self.max_detection_area*100
+                )
+                continue
+
             if det_area >= min_area_pixels:
                 filtered.append(det)
                 continue

@@ -90,6 +90,10 @@ cameras:
       patrol_return_delay: 2.0    # Quick return to patrol when animal lost
       patrol_enabled: true        # Sweep when no detections
       patrol_speed: 0.08          # Slow patrol for detection
+      # Optional cam1/cam2 visibility-aware recovery. Create this with:
+      # python -m animaltracker.cli --config config/cameras.yml zoom-calibrate -w cam1 -z cam2
+      zoom_fov_calibration_path: config/zoom_fov_calibration.json
+      visibility_recovery_enabled: true
     include_species:
       - deer
       - bear

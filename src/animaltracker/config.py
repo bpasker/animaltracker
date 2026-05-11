@@ -157,6 +157,16 @@ class PTZTrackingSettings(BaseModel):
     low_fill_velocity_cap: float = Field(default=0.15, ge=0.01, le=1.0, description="Maximum pan/tilt velocity for low-fill targets before per-axis offset scaling")
     low_fill_cap_full_offset: float = Field(default=0.40, ge=0.01, le=1.0, description="Offset magnitude where the low-fill velocity cap reaches its full configured value")
     cam1_fallback_delay: float = Field(default=3.0, ge=0.0, le=30.0, description="Seconds to suppress source-camera (cam1) repositioning after the target camera (cam2) drove tracking. Prevents miscalibrated cam1->cam2 swings on a single dropped cam2 frame")
+    # Visibility-aware cam1/cam2 recovery after cam2 loses a target.
+    zoom_fov_calibration_path: Optional[str] = Field(default="config/zoom_fov_calibration.json", description="Optional JSON calibration mapping cam2 zoom FOV into cam1 coordinates. Used to decide whether cam2 should recenter, zoom out, or cautiously zoom in after target loss")
+    visibility_recovery_enabled: bool = Field(default=True, description="Use cam1 plus zoom FOV calibration to recover when cam2 recently had a target but loses it")
+    visibility_recovery_min_overlap: float = Field(default=0.50, ge=0.0, le=1.0, description="Minimum fraction of the cam1 detection that must overlap predicted cam2 FOV to count as visible")
+    visibility_recovery_edge_margin: float = Field(default=0.12, ge=0.0, le=0.5, description="Fraction of predicted cam2 FOV treated as edge risk; edge targets trigger recenter + zoom-out")
+    visibility_recovery_zoom_out_velocity: float = Field(default=-0.25, ge=-1.0, le=0.0, description="Zoom-out velocity used during cam2 lost-target recovery")
+    visibility_recovery_zoom_in_velocity: float = Field(default=0.15, ge=0.0, le=1.0, description="Small zoom-in velocity used only when cam1 says the target is centered in cam2 FOV and cam2 is still wide")
+    visibility_recovery_zoom_in_max_zoom: float = Field(default=0.35, ge=0.0, le=1.0, description="Maximum current cam2 zoom where recovery may choose zoom-in instead of zoom-out")
+    visibility_recovery_zoom_in_fill_threshold: float = Field(default=0.03, ge=0.0, le=0.5, description="Maximum cam1 bbox fill considered tiny enough to justify cautious recovery zoom-in")
+    visibility_recovery_velocity_cap: float = Field(default=0.20, ge=0.01, le=1.0, description="Maximum pan/tilt velocity for calibrated visibility recovery pulses")
     # Investigate mode (opt-in): zoom in on small wide-angle candidates
     investigate_enabled: bool = Field(default=False, description="If true, small cam1 detections (below min_detection_area but above investigate_min_area) cause cam2 to slew over and try to confirm with its zoom view")
     investigate_min_area: float = Field(default=0.0005, ge=0.0, le=0.1, description="Minimum normalized area for a cam1 detection to be treated as an investigate candidate (0.0005 = 0.05% of frame)")

@@ -2,20 +2,52 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from .onvif_client import OnvifClient
     from .detector import Detection
+    from .ptz_calibration import ZoomFOVCalibration
 
 LOGGER = logging.getLogger(__name__)
 
 # Dedicated PTZ decision logger for debugging tracking behavior
 # Enable with: logging.getLogger('ptz.decisions').setLevel(logging.DEBUG)
 PTZ_LOGGER = logging.getLogger('ptz.decisions')
+
+
+def load_zoom_fov_calibration(path: Optional[str]) -> Optional['ZoomFOVCalibration']:
+    """Load an optional cam2-in-cam1 zoom/FOV calibration file."""
+    if not path:
+        return None
+    calibration_path = Path(path).expanduser()
+    if not calibration_path.exists():
+        LOGGER.info("Zoom FOV calibration file not found: %s", calibration_path)
+        return None
+    try:
+        from .ptz_calibration import ZoomFOVCalibration
+        with calibration_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        calibration = ZoomFOVCalibration.from_dict(data)
+    except Exception as exc:
+        LOGGER.warning("Could not load zoom FOV calibration %s: %s", calibration_path, exc)
+        return None
+    if calibration.error:
+        LOGGER.warning(
+            "Zoom FOV calibration %s contains error: %s",
+            calibration_path, calibration.error,
+        )
+        return None
+    LOGGER.info(
+        "Loaded zoom FOV calibration %s with %d points",
+        calibration_path, len(calibration.points),
+    )
+    return calibration
 
 
 @dataclass
@@ -290,6 +322,19 @@ class PTZTracker:
     # Multi-camera tracking: secondary cameras that can contribute detections
     # When the target camera (cam2) detects an object, use those detections for fine tracking
     secondary_cameras: list = field(default_factory=list)  # Camera IDs that can contribute
+
+    # Visibility-aware recovery: when cam2 recently had the target but loses
+    # it, use cam1 plus a calibrated cam2 FOV footprint to decide whether to
+    # hold/zoom, recenter, or zoom out before blindly falling back to cam1.
+    zoom_fov_calibration: Optional['ZoomFOVCalibration'] = None
+    visibility_recovery_enabled: bool = True
+    visibility_recovery_min_overlap: float = 0.50
+    visibility_recovery_edge_margin: float = 0.12
+    visibility_recovery_zoom_out_velocity: float = -0.25
+    visibility_recovery_zoom_in_velocity: float = 0.15
+    visibility_recovery_zoom_in_max_zoom: float = 0.35
+    visibility_recovery_zoom_in_fill_threshold: float = 0.03
+    visibility_recovery_velocity_cap: float = 0.20
 
     # State
     _last_update: float = field(default=0.0, init=False)
@@ -621,6 +666,238 @@ class PTZTracker:
             tilt_velocity = cap_tilt if tilt_velocity > 0 else -cap_tilt
             capped = True
         return pan_velocity, tilt_velocity, capped
+
+    @staticmethod
+    def _bbox_overlap_ratio(
+        bbox_a: Tuple[float, float, float, float],
+        bbox_b: Tuple[float, float, float, float],
+    ) -> float:
+        """Return fraction of bbox_a covered by bbox_b."""
+        ax1, ay1, ax2, ay2 = bbox_a
+        bx1, by1, bx2, by2 = bbox_b
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            return 0.0
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        bbox_area = max((ax2 - ax1) * (ay2 - ay1), 1e-9)
+        return inter_area / bbox_area
+
+    def _get_current_target_ptz_locked(self) -> Optional[Dict[str, float]]:
+        """Read current PTZ position, requiring pan, tilt, and zoom."""
+        try:
+            position = self.onvif_client.ptz_get_position(self.profile_token)
+        except Exception as exc:
+            PTZ_LOGGER.debug("[VIS_RECOVERY_POSITION_FAIL] %s", exc)
+            return None
+        if not position.get('available'):
+            return None
+        pan = position.get('pan')
+        tilt = position.get('tilt')
+        zoom = position.get('zoom')
+        if pan is None or tilt is None or zoom is None:
+            return None
+        return {
+            'pan': float(pan),
+            'tilt': float(tilt),
+            'zoom': max(0.0, min(1.0, float(zoom))),
+        }
+
+    def _predict_current_target_fov_locked(
+        self,
+        ptz_position: Dict[str, float],
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """Predict cam2's current footprint in normalized cam1 coordinates."""
+        if self.zoom_fov_calibration is None:
+            return None
+        base_fov = self.zoom_fov_calibration.get_fov_at_zoom(ptz_position['zoom'])
+        if base_fov is None:
+            return None
+
+        base_width = max(1e-6, base_fov[2] - base_fov[0])
+        base_height = max(1e-6, base_fov[3] - base_fov[1])
+
+        pan_range = max(1e-6, self.calibration.pan_max - self.calibration.pan_min)
+        tilt_range = max(1e-6, self.calibration.tilt_max - self.calibration.tilt_min)
+        center_x = self.calibration.pan_center_x + (
+            ptz_position['pan'] / pan_range
+        ) * self.calibration.pan_scale
+        center_y = self.calibration.tilt_center_y - (
+            ptz_position['tilt'] / tilt_range
+        ) * self.calibration.tilt_scale
+        center_x = max(0.0, min(1.0, center_x))
+        center_y = max(0.0, min(1.0, center_y))
+
+        half_width = base_width / 2.0
+        half_height = base_height / 2.0
+        return (
+            max(0.0, center_x - half_width),
+            max(0.0, center_y - half_height),
+            min(1.0, center_x + half_width),
+            min(1.0, center_y + half_height),
+        )
+
+    def _do_visibility_recovery_from_source(
+        self,
+        detections: List['Detection'],
+        frame_width: int,
+        frame_height: int,
+        source_camera_id: str,
+        target_camera_id: str,
+        time_since_target: float,
+    ) -> Optional[bool]:
+        """Use cam1 plus cam2's calibrated footprint to recover a lost target.
+
+        Returns None when calibration/position data is unavailable and callers
+        should use the legacy source-camera fallback path.
+        """
+        if not self.visibility_recovery_enabled or self.zoom_fov_calibration is None:
+            return None
+        if not detections or frame_width <= 0 or frame_height <= 0:
+            return None
+
+        ptz_position = self._get_current_target_ptz_locked()
+        if ptz_position is None:
+            self._log_decision('visibility_recovery_unavailable', {
+                'reason': 'ptz_position_unavailable',
+                'source_camera': source_camera_id,
+                'target_camera': target_camera_id,
+            })
+            return None
+        fov = self._predict_current_target_fov_locked(ptz_position)
+        if fov is None:
+            self._log_decision('visibility_recovery_unavailable', {
+                'reason': 'fov_unavailable',
+                'source_camera': source_camera_id,
+                'target_camera': target_camera_id,
+                'zoom': round(ptz_position['zoom'], 3),
+            })
+            return None
+
+        best = max(detections, key=lambda detection: detection.confidence)
+        bbox = best.bbox
+        norm_bbox = (
+            max(0.0, min(1.0, bbox[0] / frame_width)),
+            max(0.0, min(1.0, bbox[1] / frame_height)),
+            max(0.0, min(1.0, bbox[2] / frame_width)),
+            max(0.0, min(1.0, bbox[3] / frame_height)),
+        )
+        center_x = (norm_bbox[0] + norm_bbox[2]) / 2.0
+        center_y = (norm_bbox[1] + norm_bbox[3]) / 2.0
+        fov_center_x = (fov[0] + fov[2]) / 2.0
+        fov_center_y = (fov[1] + fov[3]) / 2.0
+        fov_width = max(1e-6, fov[2] - fov[0])
+        fov_height = max(1e-6, fov[3] - fov[1])
+        overlap = self._bbox_overlap_ratio(norm_bbox, fov)
+        source_fill = max(
+            (bbox[2] - bbox[0]) / frame_width,
+            (bbox[3] - bbox[1]) / frame_height,
+        )
+
+        inside = overlap >= self.visibility_recovery_min_overlap
+        margin_x = fov_width * self.visibility_recovery_edge_margin
+        margin_y = fov_height * self.visibility_recovery_edge_margin
+        near_edge = inside and (
+            center_x <= fov[0] + margin_x
+            or center_x >= fov[2] - margin_x
+            or center_y <= fov[1] + margin_y
+            or center_y >= fov[3] - margin_y
+        )
+
+        pan_offset = (center_x - fov_center_x) / max(0.1, self.calibration.pan_scale)
+        tilt_offset = (fov_center_y - center_y) / max(0.1, self.calibration.tilt_scale)
+        pan_velocity = self._velocity_curve(max(-1.0, min(1.0, pan_offset)))
+        tilt_velocity = self._velocity_curve(max(-1.0, min(1.0, tilt_offset)))
+        cap = max(0.01, min(1.0, self.visibility_recovery_velocity_cap))
+        pan_velocity = max(-cap, min(cap, pan_velocity))
+        tilt_velocity = max(-cap, min(cap, tilt_velocity))
+        offset_magnitude = (pan_offset ** 2 + tilt_offset ** 2) ** 0.5
+
+        if inside and not near_edge:
+            if offset_magnitude < self.min_move_threshold:
+                pan_velocity = 0.0
+                tilt_velocity = 0.0
+            if (
+                source_fill <= self.visibility_recovery_zoom_in_fill_threshold
+                and ptz_position['zoom'] <= self.visibility_recovery_zoom_in_max_zoom
+            ):
+                zoom_velocity = max(0.0, min(1.0, self.visibility_recovery_zoom_in_velocity))
+                event = (
+                    'cam2_lost_cam1_inside_fov_zoom_in'
+                    if offset_magnitude < self.min_move_threshold
+                    else 'cam2_lost_cam1_inside_fov_recenter_zoom_in'
+                )
+            else:
+                zoom_velocity = min(0.0, max(-1.0, self.visibility_recovery_zoom_out_velocity))
+                event = (
+                    'cam2_lost_cam1_inside_fov_zoom_out'
+                    if offset_magnitude < self.min_move_threshold
+                    else 'cam2_lost_cam1_inside_fov_recenter_zoom_out'
+                )
+        elif inside:
+            zoom_velocity = min(0.0, max(-1.0, self.visibility_recovery_zoom_out_velocity))
+            event = 'cam2_lost_cam1_edge_recenter_zoom_out'
+        else:
+            zoom_velocity = min(0.0, max(-1.0, self.visibility_recovery_zoom_out_velocity))
+            event = 'cam2_lost_cam1_outside_fov_recenter'
+
+        if self._is_duplicate_move_frame_locked(bbox, f'{source_camera_id}_visibility_recovery'):
+            return False
+
+        details = {
+            'source_camera': source_camera_id,
+            'target_camera': target_camera_id,
+            'species': best.species,
+            'confidence': round(best.confidence, 3),
+            'time_since_target': round(time_since_target, 2),
+            'source_fill_pct': round(source_fill * 100.0, 2),
+            'target_overlap': round(overlap, 3),
+            'near_edge': bool(near_edge),
+            'offset_magnitude': round(offset_magnitude, 3),
+            'current_ptz': {
+                'pan': round(ptz_position['pan'], 3),
+                'tilt': round(ptz_position['tilt'], 3),
+                'zoom': round(ptz_position['zoom'], 3),
+            },
+            'predicted_fov': [round(value, 3) for value in fov],
+            'source_bbox_norm': [round(value, 3) for value in norm_bbox],
+            'velocity': {
+                'pan': round(pan_velocity, 3),
+                'tilt': round(tilt_velocity, 3),
+                'zoom': round(zoom_velocity, 3),
+            },
+        }
+        self._last_tracked_species = best.species
+        self._tracking_lost_logged_at = 0.0
+        PTZ_LOGGER.info(
+            "[VISIBILITY_RECOVERY] %s overlap=%.2f edge=%s fill=%.1f%% "
+            "vel=(%.2f, %.2f, %.2f)",
+            event, overlap, near_edge, source_fill * 100.0,
+            pan_velocity, tilt_velocity, zoom_velocity,
+        )
+        self._log_decision(event, details)
+
+        try:
+            self.onvif_client.ptz_move(
+                self.profile_token, pan_velocity, tilt_velocity, zoom_velocity,
+            )
+            self._last_move_time = time.time()
+            self._last_move_capture_ts = self._current_capture_ts
+            self._last_move_source = f'{source_camera_id}_visibility_recovery'
+            self._last_move_bbox_signature = self._bbox_signature(bbox)
+            self._holding_position = False
+            self._arm_tracking_step(self._last_move_time)
+            return True
+        except Exception as exc:
+            PTZ_LOGGER.error("[VISIBILITY_RECOVERY_ONVIF_ERROR] %s", exc)
+            self._log_decision('error', {
+                'command': 'visibility_recovery_move',
+                'error': str(exc),
+                **details,
+            })
+            return False
 
     def is_settling(self, settle_time: float = 0.5) -> bool:
         """Check if the PTZ camera is still settling after a move.
@@ -1317,14 +1594,32 @@ class PTZTracker:
         elif source_detections and self._track_active:
             # Only source camera (cam1) sees the object - need to reposition PTZ.
             #
-            # IMPORTANT: if the target camera (cam2) was driving tracking
-            # very recently, suppress cam1-driven repositioning for a short
-            # window. Cam2's view is always more accurate for fine tracking
-            # once it has the object framed; falling back to cam1's wide-
-            # frame pixel offset immediately on a single dropped cam2 frame
-            # produces large, miscalibrated slews that throw the bird out
-            # of cam2's FOV (the cam1->cam2 mapping assumes cam2 is at PTZ
-            # 0,0 and stops being valid once cam2 has moved).
+            # If cam2 was driving recently, prefer calibrated visibility
+            # recovery over the legacy source-camera fallback. This lets cam1
+            # tell us whether cam2 should zoom out, recenter, or cautiously
+            # zoom in instead of treating every cam2 miss as the same case.
+            frame_width, frame_height = source_data[1], source_data[2]
+            if (
+                self._last_detection_source == target_camera_id
+                and self._last_detection_time > 0.0
+            ):
+                time_since_target = now - self._last_detection_time
+                visibility_recovery = self._do_visibility_recovery_from_source(
+                    source_detections,
+                    frame_width,
+                    frame_height,
+                    source_camera_id,
+                    target_camera_id,
+                    time_since_target,
+                )
+                if visibility_recovery is not None:
+                    return visibility_recovery
+
+            # IMPORTANT: without a calibrated/current cam2 footprint, if the
+            # target camera was driving tracking very recently, suppress
+            # cam1-driven repositioning for a short window. Cam2's view is
+            # more accurate once it has the object framed, and the legacy
+            # cam1->cam2 mapping is only reliable near the calibration pose.
             if (
                 self._last_detection_source == target_camera_id
                 and self._last_detection_time > 0.0
@@ -1359,8 +1654,6 @@ class PTZTracker:
                         pass
                     self._holding_position = True
                 return False
-
-            frame_width, frame_height = source_data[1], source_data[2]
 
             PTZ_LOGGER.info(
                 "[SOURCE_TRACKING] Only %s sees object - repositioning PTZ",
@@ -2631,6 +2924,17 @@ def create_ptz_tracker(
         patrol_presets=config.get('patrol_presets', []),
         patrol_dwell_time=config.get('patrol_dwell_time', 10.0),
         secondary_cameras=config.get('secondary_cameras', []),
+        zoom_fov_calibration=load_zoom_fov_calibration(
+            config.get('zoom_fov_calibration_path')
+        ),
+        visibility_recovery_enabled=config.get('visibility_recovery_enabled', True),
+        visibility_recovery_min_overlap=config.get('visibility_recovery_min_overlap', 0.50),
+        visibility_recovery_edge_margin=config.get('visibility_recovery_edge_margin', 0.12),
+        visibility_recovery_zoom_out_velocity=config.get('visibility_recovery_zoom_out_velocity', -0.25),
+        visibility_recovery_zoom_in_velocity=config.get('visibility_recovery_zoom_in_velocity', 0.15),
+        visibility_recovery_zoom_in_max_zoom=config.get('visibility_recovery_zoom_in_max_zoom', 0.35),
+        visibility_recovery_zoom_in_fill_threshold=config.get('visibility_recovery_zoom_in_fill_threshold', 0.03),
+        visibility_recovery_velocity_cap=config.get('visibility_recovery_velocity_cap', 0.20),
     )
 
     return tracker

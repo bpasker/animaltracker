@@ -220,7 +220,7 @@ def cmd_zoom_calibrate(args: argparse.Namespace) -> None:
     onvif_client = OnvifClient(zoom_cam.onvif.host, zoom_cam.onvif.port, username, password)
 
     # Find PTZ profile token
-    profile_token = zoom_cam.onvif.ptz_profile
+    profile_token = zoom_cam.onvif.profile
     if not profile_token:
         profiles = onvif_client.get_profiles()
         if profiles:

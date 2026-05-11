@@ -699,6 +699,11 @@ class StreamWorker:
                                 # Process completed inference result
                                 try:
                                     await inference_task
+                                except asyncio.CancelledError:
+                                    LOGGER.debug(
+                                        "Inference task for %s was cancelled during stream reconnect",
+                                        self.camera.id,
+                                    )
                                 except Exception as e:
                                     LOGGER.error("Inference error for %s: %s", self.camera.id, e)
                                 inference_task = None
@@ -715,6 +720,7 @@ class StreamWorker:
                 # Cancel any pending inference
                 if inference_task and not inference_task.done():
                     inference_task.cancel()
+                inference_task = None
                 # Offload release to thread
                 await loop.run_in_executor(None, cap.release)
                 self.stream_connected = False

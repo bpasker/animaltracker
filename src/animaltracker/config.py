@@ -31,6 +31,7 @@ class ClipSettings(BaseModel):
     # False positive cleanup: delete clips where post-processing finds no animal
     delete_if_no_animal: bool = Field(default=True, description="Delete clip and skip notification if post-processing finds no animal (reduces false positives)")
     min_detection_frames: int = Field(default=2, ge=1, le=100, description="Minimum number of sampled frames with a detection for a clip to be considered a real animal event. Single-frame SpeciesNet hits in an otherwise blank clip are treated as false positives and the clip is deleted (when delete_if_no_animal=True).")
+    min_reptile_detection_frames: int = Field(default=8, ge=1, le=100, description="Minimum sampled detection frames required to keep class-only reptile/amphibian clips. Helps reject static pipe/hose false positives.")
     sample_rate: int = Field(default=3, ge=1, le=30, description="Analyze every Nth frame (lower = more thorough)")
     tracking_enabled: bool = Field(default=True, description="Enable object tracking to identify same animal across frames")
     track_merge_gap: int = Field(default=120, ge=10, le=500, description="Max frame gap to merge same-species tracks")

@@ -197,7 +197,8 @@ class TrackInfo:
         
         # Class level (specificity 1)
         if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal',
-                             'reptile', 'reptilia', 'amphibian', 'amphibia'}:
+                             'reptile', 'reptilia', 'reptilia_reptile',
+                             'amphibian', 'amphibia', 'amphibia_amphibian'}:
             return 1
         
         # Family level keywords (specificity 3) - FAMILIES are more specific than orders
@@ -487,14 +488,17 @@ class ObjectTracker:
             return ('animal', 0)
         
         # Class level (specificity 1)
-        if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal', 
-                             'reptile', 'reptilia', 'amphibian', 'amphibia'}:
+        if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal',
+                             'reptile', 'reptilia', 'reptilia_reptile',
+                             'amphibian', 'amphibia', 'amphibia_amphibian'}:
             if 'mammal' in species_lower or species_lower == 'mammalia':
                 return ('mammal', 1)
             elif species_lower in {'bird', 'aves'}:
                 return ('bird', 1)
-            elif species_lower in {'reptile', 'reptilia'}:
+            elif species_lower in {'reptile', 'reptilia', 'reptilia_reptile'}:
                 return ('reptile', 1)
+            elif species_lower in {'amphibian', 'amphibia', 'amphibia_amphibian'}:
+                return ('amphibian', 1)
             return ('animal', 1)
         
         # Determine category from taxonomy string
@@ -503,8 +507,10 @@ class ObjectTracker:
             category = 'mammal'
         elif 'aves' in species_lower or 'bird' in species_lower:
             category = 'bird'
-        elif 'reptilia' in species_lower:
+        elif 'reptilia' in species_lower or 'reptile' in species_lower:
             category = 'reptile'
+        elif 'amphibia' in species_lower or 'amphibian' in species_lower:
+            category = 'amphibian'
         
         # Family level keywords (specificity 3) - FAMILIES are more specific than orders
         family_keywords = {

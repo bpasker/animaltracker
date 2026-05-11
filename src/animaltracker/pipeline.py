@@ -1558,14 +1558,29 @@ class StreamWorker:
                                 detection_frame_count < min_detection_frames
                                 and result.frames_analyzed >= min_detection_frames
                             )
-                            no_animal_found = no_species or too_few_detections
+                            selected_species_norm = self._normalize_species(final_species or result.new_species or "")
+                            reptile_class_labels = {
+                                "reptile", "reptilia", "reptilia_reptile",
+                                "amphibian", "amphibia", "amphibia_amphibian",
+                            }
+                            min_reptile_detection_frames = max(
+                                min_detection_frames,
+                                int(getattr(clip_cfg, 'min_reptile_detection_frames', 8) or 8),
+                            )
+                            too_few_reptile_detections = (
+                                selected_species_norm in reptile_class_labels
+                                and detection_frame_count < min_reptile_detection_frames
+                                and result.frames_analyzed >= min_reptile_detection_frames
+                            )
+                            no_animal_found = no_species or too_few_detections or too_few_reptile_detections
                             if delete_if_no_animal and no_animal_found:
                                 LOGGER.info(
                                     "FALSE POSITIVE CLEANUP: Post-processing found no real animal in clip for %s "
-                                    "(species_results=%d, tracks=%d, detection_frames=%d/%d, min_required=%d, raw_detections=%d) - deleting clip and skipping notification",
+                                    "(species_results=%d, tracks=%d, species=%s, detection_frames=%d/%d, min_required=%d, reptile_min_required=%d, raw_detections=%d) - deleting clip and skipping notification",
                                     camera_id, len(result.species_results) if result.species_results else 0,
-                                    result.tracks_detected, detection_frame_count, result.frames_analyzed,
-                                    min_detection_frames, result.raw_detections
+                                    result.tracks_detected, selected_species_norm or "unknown",
+                                    detection_frame_count, result.frames_analyzed,
+                                    min_detection_frames, min_reptile_detection_frames, result.raw_detections
                                 )
                                 # Delete the clip file and any associated files.
                                 # Use unlink(missing_ok=True) and log success/failure

@@ -1064,8 +1064,9 @@ class ClipPostProcessor:
             return 0
         
         # Class level - we know what type of animal
-        class_level = {'bird', 'mammal', 'aves', 'mammalia', 'reptile', 'reptilia', 
-                       'amphibian', 'amphibia', 'fish'}
+        class_level = {'bird', 'mammal', 'aves', 'mammalia', 'mammalia_mammal',
+                   'reptile', 'reptilia', 'reptilia_reptile',
+                   'amphibian', 'amphibia', 'amphibia_amphibian', 'fish'}
         if species_lower in class_level:
             return 1
         

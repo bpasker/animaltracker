@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -582,8 +583,9 @@ class SpeciesNetDetector(BaseDetector):
         
         # Generic categories that require higher confidence
         GENERIC_CATEGORIES = {
-            "animal", "bird", "mammalia", "mammal", "aves", 
-            "reptilia", "amphibia", "carnivora", "rodentia",
+            "animal", "bird", "mammalia", "mammal", "aves",
+            "reptilia", "reptile", "amphibia", "amphibian", "fish",
+            "carnivora", "rodentia",
             "passeriformes", "artiodactyla"
         }
         
@@ -625,9 +627,16 @@ class SpeciesNetDetector(BaseDetector):
                 continue
             
             # Check if any part of the taxonomy is generic (not just the final label)
-            taxonomy_parts = [p.lower().strip() for p in species.split(";") if p.strip()]
+            taxonomy_parts = []
+            for part in species.split(";"):
+                part_clean = part.lower().strip().replace(" ", "_")
+                if not part_clean or part_clean in {"unknown", "blank", "empty", "no_cv_result"}:
+                    continue
+                if re.match(r'^[0-9a-fA-F-]+$', part_clean) and len(part_clean) > 10:
+                    continue
+                taxonomy_parts.append(part_clean)
             is_generic = species_clean in GENERIC_CATEGORIES or (
-                len(taxonomy_parts) <= 3 and any(p in GENERIC_CATEGORIES for p in taxonomy_parts)
+                taxonomy_parts and all(p in GENERIC_CATEGORIES for p in taxonomy_parts)
             )
             
             # Apply tiered confidence threshold
@@ -690,6 +699,17 @@ class SpeciesNetDetector(BaseDetector):
                         species=display_species, confidence=score, bbox=bbox, taxonomy=species
                     ), f"exotic species (impossible in {self.country})"))
                 continue
+
+            if self._is_edge_anchored_generic_reptile(display_species, bbox, frame.shape):
+                LOGGER.debug(
+                    "Filtering edge-anchored elongated generic reptile detection: %s bbox=%s",
+                    display_species, bbox,
+                )
+                if return_filtered:
+                    filtered_detections.append((Detection(
+                        species=display_species, confidence=score, bbox=bbox, taxonomy=species
+                    ), "edge-anchored elongated generic reptile"))
+                continue
             
             detections.append(Detection(
                 species=display_species,
@@ -733,6 +753,39 @@ class SpeciesNetDetector(BaseDetector):
                 return True
         
         return False
+
+    @staticmethod
+    def _is_edge_anchored_generic_reptile(display_name: str, bbox: List[float], frame_shape) -> bool:
+        """Reject pipe/hose-like generic reptile detections anchored to the frame edge."""
+        normalized = display_name.lower().replace(" ", "_").replace("-", "_").strip()
+        if normalized not in {
+            "reptile", "reptilia", "reptilia_reptile",
+            "amphibian", "amphibia", "amphibia_amphibian",
+        }:
+            return False
+        if len(bbox) != 4 or not frame_shape:
+            return False
+
+        frame_height, frame_width = frame_shape[:2]
+        if frame_width <= 0 or frame_height <= 0:
+            return False
+
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        box_width = max(0.0, x2 - x1)
+        box_height = max(0.0, y2 - y1)
+        if box_width <= 0 or box_height <= 0:
+            return False
+
+        aspect_ratio = max(box_width / box_height, box_height / box_width)
+        long_side_fraction = max(box_width / frame_width, box_height / frame_height)
+        edge_margin_x = frame_width * 0.02
+        edge_margin_y = frame_height * 0.02
+        touches_edge = (
+            x1 <= edge_margin_x or x2 >= frame_width - edge_margin_x
+            or y1 <= edge_margin_y or y2 >= frame_height - edge_margin_y
+        )
+
+        return touches_edge and aspect_ratio >= 4.0 and long_side_fraction >= 0.40
     
     def _simplify_species_name(self, taxonomy: str) -> str:
         """Convert taxonomy label to display-friendly name.
@@ -807,6 +860,11 @@ class SpeciesNetDetector(BaseDetector):
             "phasianus_colchicus": "pheasant",
             "colinus_virginianus": "bobwhite quail",
             "geococcyx_californianus": "roadrunner",
+            # Class-level labels
+            "reptilia": "reptile",
+            "reptile": "reptile",
+            "amphibia": "amphibian",
+            "amphibian": "amphibian",
             # Humans/vehicles
             "homo_sapiens": "person",
             "human": "person",

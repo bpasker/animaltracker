@@ -7,7 +7,7 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -44,6 +44,33 @@ class Detection:
     bbox: List[float]  # [x1, y1, x2, y2] pixel coordinates
     taxonomy: Optional[str] = None  # For SpeciesNet: full taxonomy path
     track_id: Optional[int] = None  # Persistent ID assigned by ObjectTracker (None until tracked)
+
+
+def _is_edge_anchored_elongated_bbox(bbox: List[float], frame_shape) -> bool:
+    """Detect pipe/hose-like boxes: long, large, and clipped by the frame edge."""
+    if len(bbox) != 4 or not frame_shape:
+        return False
+
+    frame_height, frame_width = frame_shape[:2]
+    if frame_width <= 0 or frame_height <= 0:
+        return False
+
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    box_width = max(0.0, x2 - x1)
+    box_height = max(0.0, y2 - y1)
+    if box_width <= 0 or box_height <= 0:
+        return False
+
+    aspect_ratio = max(box_width / box_height, box_height / box_width)
+    long_side_fraction = max(box_width / frame_width, box_height / frame_height)
+    edge_margin_x = frame_width * 0.02
+    edge_margin_y = frame_height * 0.02
+    touches_edge = (
+        x1 <= edge_margin_x or x2 >= frame_width - edge_margin_x
+        or y1 <= edge_margin_y or y2 >= frame_height - edge_margin_y
+    )
+
+    return touches_edge and aspect_ratio >= 4.0 and long_side_fraction >= 0.40
 
 
 class BaseDetector(ABC):
@@ -289,11 +316,10 @@ class MegaDetectorBackend(BaseDetector):
             conf_threshold: Minimum confidence threshold
             generic_confidence: Ignored (MegaDetector only outputs "animal")
             return_filtered: If True, returns (detections, filtered_list) tuple.
-                            MegaDetector doesn't filter, so filtered_list is always empty.
 
         Returns:
             List of Detection objects with species="animal" and bounding boxes,
-            or tuple (detections, []) if return_filtered=True
+            or tuple (detections, filtered_list) if return_filtered=True
         """
         import time as _time
 
@@ -317,6 +343,7 @@ class MegaDetectorBackend(BaseDetector):
         _t2 = _time.perf_counter()
 
         detections: List[Detection] = []
+        filtered_detections = []
         h, w = frame.shape[:2]
 
         if pred is None or pred.get("failures"):
@@ -366,11 +393,21 @@ class MegaDetectorBackend(BaseDetector):
             else:
                 bbox = [0, 0, w, h]
 
-            detections.append(Detection(
+            detection = Detection(
                 species=species,
                 confidence=conf,
                 bbox=bbox,
-            ))
+            )
+            if _is_edge_anchored_elongated_bbox(bbox, frame.shape):
+                LOGGER.debug(
+                    "MegaDetector skipping edge-anchored elongated animal bbox=%s conf=%.2f",
+                    bbox, conf,
+                )
+                if return_filtered:
+                    filtered_detections.append((detection, "edge-anchored elongated animal"))
+                continue
+
+            detections.append(detection)
 
         # --- Record per-stage timings for this call ---
         _t3 = _time.perf_counter()
@@ -389,7 +426,7 @@ class MegaDetectorBackend(BaseDetector):
         self._stage_count += 1
 
         if return_filtered:
-            return detections, []  # MegaDetector doesn't filter species
+            return detections, filtered_detections
         return detections
 
 
@@ -763,29 +800,7 @@ class SpeciesNetDetector(BaseDetector):
             "amphibian", "amphibia", "amphibia_amphibian",
         }:
             return False
-        if len(bbox) != 4 or not frame_shape:
-            return False
-
-        frame_height, frame_width = frame_shape[:2]
-        if frame_width <= 0 or frame_height <= 0:
-            return False
-
-        x1, y1, x2, y2 = [float(v) for v in bbox]
-        box_width = max(0.0, x2 - x1)
-        box_height = max(0.0, y2 - y1)
-        if box_width <= 0 or box_height <= 0:
-            return False
-
-        aspect_ratio = max(box_width / box_height, box_height / box_width)
-        long_side_fraction = max(box_width / frame_width, box_height / frame_height)
-        edge_margin_x = frame_width * 0.02
-        edge_margin_y = frame_height * 0.02
-        touches_edge = (
-            x1 <= edge_margin_x or x2 >= frame_width - edge_margin_x
-            or y1 <= edge_margin_y or y2 >= frame_height - edge_margin_y
-        )
-
-        return touches_edge and aspect_ratio >= 4.0 and long_side_fraction >= 0.40
+        return _is_edge_anchored_elongated_bbox(bbox, frame_shape)
     
     def _simplify_species_name(self, taxonomy: str) -> str:
         """Convert taxonomy label to display-friendly name.

@@ -1,4 +1,4 @@
-from animaltracker.detector import SpeciesNetDetector
+from animaltracker.detector import SpeciesNetDetector, _is_edge_anchored_elongated_bbox
 from animaltracker.postprocess import ClipPostProcessor
 from animaltracker.tracker import ObjectTracker, TrackInfo
 
@@ -22,6 +22,7 @@ def test_legacy_reptilia_reptile_is_class_level() -> None:
 def test_edge_anchored_generic_reptile_pipe_is_filtered() -> None:
     pipe_bbox = [1.0, 172.0, 889.0, 359.0]
 
+    assert _is_edge_anchored_elongated_bbox(pipe_bbox, (1080, 1920, 3))
     assert SpeciesNetDetector._is_edge_anchored_generic_reptile(
         "reptile", pipe_bbox, (1080, 1920, 3)
     )

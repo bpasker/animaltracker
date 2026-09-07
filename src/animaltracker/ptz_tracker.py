@@ -239,13 +239,29 @@ class PTZTracker:
     # offsets (which causes overshoot of small offsets and undershoot of
     # large ones with sparse detection ticks).
     low_fill_cap_full_offset: float = 0.40
-    # When the target is more than this far off-center, suppress positive
-    # (zoom-in) zoom velocity. Zooming in while still chasing narrows the
-    # FOV exactly when we need it wide. Zoom-out is still allowed.
-    # Tightened (was 0.10) because borderline offsets like 0.08 were
-    # squeaking through the gate and the next detection often showed the
-    # animal had already left the now-narrower FOV.
-    zoom_in_offset_gate: float = 0.05
+    # When the target is more than this far off-center in the PTZ camera's
+    # OWN frame, suppress positive (zoom-in) zoom velocity. Zooming in while
+    # still chasing narrows the FOV exactly when we need it wide. Zoom-out
+    # is still allowed.
+    #
+    # Must be strictly greater than min_move_threshold. When both were 0.05
+    # the deadzone branch returned (with a plain Stop) for every offset below
+    # 0.05 and this gate zeroed zoom-in for every offset above it, so zoom-in
+    # could fire only at an offset of exactly 0.05: across three reviewed
+    # incidents (41 moves) the commanded zoom was 0.00 every time and fill
+    # sat at 10-46% against a 60% target. A small fill also keeps the
+    # low-fill velocity cap engaged, so the dead zoom made the chase slower
+    # as well as the framing worse.
+    zoom_in_offset_gate: float = 0.15
+    # Gate for the SOURCE-camera (cam1-driven) path. cam1's fill is measured
+    # in the wide frame, not the PTZ frame, so it cannot say how much zoom
+    # cam2 actually needs; keep zoom-in effectively off there and let cam2
+    # zoom itself once it has taken over.
+    source_zoom_in_offset_gate: float = 0.05
+    # In the deadzone (target centred), zoom toward target_fill_pct when the
+    # fill is short by more than this margin. Hysteresis against zoom
+    # in/out chatter around the target.
+    deadzone_zoom_fill_margin: float = 0.05
     
     # Patrol settings
     patrol_enabled: bool = True  # Enable patrol when no detections
@@ -394,6 +410,14 @@ class PTZTracker:
     # be auto-stopped (0 = no pending stop). See ``tracking_step_duration``.
     _tracking_step_stop_at: float = field(default=0.0, init=False)
     _tracking_step_timer: Optional[threading.Timer] = field(default=None, init=False)
+    # A failed Stop must be retried, not forgotten: the camera is still
+    # slewing at the last commanded velocity until something stops it.
+    _tracking_step_stop_attempts: int = field(default=0, init=False)
+    _tracking_step_stop_max_attempts: int = field(default=3, init=False)
+    _tracking_step_stop_retry_delay: float = field(default=0.1, init=False)
+    # Same-source moves for a byte-identical bbox inside this window are the
+    # other worker re-reading one published detection, not new evidence.
+    _duplicate_bbox_window: float = field(default=0.5, init=False)
 
     # Diagnostic context for decision log enrichment.
     # _current_capture_ts: capture_ts of the frame whose detections we are
@@ -423,6 +447,24 @@ class PTZTracker:
     _lock_start_time: float = field(default=0.0, init=False)  # When we locked onto current target
     _consecutive_lock_misses: int = field(default=0, init=False)  # Frames since locked target was last seen
     _lock_miss_limit: int = field(default=3, init=False)  # Misses before releasing lock (was 5; lower = faster recovery on mismatched stale lock)
+    # Spatial-continuation radius (normalized frame units) used when the
+    # locked track_id disappears. The wide value applies when the PTZ camera
+    # has moved since the target was last seen in ITS OWN frame: a
+    # successful slew displaces the subject toward centre by far more than
+    # 0.15, so the tight radius rejected the very detection that proved the
+    # move worked (LOCK_HOLD x3 -> LOCK_RELEASE -> re-lock -> DEADZONE, with
+    # a Stop issued on each HOLD tick).
+    _lock_spatial_radius: float = field(default=0.15, init=False)
+    _lock_spatial_radius_after_own_move: float = field(default=0.50, init=False)
+    _locked_seen_at: float = field(default=0.0, init=False)   # wall-clock of last sighting that refreshed the lock
+    _ptz_camera_id: Optional[str] = field(default=None, init=False)  # source_camera label of the camera the PTZ physically moves
+    # Minimum confidence to lock onto a detection ByteTrack has NOT confirmed.
+    # Cold (from patrol) stays strict: locking an unconfirmed flash is how
+    # the multi-hour stuck-on-a-leaf hang happened. While already TRACKING
+    # we have evidence an animal is present and ByteTrack ids do not survive
+    # the PTZ's own motion, so a lower bar re-acquires instead of stalling.
+    _untracked_lock_conf_cold: float = field(default=0.75, init=False)
+    _untracked_lock_conf_tracking: float = field(default=0.60, init=False)
     # Hysteresis for switching to a *different* (non-locked) max-confidence target.
     # H4: prevents flickering between two similar-confidence detections.
     _challenger_track_id: Optional[int] = field(default=None, init=False)
@@ -531,6 +573,7 @@ class PTZTracker:
         scheduled_at = now + self.tracking_step_duration
         self._tracking_step_stop_at = scheduled_at
         self._tracking_step_armed_at = now
+        self._tracking_step_stop_attempts = 0
 
         timer = threading.Timer(
             self.tracking_step_duration,
@@ -567,7 +610,37 @@ class PTZTracker:
         try:
             self.onvif_client.ptz_stop(self.profile_token)
         except Exception as e:
-            PTZ_LOGGER.warning("[STEP_STOP_FAIL] %s", e)
+            # The camera is still slewing. Re-arm the same scheduled stop so
+            # both the expiry check on the next tick and a short retry timer
+            # get another go, bounded so a dead camera cannot spin us forever.
+            self._tracking_step_stop_attempts += 1
+            if self._tracking_step_stop_attempts < self._tracking_step_stop_max_attempts:
+                PTZ_LOGGER.warning(
+                    "[STEP_STOP_FAIL] %s (attempt %d/%d, retrying in %.2fs)",
+                    e, self._tracking_step_stop_attempts,
+                    self._tracking_step_stop_max_attempts,
+                    self._tracking_step_stop_retry_delay,
+                )
+                self._tracking_step_stop_at = scheduled_at
+                self._tracking_step_armed_at = armed_at
+                timer = threading.Timer(
+                    self._tracking_step_stop_retry_delay,
+                    self._tracking_step_timer_fire,
+                    args=(scheduled_at, armed_at),
+                )
+                timer.daemon = True
+                self._tracking_step_timer = timer
+                timer.start()
+            else:
+                PTZ_LOGGER.error(
+                    "[STEP_STOP_FAIL] %s -- giving up after %d attempts; camera may still be slewing",
+                    e, self._tracking_step_stop_attempts,
+                )
+                self._log_decision('error', {
+                    'command': 'tracking_step_stop',
+                    'error': str(e),
+                    'attempts': self._tracking_step_stop_attempts,
+                })
             return
         self._holding_position = True
         late_ms = max(0.0, (now - scheduled_at)) * 1000.0
@@ -607,10 +680,32 @@ class PTZTracker:
         """
         if self._current_capture_ts <= 0 or self._last_move_capture_ts <= 0:
             return False
-        if abs(self._current_capture_ts - self._last_move_capture_ts) > 1e-3:
-            return False
         signature = self._bbox_signature(bbox)
         if source != self._last_move_source:
+            return False
+        if abs(self._current_capture_ts - self._last_move_capture_ts) > 1e-3:
+            # The two co-driving workers compute their own capture_ts for the
+            # same published detection, so an exact-ts match misses most
+            # re-reads. A byte-identical bbox from the same source inside a
+            # short window cannot be a fresh observation of a moving animal.
+            if (
+                signature == self._last_move_bbox_signature
+                and self._last_move_time > 0
+                and 0.0 <= (time.time() - self._last_move_time) < self._duplicate_bbox_window
+            ):
+                PTZ_LOGGER.info(
+                    "[DUPLICATE_BBOX_SKIP] Skipping re-read of identical bbox for source=%s "
+                    "capture_ts=%.3f (last move capture_ts=%.3f) bbox=%s",
+                    source, self._current_capture_ts, self._last_move_capture_ts, signature,
+                )
+                self._log_decision('duplicate_frame_skip', {
+                    'source': source,
+                    'capture_ts': round(self._current_capture_ts, 3),
+                    'bbox_px': list(signature),
+                    'previous_bbox_px': list(self._last_move_bbox_signature),
+                    'reason': 'identical_bbox_within_window',
+                })
+                return True
             return False
         PTZ_LOGGER.info(
             "[DUPLICATE_FRAME_SKIP] Skipping duplicate move for source=%s capture_ts=%.3f bbox=%s previous_bbox=%s",
@@ -648,6 +743,18 @@ class PTZTracker:
             speed = 0.51 + (abs_offset - 0.25) * 0.6533  # 0.51 -> 1.00
         speed = max(-1.0, min(1.0, speed if offset >= 0 else -speed))
         return speed
+
+    def _zoom_velocity_for_fill(self, current_fill: float) -> float:
+        """Zoom velocity that drives ``current_fill`` toward ``target_fill_pct``.
+
+        Positive = zoom in. Clamped to +/-0.3: zoom changes are jarring and,
+        combined with the bounded tracking step, a 0.3 pulse is a modest,
+        recoverable change in framing.
+        """
+        if current_fill <= 0:
+            return 0.0
+        fill_error = self.target_fill_pct - current_fill
+        return max(-0.3, min(0.3, fill_error * 1.5))
 
     def _apply_low_fill_cap(
         self,
@@ -1047,6 +1154,7 @@ class PTZTracker:
         self._pending_takeover_frames = 0
         self._lock_motion_anchor = None
         self._lock_motion_anchor_time = 0.0
+        self._locked_seen_at = 0.0
 
     def clear_lock(self) -> None:
         """Public: clear the target lock (e.g. on event boundary)."""
@@ -1414,6 +1522,7 @@ class PTZTracker:
         # Auto-stop expired tracking step BEFORE rate-limiting so it always
         # fires within ~1 worker tick of the scheduled time.
         self._check_tracking_step_expiry(now)
+        self._ptz_camera_id = target_camera_id
 
         # Extract detections from each camera. Done BEFORE the rate limit so a
         # sighting that lands inside the update_interval window still refreshes
@@ -1794,12 +1903,15 @@ class PTZTracker:
         if best is None:
             # Spatial fallback failed within miss budget -- hold position.
             # Must explicitly issue ptz_stop or the camera keeps moving with
-            # whatever velocity the previous ContinuousMove set.
-            try:
-                self.onvif_client.ptz_stop(self.profile_token)
-            except Exception:
-                pass
-            self._holding_position = True
+            # whatever velocity the previous ContinuousMove set. Once is
+            # enough; re-sending Stop on every HOLD tick only loads the
+            # camera's ONVIF service while we wait for a fresh sighting.
+            if not self._holding_position:
+                try:
+                    self.onvif_client.ptz_stop(self.profile_token)
+                    self._holding_position = True
+                except Exception as e:
+                    PTZ_LOGGER.warning("[LOCK_HOLD_STOP_FAIL] %s", e)
             return False
         # We're about to move; clear the held flag so the next deadzone hit
         # actually issues a Stop instead of being optimized away.
@@ -1840,6 +1952,12 @@ class PTZTracker:
             center_x, center_y, norm_center_x, norm_center_y, offset_x, offset_y, offset_magnitude
         )
 
+        # Fill in the PTZ camera's own frame. Needed by the deadzone branch
+        # too: a centred-but-tiny subject should be zoomed on, not parked.
+        bbox_width = bbox[2] - bbox[0]
+        bbox_height = bbox[3] - bbox[1]
+        current_fill = max(bbox_width / frame_width, bbox_height / frame_height)
+
         # Only move if offset is significant
         if offset_magnitude < self.min_move_threshold:
             PTZ_LOGGER.info(
@@ -1864,7 +1982,51 @@ class PTZTracker:
                             round(bbox[2], 1), round(bbox[3], 1)],
                 'frame_size': [frame_width, frame_height],
                 'frame_age_ms': _frame_age_ms,
+                'fill_pct': round(current_fill * 100, 1),
             })
+
+            # Centred but under-filled: this is the one moment zooming in is
+            # safe (the subject is where the narrowing FOV will still hold
+            # it), so issue a zoom-only pulse instead of parking. Bounded by
+            # the same tracking step as any other move. Zoom-out for an
+            # over-filled subject takes the same path.
+            zoom_velocity = self._zoom_velocity_for_fill(current_fill)
+            zoom_source = (source_camera or 'target_camera') + '_deadzone_zoom'
+            if (
+                current_fill > 0
+                and abs(self.target_fill_pct - current_fill) > self.deadzone_zoom_fill_margin
+                and abs(zoom_velocity) > 1e-6
+                and not self._is_duplicate_move_frame_locked(bbox, zoom_source)
+            ):
+                PTZ_LOGGER.info(
+                    "[DEADZONE_ZOOM] Target centred at fill=%.0f%% (target=%.0f%%); zoom-only pulse vel=%.2f",
+                    current_fill * 100, self.target_fill_pct * 100, zoom_velocity,
+                )
+                self._log_decision('deadzone_zoom', {
+                    'species': best.species,
+                    'track_id': getattr(best, 'track_id', None),
+                    'fill_pct': round(current_fill * 100, 1),
+                    'target_fill_pct': round(self.target_fill_pct * 100, 1),
+                    'velocity': {'pan': 0.0, 'tilt': 0.0, 'zoom': round(zoom_velocity, 3)},
+                    'source': 'target_camera',
+                    'bbox_px': [round(bbox[0], 1), round(bbox[1], 1),
+                                round(bbox[2], 1), round(bbox[3], 1)],
+                    'frame_size': [frame_width, frame_height],
+                    'frame_age_ms': _frame_age_ms,
+                })
+                try:
+                    self.onvif_client.ptz_move(self.profile_token, 0.0, 0.0, zoom_velocity)
+                    self._last_move_time = time.time()
+                    self._last_move_capture_ts = self._current_capture_ts
+                    self._last_move_source = zoom_source
+                    self._last_move_bbox_signature = self._bbox_signature(bbox)
+                    self._holding_position = False
+                    self._arm_tracking_step(self._last_move_time)
+                    return True
+                except Exception as e:
+                    PTZ_LOGGER.warning("[DEADZONE_ZOOM_FAIL] %s", e)
+                    # Fall through to the plain hold below.
+
             if not self._holding_position:
                 try:
                     self.onvif_client.ptz_stop(self.profile_token)
@@ -1884,11 +2046,6 @@ class PTZTracker:
         pan_velocity_raw = pan_velocity
         tilt_velocity_raw = tilt_velocity
 
-        # Calculate zoom velocity based on current vs target fill
-        bbox_width = bbox[2] - bbox[0]
-        bbox_height = bbox[3] - bbox[1]
-        current_fill = max(bbox_width / frame_width, bbox_height / frame_height)
-
         # Cap pan/tilt velocity when target is small in frame to prevent
         # the camera from outpacing slow-moving distant animals between
         # detection ticks. Cap is scaled by |offset| so velocity tapers
@@ -1898,14 +2055,11 @@ class PTZTracker:
             offset_x=offset_x, offset_y=offset_y,
         )
 
-        if current_fill > 0:
-            fill_error = self.target_fill_pct - current_fill
-            zoom_velocity = fill_error * 1.5
-            zoom_velocity = max(-0.3, min(0.3, zoom_velocity))
-            # Suppress zoom-in while target is off-center (see _do_tracking).
-            if zoom_velocity > 0 and offset_magnitude > self.zoom_in_offset_gate:
-                zoom_velocity = 0.0
-        else:
+        # Zoom toward target fill, but only zoom IN while the subject is close
+        # enough to centre that the narrowing FOV keeps it (zoom magnifies
+        # any residual offset). Zoom-out is always allowed.
+        zoom_velocity = self._zoom_velocity_for_fill(current_fill)
+        if zoom_velocity > 0 and offset_magnitude > self.zoom_in_offset_gate:
             zoom_velocity = 0.0
 
         move_source = source_camera or 'target_camera'
@@ -2409,6 +2563,14 @@ class PTZTracker:
             self._locked_track_id = None
             self._challenger_track_id = None
             self._challenger_streak = 0
+            # The smoothed offset is in the previous camera's coordinate
+            # space (cam1 offsets are divided by pan/tilt_scale, cam2's are
+            # raw). Letting 15% of it bleed into the first command from the
+            # new camera biases that command in a frame it was never
+            # measured in.
+            self._target_pan = 0.0
+            self._target_tilt = 0.0
+            self._target_zoom = 0.0
 
         # Build a map of track_id -> detection for quick lookup
         track_id_map: Dict[int, 'Detection'] = {}
@@ -2429,6 +2591,7 @@ class PTZTracker:
             self._challenger_track_id = None
             self._challenger_streak = 0
             now_t = time.time()
+            self._locked_seen_at = now_t
             # Static-target watchdog: update the motion anchor if the target
             # has moved more than the threshold OR if we don't have an
             # anchor yet (new lock). Otherwise keep the old anchor so its
@@ -2509,16 +2672,30 @@ class PTZTracker:
                         best_dist = dist
                         best_nearby = det
 
-                # If nearest detection is spatially close (within 15% of frame), use it.
+                # Spatial continuation radius. If the PTZ camera has moved
+                # since this anchor was recorded AND the anchor lives in the
+                # PTZ camera's own frame, the subject has been displaced by
+                # our own slew (toward centre, typically by 0.3-0.5) and the
+                # tight radius would reject it. Anchors in the static wide
+                # camera's frame are unaffected by cam2's motion.
+                own_move_since = (
+                    self._last_move_time > self._locked_seen_at
+                    and source_camera == self._ptz_camera_id
+                )
+                radius = (
+                    self._lock_spatial_radius_after_own_move
+                    if own_move_since else self._lock_spatial_radius
+                )
                 # Prefer same species if known (handoff continuity).
-                if best_nearby is not None and best_dist < 0.15:
+                if best_nearby is not None and best_dist < radius:
                     if (self._locked_species is None
                             or best_nearby.species == self._locked_species):
                         new_tid = getattr(best_nearby, 'track_id', None)
                         PTZ_LOGGER.info(
                             "[LOCK_SPATIAL] Locked track %s lost, nearest detection at dist=%.3f "
-                            "(track_id=%s, %s, %.1f%%) - continuing",
-                            self._locked_track_id, best_dist,
+                            "(radius=%.2f%s, track_id=%s, %s, %.1f%%) - continuing",
+                            self._locked_track_id, best_dist, radius,
+                            " after own move" if own_move_since else "",
                             new_tid, best_nearby.species, best_nearby.confidence * 100
                         )
                         _record_lock(best_nearby, is_new=False)
@@ -2563,10 +2740,16 @@ class PTZTracker:
             # No confirmed tracks -- only lock if confidence is very high
             # (real, strong detection) AND log it as suspicious.
             best = max(detections, key=lambda d: d.confidence)
-            if best.confidence < 0.75:
+            min_conf = (
+                self._untracked_lock_conf_tracking
+                if self._mode == PTZMode.TRACKING
+                else self._untracked_lock_conf_cold
+            )
+            if best.confidence < min_conf:
                 PTZ_LOGGER.info(
-                    "[LOCK_SKIP] No tracked detections and best untracked is only %.1f%% (%s); not locking",
-                    best.confidence * 100, best.species
+                    "[LOCK_SKIP] No tracked detections and best untracked is only %.1f%% "
+                    "(%s, need %.0f%% in %s); not locking",
+                    best.confidence * 100, best.species, min_conf * 100, self._mode.value
                 )
                 return None
             PTZ_LOGGER.warning(
@@ -2764,7 +2947,7 @@ class PTZTracker:
             zoom_velocity = max(-0.3, min(0.3, zoom_velocity))
             # Suppress zoom-in while target is off-center: chasing with a
             # narrowing FOV is how we lose small fast-walking animals.
-            if zoom_velocity > 0 and offset_magnitude > self.zoom_in_offset_gate:
+            if zoom_velocity > 0 and offset_magnitude > self.source_zoom_in_offset_gate:
                 zoom_velocity = 0.0
         else:
             zoom_velocity = 0.0

@@ -41,4 +41,4 @@ dynamic = ["scripts"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-animaltracker = ["py.typed"]
+animaltracker = ["py.typed", "static/*", "static/**/*"]

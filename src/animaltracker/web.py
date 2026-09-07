@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import cv2
 import json
@@ -113,6 +114,40 @@ PTZ_DEADMAN_SECONDS = 10.0
 # notices, while repeat reads within a burst become free.
 RECORDINGS_CACHE_TTL = 3.0
 
+# Static assets live next to this module and are served straight from the git
+# checkout (production runs an editable install), so a deploy is just `git pull`.
+STATIC_DIR = Path(__file__).parent / 'static'
+
+
+def _compute_asset_version(static_dir: Path) -> str:
+    """Content hash of every static asset, used to bust far-future caches.
+
+    Hashing content rather than mtime matters here: `git pull` rewrites mtimes on
+    every deploy, which would invalidate the cache even when nothing changed.
+    """
+    h = hashlib.sha256()
+    if static_dir.is_dir():
+        for path in sorted(static_dir.rglob('*')):
+            if path.is_file():
+                h.update(path.relative_to(static_dir).as_posix().encode())
+                h.update(path.read_bytes())
+    return h.hexdigest()[:12]
+
+
+@web.middleware
+async def _static_cache_middleware(request, handler):
+    """Far-future cache for versioned asset URLs, revalidate for unversioned ones."""
+    response = await handler(request)
+    if request.path.startswith('/static/'):
+        try:
+            if request.query.get('v'):
+                response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            else:
+                response.headers['Cache-Control'] = 'no-cache'
+        except (AttributeError, TypeError):
+            pass
+    return response
+
 
 # --- Pre-compiled regex patterns for /api/logs (compiled once at import) ---
 # HTTP access-log noise we always want to exclude.
@@ -217,7 +252,9 @@ class WebServer:
         # Short-lived cache of the archive scan; see RECORDINGS_CACHE_TTL.
         self._scan_cache = None
         self._scan_cache_ts = 0.0
-        self.app = web.Application()
+        self.asset_version = _compute_asset_version(STATIC_DIR)
+        LOGGER.info("Static asset version: %s", self.asset_version)
+        self.app = web.Application(middlewares=[_static_cache_middleware])
         self.app.router.add_get('/', self.handle_root_redirect)
         self.app.router.add_get('/live', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
@@ -256,6 +293,10 @@ class WebServer:
         self.app.router.add_get('/api/recordings/calendar', self.handle_calendar_api)
         self.app.router.add_get('/api/recordings/day/{date}', self.handle_day_api)
         
+        # Front-end assets (stylesheet, modules, icon sprite)
+        STATIC_DIR.mkdir(parents=True, exist_ok=True)
+        self.app.router.add_static('/static', STATIC_DIR)
+
         # Serve clips directory statically
         clips_path = self.storage_root / 'clips'
         # Ensure it exists so static route doesn't fail on startup

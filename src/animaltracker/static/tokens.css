@@ -1,0 +1,515 @@
+/* ============================================================================
+   ANIMAL TRACKER — DESIGN TOKENS v1.0  ("Nature Archive, instrumented")
+   Hand-written. No build step, no preprocessor, no CDN, no webfont.
+
+   LAYER 1  raw ramps + non-colour scales   -> never referenced by a component
+   LAYER 2  semantic tokens                 -> the ONLY thing components may use
+            defined 3x: :root/[data-theme=light], prefers-color-scheme dark,
+            [data-theme=dark]  — so a manual toggle wins in both directions.
+
+   RULE: no component rule may contain a colour literal. Zero exceptions.
+   Every ratio in the comments is measured (WCAG 2.1 relative luminance).
+   ========================================================================= */
+
+/* ---------------------------------------------------------------------------
+   LAYER 1 · RAW PALETTE — warm neutrals (hue ~34) so the chrome never competes
+   with infrared and dusk footage. Never use these directly in a component.
+   ------------------------------------------------------------------------ */
+:root{
+  --p-bone-50:#FCFAF6;  --p-bone-100:#F6F2EA; --p-bone-200:#EDE7DB;
+  --p-bone-300:#DED5C5; --p-bone-400:#C3B8A3;
+  --p-bark-450:#A79A87; --p-bark-500:#9A8D7B; --p-bark-550:#8C806D;
+  --p-bark-600:#6E6455; --p-bark-650:#5E5648; --p-bark-700:#4C4539;
+  --p-bark-750:#7E7361;
+  --p-loam-800:#2F2B24; --p-loam-850:#2C2822; --p-loam-900:#201D18;
+  --p-loam-950:#15130F; --p-loam-975:#0F0D0B; --p-loam-1000:#0B0A08;
+
+  --p-ember-200:#F7D5B4; --p-ember-300:#EFB47F; --p-ember-400:#E1924F;
+  --p-ember-500:#C87231; --p-ember-600:#A85923; --p-ember-650:#95501F;
+  --p-ember-700:#82431A;
+
+  --p-moss-200:#D3E2C8; --p-moss-300:#A9C79A; --p-moss-400:#7CA469;
+  --p-moss-500:#5A8447; --p-moss-600:#436433; --p-moss-700:#2F4A25;
+
+  --p-dusk-200:#CFD6EA; --p-dusk-300:#A6B2D5; --p-dusk-400:#7B89B8;
+  --p-dusk-500:#5A6997; --p-dusk-600:#434F76; --p-dusk-700:#39436B;
+
+  --p-clay-200:#F4CEC5; --p-clay-300:#E7A395; --p-clay-400:#D3705C;
+  --p-clay-500:#B44E3B; --p-clay-600:#8F3A2B; --p-clay-700:#7A3024;
+
+  --p-amber-200:#FAE3B4; --p-amber-300:#F1C778; --p-amber-400:#DCA53E;
+  --p-amber-600:#8A5E12; --p-amber-700:#6B4A0E;
+
+  /* -- TYPE. System stacks only; nothing is fetched. --------------------- */
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",
+              "Noto Sans",Arial,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,
+              "Liberation Mono",monospace;
+
+  /* Desktop scale. --t-base is 15px. See --t-* overrides at <=640px. */
+  --t-micro:0.6875rem; /* 11 — overlines, timecodes, tab labels           */
+  --t-xs:0.75rem;      /* 12 — chips, dense meta, table cells             */
+  --t-sm:0.8125rem;    /* 13 — secondary metadata, buttons                */
+  --t-base:0.9375rem;  /* 15 — body, card titles                          */
+  --t-md:1.0625rem;    /* 17 — section heads, dialog titles               */
+  --t-lg:1.3125rem;    /* 21 — day-group headers                          */
+  --t-xl:1.625rem;     /* 26 — screen titles                              */
+  --t-2xl:2.125rem;    /* 34 — detail species name                        */
+  --t-input:1rem;      /* 16 — NEVER smaller: <16px zooms on iOS Safari    */
+
+  --lh-flat:1; --lh-tight:1.14; --lh-snug:1.3; --lh-normal:1.5; --lh-loose:1.65;
+  --w-regular:400; --w-medium:500; --w-semi:600; --w-bold:700;
+  --ls-tight:-0.02em; --ls-normal:0em; --ls-wide:0.02em; --ls-caps:0.08em;
+
+  /* -- SPACE, 4px base --------------------------------------------------- */
+  --s-1:0.25rem; --s-2:0.5rem;  --s-3:0.75rem; --s-4:1rem;   --s-5:1.25rem;
+  --s-6:1.5rem;  --s-7:2rem;    --s-8:2.5rem;  --s-9:3rem;   --s-10:4rem;
+  --s-11:5rem;   --s-12:6.5rem;
+
+  /* -- RADIUS ------------------------------------------------------------ */
+  --r-xs:6px; --r-sm:10px; --r-md:14px; --r-lg:20px; --r-xl:28px;
+  --r-2xl:36px; --r-pill:999px;
+
+  /* -- SIZING ------------------------------------------------------------ */
+  --tap:44px;          /* iOS minimum. NOTHING interactive may be smaller. */
+  --tap-lg:52px;
+  --control-h:38px;    /* fine-pointer control height; ->44px when coarse  */
+  --hit-pad:10px;      /* invisible ::before expansion for small glyphs    */
+  --appbar-h:64px;     /* desktop top bar                                  */
+  --bar-h:56px;        /* mobile top bar (content box, inset ADDS to it)   */
+  --tabbar-h:56px;     /* mobile bottom tab bar (content box)              */
+  --rail-w:260px;      /* desktop filter / nav rail                        */
+  --aside-w:340px;     /* detail evidence rail                             */
+  --shell-max:2200px;
+  --thumb-ratio:16/9;  /* MATCHES SOURCE FOOTAGE. Never crop to 4:3.       */
+
+  /* Chrome offsets — every sticky element must use these, never a literal */
+  --inset-top:env(safe-area-inset-top,0px);
+  --inset-bottom:env(safe-area-inset-bottom,0px);
+  --inset-left:env(safe-area-inset-left,0px);
+  --inset-right:env(safe-area-inset-right,0px);
+  --chrome-top:calc(var(--bar-h) + var(--inset-top));
+  --chrome-bottom:calc(var(--tabbar-h) + var(--inset-bottom));
+
+  /* -- MOTION ------------------------------------------------------------ */
+  --dur-instant:80ms; --dur-fast:140ms; --dur:220ms; --dur-slow:320ms;
+  --dur-sheet:420ms;  --dur-undo:6000ms;
+  --ease-out:cubic-bezier(.22,.75,.28,1);
+  --ease-in:cubic-bezier(.6,.02,.9,.3);
+  --ease-inout:cubic-bezier(.5,.05,.2,1);
+  --ease-spring:cubic-bezier(.2,1.2,.4,1);
+
+  /* -- Z-INDEX ----------------------------------------------------------- */
+  --z-base:0; --z-raised:10; --z-sticky:100; --z-daybar:110; --z-nav:150;
+  --z-selbar:180; --z-drawer:200; --z-scrim:300; --z-modal:400;
+  --z-popover:450; --z-toast:500;
+
+  /* -- ON-MEDIA CHROME (identical in both themes; it sits over video) ----
+     Worst case = a blown-out white frame. --c-media-scrim at .68 alpha
+     over #FFF resolves to #595857; --c-on-media (#FCFAF6) on it = 6.81:1. */
+  --c-media-scrim:rgba(11,10,8,.68);
+  --c-media-scrim-strong:rgba(11,10,8,.80);
+  --c-media-gradient:linear-gradient(to top,rgba(6,5,4,.86),transparent 62%);
+  --c-on-media:#FCFAF6;          /* 6.81:1 on the scrim, worst case        */
+  --c-on-media-2:rgba(252,250,246,.78);
+  --c-on-media-live:#D3E2C8;     /* 6.05:1 */
+  --c-on-media-stale:#FAE3B4;    /* 6.53:1 */
+  --c-on-media-accent:#F7D5B4;   /* 5.60:1 */
+  --c-on-media-line:rgba(252,250,246,.42);
+}
+
+/* ---------------------------------------------------------------------------
+   LAYER 2A · LIGHT (default). Manual [data-theme="light"] shares this block.
+   ------------------------------------------------------------------------ */
+:root,
+:root[data-theme="light"]{
+  color-scheme:light;
+
+  /* Surfaces */
+  --c-canvas:var(--p-bone-100);        /* app ground behind everything     */
+  --c-bg:var(--p-bone-50);             /* view background                  */
+  --c-surface:#FFFFFF;                 /* cards, panels, menus             */
+  --c-surface-2:var(--p-bone-100);     /* nested / hovered surface         */
+  --c-surface-sunken:var(--p-bone-200);/* wells, tracks, table stripes     */
+  --c-surface-inset:rgba(32,29,24,.05);/* ghost-button hover               */
+  --c-overlay:rgba(252,250,246,.86);   /* translucent bars (+backdrop-blur)*/
+  --c-overlay-solid:var(--p-bone-50);  /* fallback where blur is disabled  */
+
+  /* Text — measured on bg / surface / surface-2 / sunken */
+  --c-text:var(--p-loam-900);          /* 16.11 16.80 15.04 13.64          */
+  --c-text-2:var(--p-bark-700);        /*  9.08  9.47  8.48  7.69          */
+  --c-text-3:var(--p-bark-600);        /*  5.57  5.81  5.20  4.71  AA OK   */
+  --c-text-inv:var(--p-bone-50);
+
+  /* Lines. --c-line* are DECORATIVE separators (may be <3:1).
+     --c-line-control is the ONLY border allowed on an input, chip, switch,
+     checkbox or secondary button: 3.87 / 3.71 / 3.47 / 3.14  (1.4.11 OK)  */
+  --c-line-soft:var(--p-bone-200);
+  --c-line:var(--p-bone-300);
+  --c-line-strong:var(--p-bone-400);
+  --c-line-control:var(--p-bark-550);
+
+  /* Accent — ember. --c-accent is for FILLS, rings and indicators (4.89:1
+     on bg, so it also satisfies 1.4.11 as a 2-3px ring).
+     --c-accent-text is the ONLY accent value allowed on type: 5.85 / 6.10
+     / 5.46 / 4.95 — AA on every light surface including sunken.           */
+  --c-accent:var(--p-ember-600);
+  --c-accent-hover:var(--p-ember-700);
+  --c-accent-text:var(--p-ember-650);
+  --c-on-accent:#FFFFFF;               /* 5.10:1 on --c-accent    AA OK    */
+  --c-accent-wash:#F5EBE5;             /* opaque: contrast is deterministic*/
+  --c-accent-wash-strong:#EBD8CB;
+  --c-accent-line:#E0BFA8;
+
+  /* Status. Each -text value is AA on its own -wash AND on all surfaces.  */
+  --c-live:var(--p-moss-600);          /* fill / dot                       */
+  --c-live-text:var(--p-moss-700);     /* 8.03 on --c-live-wash            */
+  --c-live-wash:#E5E9E2;
+  --c-on-live:#FFFFFF;                 /* 6.48:1 on --c-live               */
+
+  --c-stale:var(--p-amber-600);
+  --c-stale-text:var(--p-amber-700);   /* 6.43 on --c-stale-wash           */
+  --c-stale-wash:#ECE5D9;
+  --c-on-stale:#FFFFFF;                /* 5.46:1 on --c-stale              */
+
+  --c-offline:var(--p-bark-600);
+  --c-offline-text:var(--p-bark-700);  /* 7.82 on --c-offline-wash         */
+  --c-offline-wash:#EBE9E7;
+  --c-on-offline:#FFFFFF;              /* 5.57:1 on --c-offline            */
+
+  --c-danger:var(--p-clay-600);
+  --c-danger-hover:var(--p-clay-700);
+  --c-danger-text:var(--p-clay-700);   /* 7.62 on --c-danger-wash          */
+  --c-danger-wash:#F2E7E6;
+  --c-on-danger:#FFFFFF;               /* 7.48:1 on --c-danger             */
+
+  --c-info:var(--p-dusk-600);
+  --c-info-text:var(--p-dusk-700);     /* 7.97 on --c-info-wash            */
+  --c-info-wash:#E8EAEF;
+  --c-on-info:#FFFFFF;                 /* 7.69:1 on --c-info               */
+
+  --c-rec:var(--p-clay-500);           /* RECORDING — must never be read as
+                                          OFFLINE; always paired with the
+                                          word "REC" and a pulsing dot.    */
+  --c-rec-wash:#F7E8E4;
+  --c-rec-text:var(--p-clay-700);      /* 7.24 on --c-rec-wash             */
+
+  /* Utility */
+  --c-focus:var(--p-ember-650);        /* 5.85:1 on bg                     */
+  --c-focus-halo:rgba(168,89,35,.22);
+  --c-selection:rgba(168,89,35,.22);
+  --c-scrim:rgba(32,29,24,.46);
+  --c-skeleton:var(--p-bone-200);
+  --c-skeleton-sheen:rgba(255,255,255,.62);
+  --c-track:var(--p-bone-300);         /* slider / scrubber bed            */
+  --c-meter-off:var(--p-bone-300);
+
+  /* Species. -fg is AA on -bg (ratios noted); -dot is the 10px swatch.
+     Hues are spaced >=35 degrees so they survive an 11px badge; the badge
+     ALWAYS carries the species word too — colour is never the only signal.*/
+  --sp-deer-fg:#9F5723;     --sp-deer-bg:#F5ECE5;     --sp-deer-dot:#AE6029;     /* 4.66 */
+  --sp-squirrel-fg:#756D1A; --sp-squirrel-bg:#F5F4E5; --sp-squirrel-dot:#AEA229; /* 4.79 */
+  --sp-rabbit-fg:#40751A;   --sp-rabbit-bg:#ECF5E5;   --sp-rabbit-dot:#60AE29;   /* 4.97 */
+  --sp-coyote-fg:#1A7547;   --sp-coyote-bg:#E5F5ED;   --sp-coyote-dot:#29AE6B;   /* 5.06 */
+  --sp-raccoon-fg:#216F97;  --sp-raccoon-bg:#E5F0F5;  --sp-raccoon-dot:#2981AE;  /* 4.79 */
+  --sp-opossum-fg:#4C28B8;  --sp-opossum-bg:#E9E5F5;  --sp-opossum-dot:#4A29AE;  /* 7.38 */
+  --sp-bird-fg:#B02799;     --sp-bird-bg:#F5E5F3;     --sp-bird-dot:#AE2997;     /* 4.83 */
+  --sp-fox-fg:#B82840;      --sp-fox-bg:#F5E5E8;      --sp-fox-dot:#AE293F;      /* 5.05 */
+  --sp-unknown-fg:#5E5648;  --sp-unknown-bg:#EFECE6;  --sp-unknown-dot:#8C806D;  /* 6.14 */
+
+  /* Elevation — warm-tinted, never neutral black */
+  --e-0:none;
+  --e-1:0 1px 2px rgba(47,43,36,.07), 0 1px 1px rgba(47,43,36,.04);
+  --e-2:0 2px 4px rgba(47,43,36,.06), 0 6px 14px -6px rgba(47,43,36,.15);
+  --e-3:0 4px 8px rgba(47,43,36,.07), 0 16px 30px -12px rgba(47,43,36,.20);
+  --e-4:0 8px 16px rgba(47,43,36,.08), 0 32px 60px -20px rgba(47,43,36,.26);
+  --ring:0 0 0 1px var(--c-line);
+  --ring-control:0 0 0 1px var(--c-line-control);
+
+  /* Thumbnail "film stocks" — poster/placeholder background per capture
+     condition, and the error/skeleton ground. Real <img> sits above them. */
+  --film-ir:radial-gradient(120% 90% at 50% 74%,#4A5450,#2A322F 44%,#141917);
+  --film-night:radial-gradient(100% 80% at 62% 88%,#2B3350,#1A1F33 46%,#0B0D16);
+  --film-dusk:linear-gradient(178deg,#5C4E6E,#8A5F53 46%,#3A2C28);
+  --film-dawn:linear-gradient(180deg,#C9A46B,#A98356 40%,#4B3D2C);
+  --film-day:linear-gradient(178deg,#93A579,#6E7F55 48%,#3E4630);
+  --film-rain:linear-gradient(180deg,#6C7378,#4C5457 52%,#272C2E);
+}
+
+/* ---------------------------------------------------------------------------
+   LAYER 2B · DARK, automatic. Guarded so a manual "light" choice still wins.
+   >>> KEEP IN SYNC WITH LAYER 2C BELOW — identical bodies by contract. <<<
+   ------------------------------------------------------------------------ */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+
+    --c-canvas:var(--p-loam-1000);
+    --c-bg:var(--p-loam-950);
+    --c-surface:var(--p-loam-900);
+    --c-surface-2:var(--p-loam-800);
+    --c-surface-sunken:var(--p-loam-975);
+    --c-surface-inset:rgba(246,242,234,.06);
+    --c-overlay:rgba(21,19,15,.84);
+    --c-overlay-solid:var(--p-loam-950);
+
+    --c-text:var(--p-bone-100);        /* 16.62 15.04 12.61 17.37          */
+    --c-text-2:var(--p-bone-400);      /*  9.46  8.56  7.18  9.89          */
+    --c-text-3:var(--p-bark-450);      /*  6.73  6.09  5.10  7.03  AA OK   */
+    --c-text-inv:var(--p-loam-950);
+
+    --c-line-soft:rgba(246,242,234,.07);
+    --c-line:rgba(246,242,234,.12);
+    --c-line-strong:rgba(246,242,234,.20);
+    --c-line-control:var(--p-bark-750); /* 3.99 / 3.61 / 3.02  1.4.11 OK   */
+
+    --c-accent:var(--p-ember-400);
+    --c-accent-hover:var(--p-ember-300);
+    --c-accent-text:var(--p-ember-300); /* 10.16 9.20 7.71 10.63           */
+    --c-on-accent:var(--p-loam-950);    /* 7.44:1 on --c-accent            */
+    --c-accent-wash:#3B2D20;
+    --c-accent-wash-strong:#4C3826;
+    --c-accent-line:#6B4B2E;
+
+    --c-live:var(--p-moss-400);
+    --c-live-text:var(--p-moss-300);    /* 6.73 on --c-live-wash           */
+    --c-live-wash:#33352A;
+    --c-on-live:var(--p-loam-950);      /* 8.35:1 on --p-moss-400          */
+
+    --c-stale:var(--p-amber-400);
+    --c-stale-text:var(--p-amber-300);  /* 7.60 on --c-stale-wash          */
+    --c-stale-wash:#3D3525;
+    --c-on-stale:var(--p-loam-950);     /* 8.62:1 on --p-amber-400         */
+
+    --c-offline:var(--p-bark-500);
+    --c-offline-text:var(--p-bone-400); /* 6.69 on --c-offline-wash        */
+    --c-offline-wash:#343029;
+    --c-on-offline:var(--p-loam-950);   /* 5.72:1 on --p-bark-500          */
+
+    --c-danger:var(--p-clay-400);
+    --c-danger-hover:var(--p-clay-300);
+    --c-danger-text:var(--p-clay-300);  /* 6.11 on --c-danger-wash         */
+    --c-danger-wash:#3C302A;
+    --c-on-danger:var(--p-loam-950);    /* 6.13:1 on --p-clay-400          */
+
+    --c-info:var(--p-dusk-400);
+    --c-info-text:var(--p-dusk-300);    /* 6.06 on --c-info-wash           */
+    --c-info-wash:#333232;
+    --c-on-info:var(--p-loam-950);      /* 5.61:1 on --p-dusk-400          */
+
+    --c-rec:var(--p-clay-400);
+    --c-rec-wash:#3E2E29;
+    --c-rec-text:var(--p-clay-300);     /* 5.98 on --c-rec-wash            */
+
+    --c-focus:var(--p-ember-300);       /* 10.16:1 on bg                   */
+    --c-focus-halo:rgba(239,180,127,.26);
+    --c-selection:rgba(225,146,79,.30);
+    --c-scrim:rgba(6,5,4,.68);
+    --c-skeleton:var(--p-loam-800);
+    --c-skeleton-sheen:rgba(246,242,234,.07);
+    --c-track:rgba(246,242,234,.16);
+    --c-meter-off:rgba(246,242,234,.16);
+
+    --sp-deer-fg:#D39569;     --sp-deer-bg:#392E23;     --sp-deer-dot:#D69566;     /* 5.21 */
+    --sp-squirrel-fg:#D3CB69; --sp-squirrel-bg:#393623; --sp-squirrel-dot:#D6CD66; /* 7.25 */
+    --sp-rabbit-fg:#95D369;   --sp-rabbit-bg:#303723;   --sp-rabbit-dot:#95D666;   /* 6.96 */
+    --sp-coyote-fg:#69D39E;   --sp-coyote-bg:#2A372B;   --sp-coyote-dot:#66D69E;   /* 6.79 */
+    --sp-raccoon-fg:#69B0D3;  --sp-raccoon-bg:#2A3233;  --sp-raccoon-dot:#66B1D6;  /* 5.46 */
+    --sp-opossum-fg:#9D88DD;  --sp-opossum-bg:#2E2733;  --sp-opossum-dot:#8266D6;  /* 4.81 */
+    --sp-bird-fg:#D671C5;     --sp-bird-bg:#392730;     --sp-bird-dot:#D666C4;     /* 4.66 */
+    --sp-fox-fg:#D87989;      --sp-fox-bg:#392726;      --sp-fox-dot:#D66679;      /* 4.70 */
+    --sp-unknown-fg:#A79A87;  --sp-unknown-bg:#2C2822;  --sp-unknown-dot:#8C806D;  /* 5.31 */
+
+    --e-0:none;
+    --e-1:0 1px 2px rgba(0,0,0,.5), inset 0 1px 0 rgba(246,242,234,.05);
+    --e-2:0 2px 6px rgba(0,0,0,.55), 0 8px 18px -8px rgba(0,0,0,.6),
+          inset 0 1px 0 rgba(246,242,234,.05);
+    --e-3:0 6px 14px rgba(0,0,0,.5), 0 22px 40px -16px rgba(0,0,0,.7),
+          inset 0 1px 0 rgba(246,242,234,.06);
+    --e-4:0 10px 24px rgba(0,0,0,.55), 0 40px 70px -24px rgba(0,0,0,.75),
+          inset 0 1px 0 rgba(246,242,234,.06);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   LAYER 2C · DARK, manual. Identical body to 2B so the toggle wins from a
+   light-preferring OS. >>> KEEP IN SYNC WITH LAYER 2B ABOVE. <<<
+   ------------------------------------------------------------------------ */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+
+  --c-canvas:var(--p-loam-1000);
+  --c-bg:var(--p-loam-950);
+  --c-surface:var(--p-loam-900);
+  --c-surface-2:var(--p-loam-800);
+  --c-surface-sunken:var(--p-loam-975);
+  --c-surface-inset:rgba(246,242,234,.06);
+  --c-overlay:rgba(21,19,15,.84);
+  --c-overlay-solid:var(--p-loam-950);
+
+  --c-text:var(--p-bone-100);
+  --c-text-2:var(--p-bone-400);
+  --c-text-3:var(--p-bark-450);
+  --c-text-inv:var(--p-loam-950);
+
+  --c-line-soft:rgba(246,242,234,.07);
+  --c-line:rgba(246,242,234,.12);
+  --c-line-strong:rgba(246,242,234,.20);
+  --c-line-control:var(--p-bark-750);
+
+  --c-accent:var(--p-ember-400);
+  --c-accent-hover:var(--p-ember-300);
+  --c-accent-text:var(--p-ember-300);
+  --c-on-accent:var(--p-loam-950);
+  --c-accent-wash:#3B2D20;
+  --c-accent-wash-strong:#4C3826;
+  --c-accent-line:#6B4B2E;
+
+  --c-live:var(--p-moss-400);
+  --c-live-text:var(--p-moss-300);
+  --c-live-wash:#33352A;
+  --c-on-live:var(--p-loam-950);
+
+  --c-stale:var(--p-amber-400);
+  --c-stale-text:var(--p-amber-300);
+  --c-stale-wash:#3D3525;
+  --c-on-stale:var(--p-loam-950);
+
+  --c-offline:var(--p-bark-500);
+  --c-offline-text:var(--p-bone-400);
+  --c-offline-wash:#343029;
+  --c-on-offline:var(--p-loam-950);
+
+  --c-danger:var(--p-clay-400);
+  --c-danger-hover:var(--p-clay-300);
+  --c-danger-text:var(--p-clay-300);
+  --c-danger-wash:#3C302A;
+  --c-on-danger:var(--p-loam-950);
+
+  --c-info:var(--p-dusk-400);
+  --c-info-text:var(--p-dusk-300);
+  --c-info-wash:#333232;
+  --c-on-info:var(--p-loam-950);
+
+  --c-rec:var(--p-clay-400);
+  --c-rec-wash:#3E2E29;
+  --c-rec-text:var(--p-clay-300);
+
+  --c-focus:var(--p-ember-300);
+  --c-focus-halo:rgba(239,180,127,.26);
+  --c-selection:rgba(225,146,79,.30);
+  --c-scrim:rgba(6,5,4,.68);
+  --c-skeleton:var(--p-loam-800);
+  --c-skeleton-sheen:rgba(246,242,234,.07);
+  --c-track:rgba(246,242,234,.16);
+  --c-meter-off:rgba(246,242,234,.16);
+
+  --sp-deer-fg:#D39569;     --sp-deer-bg:#392E23;     --sp-deer-dot:#D69566;
+  --sp-squirrel-fg:#D3CB69; --sp-squirrel-bg:#393623; --sp-squirrel-dot:#D6CD66;
+  --sp-rabbit-fg:#95D369;   --sp-rabbit-bg:#303723;   --sp-rabbit-dot:#95D666;
+  --sp-coyote-fg:#69D39E;   --sp-coyote-bg:#2A372B;   --sp-coyote-dot:#66D69E;
+  --sp-raccoon-fg:#69B0D3;  --sp-raccoon-bg:#2A3233;  --sp-raccoon-dot:#66B1D6;
+  --sp-opossum-fg:#9D88DD;  --sp-opossum-bg:#2E2733;  --sp-opossum-dot:#8266D6;
+  --sp-bird-fg:#D671C5;     --sp-bird-bg:#392730;     --sp-bird-dot:#D666C4;
+  --sp-fox-fg:#D87989;      --sp-fox-bg:#392726;      --sp-fox-dot:#D66679;
+  --sp-unknown-fg:#A79A87;  --sp-unknown-bg:#2C2822;  --sp-unknown-dot:#8C806D;
+
+  --e-0:none;
+  --e-1:0 1px 2px rgba(0,0,0,.5), inset 0 1px 0 rgba(246,242,234,.05);
+  --e-2:0 2px 6px rgba(0,0,0,.55), 0 8px 18px -8px rgba(0,0,0,.6),
+        inset 0 1px 0 rgba(246,242,234,.05);
+  --e-3:0 6px 14px rgba(0,0,0,.5), 0 22px 40px -16px rgba(0,0,0,.7),
+        inset 0 1px 0 rgba(246,242,234,.06);
+  --e-4:0 10px 24px rgba(0,0,0,.55), 0 40px 70px -24px rgba(0,0,0,.75),
+        inset 0 1px 0 rgba(246,242,234,.06);
+}
+
+/* ---------------------------------------------------------------------------
+   LAYER 3 · TOKEN-LEVEL RESPONSIVE + PLATFORM OVERRIDES
+   These are token reassignments, not component rules. Nothing else may
+   redefine type size or control height per breakpoint.
+   ------------------------------------------------------------------------ */
+
+/* Phone: type goes UP, not down. 375px, held at arm's length, in daylight. */
+@media (max-width:640px){
+  :root{
+    --t-micro:0.75rem;   /* 12 */
+    --t-xs:0.8125rem;    /* 13 */
+    --t-sm:0.875rem;     /* 14 */
+    --t-base:1rem;       /* 16 — species name on a clip card               */
+    --t-md:1.125rem;     /* 18 */
+    --t-lg:1.375rem;     /* 22 */
+    --t-xl:1.5rem;       /* 24 */
+    --t-2xl:1.75rem;     /* 28 */
+    --control-h:44px;
+  }
+}
+
+/* Coarse pointer: every control becomes a real touch target. */
+@media (pointer:coarse){
+  :root{ --control-h:44px; }
+}
+
+@media (prefers-reduced-motion: reduce){
+  :root{
+    --dur-instant:1ms; --dur-fast:1ms; --dur:1ms; --dur-slow:1ms;
+    --dur-sheet:1ms;   /* --dur-undo is a deadline, not motion: unchanged  */
+  }
+}
+
+@media (prefers-contrast: more){
+  :root,:root[data-theme="light"]{
+    --c-line:var(--p-bone-400); --c-line-soft:var(--p-bone-300);
+    --c-line-control:var(--p-bark-600); --c-text-3:var(--p-bark-700);
+  }
+  :root[data-theme="dark"]{
+    --c-line:rgba(246,242,234,.24); --c-line-soft:rgba(246,242,234,.16);
+    --c-line-control:var(--p-bark-450); --c-text-3:var(--p-bone-400);
+  }
+}
+@media (prefers-contrast: more) and (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --c-line:rgba(246,242,234,.24); --c-line-soft:rgba(246,242,234,.16);
+    --c-line-control:var(--p-bark-450); --c-text-3:var(--p-bone-400);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   REQUIRED BASE — ships with the tokens; implementers must not re-derive it.
+   ------------------------------------------------------------------------ */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:var(--c-canvas);
+  color:var(--c-text);
+  font-family:var(--font-sans);
+  font-size:var(--t-base);
+  line-height:var(--lh-normal);
+  -webkit-font-smoothing:antialiased;
+  -webkit-tap-highlight-color:transparent; /* :active states are ours      */
+  overscroll-behavior-y:none;
+}
+::selection{background:var(--c-selection)}
+img,svg,video{display:block;max-width:100%}
+button,input,select,textarea{font:inherit;color:inherit}
+input,select,textarea{font-size:var(--t-input)} /* 16px: no iOS focus zoom */
+:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-xs);
+}
+:focus:not(:focus-visible){outline:none}
+[hidden]{display:none!important}
+.sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0;
+}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms!important;
+    animation-iteration-count:1!important;
+    transition-duration:.01ms!important;
+    scroll-behavior:auto!important;
+  }
+}

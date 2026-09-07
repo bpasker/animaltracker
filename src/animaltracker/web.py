@@ -201,6 +201,7 @@ class WebServer:
         self.app.router.add_get('/', self.handle_root_redirect)
         self.app.router.add_get('/live', self.handle_index)
         self.app.router.add_get('/snapshot/{camera_id}', self.handle_snapshot)
+        self.app.router.add_get('/stream/{camera_id}', self.handle_stream)
         self.app.router.add_post('/save_clip/{camera_id}', self.handle_save_clip)
         self.app.router.add_post('/ptz/{camera_id}', self.handle_ptz)
         self.app.router.add_get('/ptz/{camera_id}/position', self.handle_ptz_position)
@@ -554,6 +555,9 @@ class WebServer:
                         const images = document.querySelectorAll('img');
                         images.forEach(img => {
                             const src = img.getAttribute('data-src');
+                            // MJPEG <img> elements have no data-src; resetting
+                            // their src would tear down the open stream.
+                            if (!src) return;
                             img.src = src + '?t=' + new Date().getTime();
                         });
                     }
@@ -1215,7 +1219,7 @@ class WebServer:
                             <span class="camera-name">{cam_name}</span>
                             <span class="camera-id">{cam_id}</span>
                         </div>
-                        <img src="/snapshot/{cam_id}" data-src="/snapshot/{cam_id}" alt="{cam_name}">
+                        <img src="/stream/{cam_id}" alt="{cam_name}">
                         <button onclick="saveClip('{cam_id}')">Save Last 30s</button>
                         {ptz_html}
                     </div>
@@ -5279,101 +5283,8 @@ class WebServer:
         # Get current detections for overlay
         detections = getattr(worker, 'latest_detections', []) or []
         
-        def process_image(img, detections, stale, age_seconds):
-            height, width = img.shape[:2]
-
-            # Draw bounding boxes only if the stream is live (otherwise the boxes
-            # would be drawn on a stale frame and look misleading).
-            if not stale:
-                for det in detections:
-                    if det.bbox:
-                        x1, y1, x2, y2 = [int(v) for v in det.bbox]
-
-                        # Draw bounding box (green)
-                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                        # Prepare label with species name and confidence
-                        common_name = get_common_name(det.species)
-                        label = f"{common_name} {det.confidence*100:.0f}%"
-
-                        # Calculate text size for background rectangle
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 0.6
-                        thickness = 2
-                        (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-
-                        # Draw background rectangle for label
-                        label_y = max(y1 - 10, text_height + 10)
-                        cv2.rectangle(img,
-                                      (x1, label_y - text_height - 5),
-                                      (x1 + text_width + 10, label_y + 5),
-                                      (0, 255, 0), -1)
-
-                        # Draw label text (black on green background)
-                        cv2.putText(img, label, (x1 + 5, label_y),
-                                    font, font_scale, (0, 0, 0), thickness)
-
-            # When the stream is stale, dim the frame and overlay a clear banner
-            # so the operator immediately sees there is no live video.
-            if stale:
-                # Dim the underlying (stale) image
-                img = cv2.addWeighted(img, 0.45, np.zeros_like(img), 0.0, 0)
-
-                banner_color = (0, 0, 220)  # red (BGR)
-                if age_seconds == float('inf') or age_seconds > 86400:
-                    age_text = "no frames received"
-                elif age_seconds < 60:
-                    age_text = f"last frame {int(age_seconds)}s ago"
-                elif age_seconds < 3600:
-                    age_text = f"last frame {int(age_seconds // 60)}m ago"
-                else:
-                    age_text = f"last frame {int(age_seconds // 3600)}h ago"
-
-                title = "STREAM DOWN"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-
-                # Title sized roughly proportional to image width
-                title_scale = max(0.9, width / 700.0)
-                title_thickness = max(2, int(title_scale * 2))
-                (tw, th), _ = cv2.getTextSize(title, font, title_scale, title_thickness)
-
-                sub_scale = max(0.5, title_scale * 0.55)
-                sub_thickness = max(1, int(sub_scale * 2))
-                (sw, sh), _ = cv2.getTextSize(age_text, font, sub_scale, sub_thickness)
-
-                pad = int(20 * title_scale)
-                box_w = max(tw, sw) + pad * 2
-                box_h = th + sh + pad * 3
-                x0 = (width - box_w) // 2
-                y0 = (height - box_h) // 2
-
-                # Solid banner background
-                cv2.rectangle(img, (x0, y0), (x0 + box_w, y0 + box_h), banner_color, -1)
-                cv2.rectangle(img, (x0, y0), (x0 + box_w, y0 + box_h), (255, 255, 255), 2)
-
-                cv2.putText(
-                    img, title,
-                    (x0 + (box_w - tw) // 2, y0 + pad + th),
-                    font, title_scale, (255, 255, 255), title_thickness, cv2.LINE_AA,
-                )
-                cv2.putText(
-                    img, age_text,
-                    (x0 + (box_w - sw) // 2, y0 + pad * 2 + th + sh),
-                    font, sub_scale, (255, 255, 255), sub_thickness, cv2.LINE_AA,
-                )
-
-            # Resize for web display
-            if width > 640:
-                scale = 640 / width
-                new_height = int(height * scale)
-                img = cv2.resize(img, (640, new_height), interpolation=cv2.INTER_AREA)
-
-            # Encode frame to JPEG with lower quality (70%)
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]
-            return cv2.imencode('.jpg', img, encode_param)
-
         success, buffer = await loop.run_in_executor(
-            None, process_image, worker.latest_frame.copy(), detections, is_stale, age,
+            None, self._render_frame_jpeg, worker.latest_frame.copy(), detections, is_stale, age,
         )
 
         if not success:
@@ -5385,6 +5296,199 @@ class WebServer:
             'Cache-Control': 'no-store',
         }
         return web.Response(body=buffer.tobytes(), content_type='image/jpeg', headers=headers)
+
+    def _render_frame_jpeg(self, img, detections, stale, age_seconds, quality=70):
+        """Draw overlays, downscale to 640px wide, encode JPEG.
+
+        Shared by the single-shot /snapshot handler and the /stream MJPEG
+        handler so both render identically. Pure function of its arguments;
+        safe to call in a worker thread.
+        """
+        height, width = img.shape[:2]
+
+        # Draw bounding boxes only if the stream is live (otherwise the boxes
+        # would be drawn on a stale frame and look misleading).
+        if not stale:
+            for det in detections:
+                if det.bbox:
+                    x1, y1, x2, y2 = [int(v) for v in det.bbox]
+
+                    # Draw bounding box (green)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    # Prepare label with species name and confidence
+                    common_name = get_common_name(det.species)
+                    label = f"{common_name} {det.confidence*100:.0f}%"
+
+                    # Calculate text size for background rectangle
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.6
+                    thickness = 2
+                    (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+
+                    # Draw background rectangle for label
+                    label_y = max(y1 - 10, text_height + 10)
+                    cv2.rectangle(img,
+                                  (x1, label_y - text_height - 5),
+                                  (x1 + text_width + 10, label_y + 5),
+                                  (0, 255, 0), -1)
+
+                    # Draw label text (black on green background)
+                    cv2.putText(img, label, (x1 + 5, label_y),
+                                font, font_scale, (0, 0, 0), thickness)
+
+        # When the stream is stale, dim the frame and overlay a clear banner
+        # so the operator immediately sees there is no live video.
+        if stale:
+            # Dim the underlying (stale) image
+            img = cv2.addWeighted(img, 0.45, np.zeros_like(img), 0.0, 0)
+
+            banner_color = (0, 0, 220)  # red (BGR)
+            if age_seconds == float('inf') or age_seconds > 86400:
+                age_text = "no frames received"
+            elif age_seconds < 60:
+                age_text = f"last frame {int(age_seconds)}s ago"
+            elif age_seconds < 3600:
+                age_text = f"last frame {int(age_seconds // 60)}m ago"
+            else:
+                age_text = f"last frame {int(age_seconds // 3600)}h ago"
+
+            title = "STREAM DOWN"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+
+            # Title sized roughly proportional to image width
+            title_scale = max(0.9, width / 700.0)
+            title_thickness = max(2, int(title_scale * 2))
+            (tw, th), _ = cv2.getTextSize(title, font, title_scale, title_thickness)
+
+            sub_scale = max(0.5, title_scale * 0.55)
+            sub_thickness = max(1, int(sub_scale * 2))
+            (sw, sh), _ = cv2.getTextSize(age_text, font, sub_scale, sub_thickness)
+
+            pad = int(20 * title_scale)
+            box_w = max(tw, sw) + pad * 2
+            box_h = th + sh + pad * 3
+            x0 = (width - box_w) // 2
+            y0 = (height - box_h) // 2
+
+            # Solid banner background
+            cv2.rectangle(img, (x0, y0), (x0 + box_w, y0 + box_h), banner_color, -1)
+            cv2.rectangle(img, (x0, y0), (x0 + box_w, y0 + box_h), (255, 255, 255), 2)
+
+            cv2.putText(
+                img, title,
+                (x0 + (box_w - tw) // 2, y0 + pad + th),
+                font, title_scale, (255, 255, 255), title_thickness, cv2.LINE_AA,
+            )
+            cv2.putText(
+                img, age_text,
+                (x0 + (box_w - sw) // 2, y0 + pad * 2 + th + sh),
+                font, sub_scale, (255, 255, 255), sub_thickness, cv2.LINE_AA,
+            )
+
+        # Resize for web display
+        if width > 640:
+            scale = 640 / width
+            new_height = int(height * scale)
+            img = cv2.resize(img, (640, new_height), interpolation=cv2.INTER_AREA)
+
+        # Encode frame to JPEG
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        return cv2.imencode('.jpg', img, encode_param)
+
+    async def _write_mjpeg_part(self, response, boundary: str, payload: bytes) -> None:
+        """Write one multipart/x-mixed-replace part."""
+        header = (
+            f"--{boundary}\r\n"
+            f"Content-Type: image/jpeg\r\n"
+            f"Content-Length: {len(payload)}\r\n\r\n"
+        ).encode('ascii')
+        await response.write(header + payload + b"\r\n")
+
+    async def handle_stream(self, request):
+        """MJPEG stream for a camera: multipart/x-mixed-replace.
+
+        Replaces the old 2-second snapshot polling on /live. The browser holds
+        one connection open and frames are pushed as the capture loop produces
+        them, so the view runs at the camera's real rate instead of 0.5 fps.
+
+        ``latest_frame`` is updated on every decoded frame (pipeline.py, before
+        the frame_skip gate), so this is independent of the detector's rate.
+        """
+        camera_id = request.match_info['camera_id']
+        worker = self.workers.get(camera_id)
+
+        if not worker:
+            return web.Response(status=404, text="Camera not found")
+
+        boundary = 'frame'
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                'Content-Type': f'multipart/x-mixed-replace; boundary={boundary}',
+                'Cache-Control': 'no-store, no-cache, must-revalidate',
+                'Pragma': 'no-cache',
+            },
+        )
+        await response.prepare(request)
+
+        loop = asyncio.get_running_loop()
+        last_sent_ts = 0.0
+        # Bound the encode load: every part costs a resize + JPEG encode in a
+        # worker thread, and the capture loop can run well above this.
+        MAX_FPS = 15.0
+        min_interval = 1.0 / MAX_FPS
+        idle_poll = 0.05
+        STALE_AFTER_SEC = 5.0
+
+        try:
+            while True:
+                now = _time.time()
+                last_ts = float(getattr(worker, 'latest_frame_ts', 0.0) or 0.0)
+                stream_connected = bool(getattr(worker, 'stream_connected', False))
+                age = now - last_ts if last_ts > 0 else float('inf')
+                is_stale = (not stream_connected) or age > STALE_AFTER_SEC
+
+                frame = worker.latest_frame
+
+                if frame is None:
+                    # No frame at all: send the placeholder slowly rather than
+                    # hot-looping on a camera that may never come up.
+                    payload = self._render_stream_down_placeholder(camera_id, age=age)
+                    await self._write_mjpeg_part(response, boundary, payload)
+                    await asyncio.sleep(1.0)
+                    continue
+
+                # Nothing new to send. Stale frames still get resent so the
+                # STREAM DOWN banner's age counter keeps ticking.
+                if last_ts <= last_sent_ts and not is_stale:
+                    await asyncio.sleep(idle_poll)
+                    continue
+
+                detections = getattr(worker, 'latest_detections', []) or []
+                success, buffer = await loop.run_in_executor(
+                    None, self._render_frame_jpeg,
+                    frame.copy(), detections, is_stale, age,
+                )
+                if not success:
+                    await asyncio.sleep(idle_poll)
+                    continue
+
+                await self._write_mjpeg_part(response, boundary, buffer.tobytes())
+                last_sent_ts = last_ts
+                await asyncio.sleep(min_interval if not is_stale else 1.0)
+
+        except (ConnectionResetError, ConnectionAbortedError, asyncio.CancelledError):
+            pass  # viewer closed the tab / navigated away
+        except Exception as e:  # noqa: BLE001
+            LOGGER.debug("MJPEG stream for %s ended: %s", camera_id, e)
+        finally:
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+
+        return response
 
     def _render_stream_down_placeholder(self, camera_id: str, age: float = float('inf')) -> bytes:
         """Generate a black JPEG with a STREAM DOWN banner for a camera with no frame."""

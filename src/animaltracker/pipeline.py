@@ -1301,6 +1301,26 @@ class StreamWorker:
             filtered.append(det)
         return filtered
 
+    def _ptz_is_tracking(self) -> bool:
+        """True when the PTZ tracker this worker feeds is following a subject.
+
+        Mirrors ``skip_source_size_filter`` in ``PTZTracker`` so the pipeline
+        and the tracker agree about when the patrol-oriented size gate should
+        step aside. INVESTIGATE counts too: that mode exists precisely to
+        chase small wide-angle candidates, so filtering them out here would
+        defeat it.
+        """
+        tracker = self.ptz_tracker
+        if tracker is None or not self.ptz_drives_tracking:
+            return False
+        try:
+            return (
+                tracker.is_track_enabled()
+                and tracker.get_mode() in ("tracking", "investigate")
+            )
+        except Exception:  # pragma: no cover - defensive; never block detection
+            return False
+
     def _filter_false_positives(
         self, detections: List[Detection], frame_width: int, frame_height: int
     ) -> List[Detection]:
@@ -1311,15 +1331,35 @@ class StreamWorker:
         2. Extreme aspect ratio: very long/thin shapes are branches/leaves, not animals
         
         These filters run BEFORE event triggering to prevent false clips.
+
+        IMPORTANT: while the PTZ tracker is already TRACKING, the minimum-area
+        gate is relaxed to ``tracking_min_detection_area``. The purpose of the
+        area gate is to ignore wind-blown leaves during patrol, but the same
+        animal being followed routinely shrinks below ``min_detection_area``
+        in a wide sub-stream (cam1 at 896x512 puts the 0.005 default at a
+        48x48 px box -- larger than a coyote at range). Applying the patrol
+        threshold here deleted those detections *before* they were published
+        to ``latest_detections``, so the PTZ tracker's own size-filter
+        exemption for locked/tracked subjects (see
+        ``skip_source_size_filter`` in ptz_tracker.py) operated on a list
+        that no longer contained them. Measured effect: 59% of cam1's
+        detections of a tracked coyote never reached the tracker, which then
+        logged "cam1 has none" and returned to patrol on a visible target.
         """
         if not detections:
             return detections
-        
-        # Use threshold-level min_detection_area (applies to all cameras).
+
+        # Use threshold-level min_detection_area (applies to all cameras),
+        # relaxed while the PTZ tracker is actively following a subject.
         min_area_frac = self.camera.thresholds.min_detection_area
+        if self._ptz_is_tracking():
+            min_area_frac = min(
+                min_area_frac,
+                self.camera.thresholds.tracking_min_detection_area,
+            )
         frame_area = frame_width * frame_height
         min_area_pixels = min_area_frac * frame_area
-        
+
         # Animals have aspect ratios roughly between 1:4 and 4:1
         # Leaves/branches tend to be much thinner (1:8 or more)
         max_aspect_ratio = 5.0
@@ -2077,9 +2117,9 @@ class PipelineOrchestrator:
                                 'patrol_presets': ptz_cfg.patrol_presets,
                                 'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
                                 'move_min_duration': getattr(ptz_cfg, 'move_min_duration', 0.6),
-                                'tracking_step_duration': getattr(ptz_cfg, 'tracking_step_duration', 0.2),
+                                'tracking_step_duration': getattr(ptz_cfg, 'tracking_step_duration', 0.35),
                                 'low_fill_threshold': getattr(ptz_cfg, 'low_fill_threshold', 0.30),
-                                'low_fill_velocity_cap': getattr(ptz_cfg, 'low_fill_velocity_cap', 0.15),
+                                'low_fill_velocity_cap': getattr(ptz_cfg, 'low_fill_velocity_cap', 0.30),
                                 'low_fill_cap_full_offset': getattr(ptz_cfg, 'low_fill_cap_full_offset', 0.40),
                                 'cam1_fallback_delay': getattr(ptz_cfg, 'cam1_fallback_delay', 3.0),
                                 'zoom_fov_calibration_path': getattr(ptz_cfg, 'zoom_fov_calibration_path', None),
@@ -2180,9 +2220,9 @@ class PipelineOrchestrator:
                                 'patrol_presets': ptz_cfg.patrol_presets,
                                 'patrol_dwell_time': ptz_cfg.patrol_dwell_time,
                                 'move_min_duration': getattr(ptz_cfg, 'move_min_duration', 0.6),
-                                'tracking_step_duration': getattr(ptz_cfg, 'tracking_step_duration', 0.2),
+                                'tracking_step_duration': getattr(ptz_cfg, 'tracking_step_duration', 0.35),
                                 'low_fill_threshold': getattr(ptz_cfg, 'low_fill_threshold', 0.30),
-                                'low_fill_velocity_cap': getattr(ptz_cfg, 'low_fill_velocity_cap', 0.15),
+                                'low_fill_velocity_cap': getattr(ptz_cfg, 'low_fill_velocity_cap', 0.30),
                                 'low_fill_cap_full_offset': getattr(ptz_cfg, 'low_fill_cap_full_offset', 0.40),
                                 'cam1_fallback_delay': getattr(ptz_cfg, 'cam1_fallback_delay', 3.0),
                                 'zoom_fov_calibration_path': getattr(ptz_cfg, 'zoom_fov_calibration_path', None),

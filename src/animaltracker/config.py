@@ -115,6 +115,7 @@ class ThresholdSettings(BaseModel):
     min_frames: int = Field(default=3, ge=1)
     min_duration: float = Field(default=2.0, ge=0)
     min_detection_area: float = Field(default=0.005, ge=0.0, le=0.5, description="Ignore detections smaller than this fraction of frame area (0.005 = 0.5%%, filters leaves/noise)")
+    tracking_min_detection_area: float = Field(default=0.0005, ge=0.0, le=0.5, description="Relaxed min area used instead of min_detection_area while the PTZ tracker is already TRACKING. A subject being followed routinely shrinks below min_detection_area in the wide view; dropping it there starves the PTZ controller and makes it return to patrol on a target it can still see.")
     blur_threshold: float = Field(default=50.0, ge=0.0, le=1000.0, description="Laplacian variance below this value = blurry frame, skip detection. 0 = disabled. 50-100 works for most cameras.")
     ptz_settle_time: float = Field(default=0.5, ge=0.0, le=5.0, description="Seconds to wait after PTZ movement before processing detections (0 = disabled)")
 
@@ -125,7 +126,7 @@ class PTZTrackingSettings(BaseModel):
     Optimized defaults for real-time tracking with split-model architecture:
     - update_interval: 0.1s (10 updates/sec) for responsive tracking
     - smoothing: 0.15 for faster response with minimal jitter
-    - patrol_return_delay: 2.0s for quicker return to patrol
+    - patrol_return_delay: 5.0s before returning to patrol
     """
     enabled: bool = Field(default=False, description="Enable PTZ auto-tracking")
     target_camera_id: Optional[str] = Field(default=None, description="Camera ID to send PTZ commands to (for linked cameras)")
@@ -145,7 +146,7 @@ class PTZTrackingSettings(BaseModel):
     # Patrol mode settings (scan for objects)
     patrol_enabled: bool = Field(default=True, description="Enable patrol sweep when no objects detected")
     patrol_speed: float = Field(default=0.08, ge=0.02, le=1.0, description="Patrol sweep speed (0.08 = slow for detection)")
-    patrol_return_delay: float = Field(default=2.0, ge=0.5, le=30.0, description="Seconds to wait after losing object before returning to patrol")
+    patrol_return_delay: float = Field(default=5.0, ge=0.5, le=30.0, description="Seconds without a sighting from ANY contributing camera before returning to patrol. 2.0 was routinely tripped by the PTZ settle gate on a target that was still visible.")
     # Track mode settings (follow detected objects)
     track_enabled: bool = Field(default=True, description="Enable tracking of detected objects")
     # Preset-based patrol (instead of continuous sweep)
@@ -153,10 +154,10 @@ class PTZTrackingSettings(BaseModel):
     patrol_dwell_time: float = Field(default=10.0, ge=2.0, le=120.0, description="Seconds to stay at each preset position")
     # Tracking-stability tunables
     move_min_duration: float = Field(default=0.6, ge=0.0, le=5.0, description="Minimum seconds a tracking ContinuousMove is allowed to run before it can be ptz_stop'd by a no-detection tick")
-    tracking_step_duration: float = Field(default=0.2, ge=0.05, le=2.0, description="Maximum seconds a tracking ContinuousMove pulse may run before an automatic Stop is issued")
+    tracking_step_duration: float = Field(default=0.35, ge=0.05, le=2.0, description="Maximum seconds a tracking ContinuousMove pulse may run before an automatic Stop is issued")
     low_fill_threshold: float = Field(default=0.30, ge=0.01, le=1.0, description="Apply low-fill pan/tilt velocity caps when target max dimension is below this fraction of the frame")
-    low_fill_velocity_cap: float = Field(default=0.15, ge=0.01, le=1.0, description="Maximum pan/tilt velocity for low-fill targets before per-axis offset scaling")
-    low_fill_cap_full_offset: float = Field(default=0.40, ge=0.01, le=1.0, description="Offset magnitude where the low-fill velocity cap reaches its full configured value")
+    low_fill_velocity_cap: float = Field(default=0.30, ge=0.01, le=1.0, description="Maximum pan/tilt velocity for low-fill targets, before scaling by overall offset magnitude")
+    low_fill_cap_full_offset: float = Field(default=0.40, ge=0.01, le=1.0, description="Overall offset magnitude at which the low-fill velocity cap reaches its full configured value")
     cam1_fallback_delay: float = Field(default=3.0, ge=0.0, le=30.0, description="Seconds to suppress source-camera (cam1) repositioning after the target camera (cam2) drove tracking. Prevents miscalibrated cam1->cam2 swings on a single dropped cam2 frame")
     # Visibility-aware cam1/cam2 recovery after cam2 loses a target.
     zoom_fov_calibration_path: Optional[str] = Field(default="config/zoom_fov_calibration.json", description="Optional JSON calibration mapping cam2 zoom FOV into cam1 coordinates. Used to decide whether cam2 should recenter, zoom out, or cautiously zoom in after target loss")

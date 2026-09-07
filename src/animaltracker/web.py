@@ -1274,7 +1274,7 @@ class WebServer:
                 'mode': 'idle',
                 'patrol_enabled': False,
                 'track_enabled': False,
-                'patrol_return_delay': 3.0
+                'patrol_return_delay': 5.0
             })
         
         import time
@@ -9526,7 +9526,7 @@ class WebServer:
                     'multi_camera_tracking': getattr(cam.ptz_tracking, 'multi_camera_tracking', True),
                     'target_fill_pct': getattr(cam.ptz_tracking, 'target_fill_pct', 0.6),
                     'patrol_enabled': getattr(cam.ptz_tracking, 'patrol_enabled', True),
-                    'patrol_return_delay': getattr(cam.ptz_tracking, 'patrol_return_delay', 2.0),
+                    'patrol_return_delay': getattr(cam.ptz_tracking, 'patrol_return_delay', 5.0),
                 },
                 'recent_detections': recent_detections.get(cam_id, {}),
             }

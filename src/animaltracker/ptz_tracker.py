@@ -221,13 +221,19 @@ class PTZTracker:
     # fill bypassed the cap, got vel ~0.6 on recovery, and the camera flew
     # past the target between detection ticks.
     low_fill_threshold: float = 0.30        # bbox max-dim / frame-dim fraction
-    # Keep low-fill pulses conservative. The timer-backed step stop below
-    # makes each pulse reliable; if we need more catch-up speed, tune this
-    # in config instead of letting a single stale detection authorize a long
-    # slew.
-    low_fill_velocity_cap: float = 0.15     # cap on |pan|/|tilt| when below threshold
+    # Raised back to 0.30 (was 0.15). The timer-backed step stop below makes
+    # each pulse reliably bounded, so the cap no longer has to double as
+    # overshoot protection. At 0.15 the recorded controller only ever
+    # commanded ~22% of the velocity it computed and the offset grew
+    # monotonically while a coyote walked out of cam2's FOV.
+    #
+    # NOTE: this dataclass default is NOT what production uses -- config.py's
+    # PTZTrackingSettings and config/cameras.yml both override it via
+    # create_ptz_tracker(). Change all three together or the tuning is dead
+    # (that is how the 505be72 raise silently never took effect).
+    low_fill_velocity_cap: float = 0.30     # cap on |pan|/|tilt| when below threshold
     # Offset magnitude at which the low-fill cap is allowed to reach its
-    # full value. Below this, the per-axis cap is scaled proportionally to
+    # full value. Below this, the cap is scaled proportionally to the overall
     # |offset| so we taper toward zero velocity as we approach center,
     # instead of slamming the same 0.22 pulse for both 0.13 and 0.46
     # offsets (which causes overshoot of small offsets and undershoot of
@@ -246,7 +252,7 @@ class PTZTracker:
     patrol_speed: float = 0.15  # Patrol pan speed (slow sweep)
     patrol_tilt: float = 0.0    # Tilt position during patrol
     patrol_zoom: float = 0.0    # Zoom level during patrol (wide)
-    patrol_return_delay: float = 2.0  # Faster return to patrol (was 3.0)
+    patrol_return_delay: float = 5.0  # Seconds with no sighting from any camera before patrol
 
     # Minimum time (seconds) a ContinuousMove issued by tracking should be
     # allowed to run before _handle_no_detections is permitted to ptz_stop it.
@@ -274,7 +280,7 @@ class PTZTracker:
     # bounded amount of slew, then the camera waits for the next detection.
     # A timer enforces this duration even if the detector does not call back
     # into the tracker until much later.
-    tracking_step_duration: float = 0.20
+    tracking_step_duration: float = 0.35
 
     # When the target camera (cam2) has been driving tracking, suppress
     # cam1-driven repositioning for this many seconds after the last cam2
@@ -346,6 +352,17 @@ class PTZTracker:
     _mode: PTZMode = field(default=PTZMode.IDLE, init=False)
     _patrol_direction: int = field(default=1, init=False)  # 1 = right, -1 = left
     _last_detection_time: float = field(default=0.0, init=False)
+    # Wall-clock time at which *any* contributing camera last saw the subject,
+    # regardless of whether that sighting went on to drive a move. Distinct
+    # from ``_last_detection_time``, which records when a camera last *drove*
+    # tracking and is paired with ``_last_detection_source`` to arbitrate the
+    # cam1/cam2 handoff (``cam1_fallback_delay``). Conflating the two would
+    # make the cam1 suppression window never expire. The return-to-patrol
+    # decision must use this one: sightings that were rate-limited, held by
+    # the deadzone, skipped as duplicate frames, blanked by the PTZ settle
+    # gate on the moved camera, or consumed by visibility recovery still
+    # prove the animal is there.
+    _last_target_seen_time: float = field(default=0.0, init=False)
     _patrol_reverse_time: float = field(default=0.0, init=False)
     _tracking_lost_logged_at: float = field(default=0.0, init=False)  # When we last logged "tracking lost"
     _last_tracked_species: str = field(default="", init=False)  # Species we were tracking when lost
@@ -642,13 +659,20 @@ class PTZTracker:
     ) -> Tuple[float, float, bool]:
         """Cap |pan|/|tilt| velocity when the target is small in frame.
 
-        The cap is applied per-axis and scales proportionally to |offset|
-        on that axis: at |offset| >= ``low_fill_cap_full_offset`` the full
-        cap is allowed; below that, the cap is reduced linearly so the
-        commanded velocity tapers toward zero as we approach center. This
-        prevents the controller from issuing the same maximum pulse for a
-        0.13 offset and a 0.46 offset (which produced overshoot of small
-        offsets and undershoot of large ones with sparse detection ticks).
+        The cap scales proportionally to the *overall* offset magnitude: at
+        |offset| >= ``low_fill_cap_full_offset`` the full cap is allowed;
+        below that, the cap is reduced linearly so the commanded velocity
+        tapers toward zero as we approach center. This prevents the
+        controller from issuing the same maximum pulse for a 0.13 offset and
+        a 0.46 offset (which produced overshoot of small offsets and
+        undershoot of large ones with sparse detection ticks).
+
+        The scale deliberately uses the offset *magnitude* rather than each
+        axis's own offset. Scaling per-axis crushed the axis the animal was
+        actually moving along whenever the other axis happened to dominate:
+        with the subject at offset (-0.074, +0.479) the pan cap collapsed to
+        0.15 * 0.074/0.40 = 0.028, a 4x cut on the axis that needed the
+        correction, purely because it was more off-centre vertically.
 
         Returns the (possibly clamped) velocities and whether a cap was applied.
         """
@@ -656,8 +680,10 @@ class PTZTracker:
             return pan_velocity, tilt_velocity, False
         base_cap = max(0.0, min(1.0, self.low_fill_velocity_cap))
         full_off = max(1e-3, self.low_fill_cap_full_offset)
-        cap_pan = base_cap * max(0.0, min(1.0, abs(offset_x) / full_off))
-        cap_tilt = base_cap * max(0.0, min(1.0, abs(offset_y) / full_off))
+        offset_magnitude = (offset_x ** 2 + offset_y ** 2) ** 0.5
+        cap_scale = max(0.0, min(1.0, offset_magnitude / full_off))
+        cap_pan = base_cap * cap_scale
+        cap_tilt = base_cap * cap_scale
         capped = False
         if abs(pan_velocity) > cap_pan:
             pan_velocity = cap_pan if pan_velocity > 0 else -cap_pan
@@ -1192,6 +1218,12 @@ class PTZTracker:
         # Auto-stop expired tracking step BEFORE rate-limiting so it always
         # fires within ~1 worker tick of the scheduled time.
         self._check_tracking_step_expiry(now)
+        # Record the sighting BEFORE the rate limit can discard this tick.
+        # A detection that arrives inside the update_interval window still
+        # proves the subject is present, and must not count toward the
+        # return-to-patrol timer.
+        if detections and self._track_active:
+            self._last_target_seen_time = now
         if now - self._last_update < self.update_interval:
             PTZ_LOGGER.debug(
                 "[RATE_LIMIT] Skipping update, %.2fs since last (interval=%.2fs)",
@@ -1382,17 +1414,23 @@ class PTZTracker:
         # Auto-stop expired tracking step BEFORE rate-limiting so it always
         # fires within ~1 worker tick of the scheduled time.
         self._check_tracking_step_expiry(now)
-        if now - self._last_update < self.update_interval:
-            return False
 
-        self._last_update = now
-
-        # Extract detections from each camera
+        # Extract detections from each camera. Done BEFORE the rate limit so a
+        # sighting that lands inside the update_interval window still refreshes
+        # the "target seen" clock instead of counting toward return-to-patrol.
         source_data = camera_detections.get(source_camera_id)
         target_data = camera_detections.get(target_camera_id)
 
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
+
+        if (source_detections or target_detections) and self._track_active:
+            self._last_target_seen_time = now
+
+        if now - self._last_update < self.update_interval:
+            return False
+
+        self._last_update = now
 
         # Capture "investigate candidates" BEFORE size filtering removes them.
         # These are source-camera detections that fall in the size band
@@ -2224,7 +2262,16 @@ class PTZTracker:
         )
 
         if self._mode == PTZMode.TRACKING:
-            time_since_detection = now - self._last_detection_time
+            # Measure from the most recent *sighting* by any camera, not from
+            # the last sighting that drove a move. Moves blank the moved
+            # camera's detections for ptz_settle_time, so keying off
+            # _last_detection_time alone made the timer run faster the harder
+            # we were tracking -- 12 false TRACKING_LOSTs and 3 returns to
+            # patrol in 55s on a coyote that post-processing shows was
+            # continuously visible.
+            time_since_detection = now - max(
+                self._last_detection_time, self._last_target_seen_time
+            )
 
             if self._tracking_lost_logged_at == 0.0:
                 self._tracking_lost_logged_at = now
@@ -2876,7 +2923,7 @@ def create_ptz_tracker(
             - update_interval: Seconds between PTZ updates (default 0.1 = 10/sec)
             - patrol_enabled: Enable patrol mode when no detections (default True)
             - patrol_speed: Patrol sweep speed (default 0.15)
-            - patrol_return_delay: Seconds to wait before returning to patrol (default 2.0)
+            - patrol_return_delay: Seconds to wait before returning to patrol (default 5.0)
             - patrol_presets: List of preset tokens/names for patrol (default [])
             - patrol_dwell_time: Seconds to stay at each preset (default 10.0)
             - secondary_cameras: List of camera IDs that can contribute detections
@@ -2904,11 +2951,11 @@ def create_ptz_tracker(
         update_interval=config.get('update_interval', 0.1),  # 10 updates/sec (was 0.2)
         patrol_enabled=config.get('patrol_enabled', True),
         patrol_speed=config.get('patrol_speed', 0.15),
-        patrol_return_delay=config.get('patrol_return_delay', 2.0),  # Faster return (was 3.0)
+        patrol_return_delay=config.get('patrol_return_delay', 5.0),
         move_min_duration=config.get('move_min_duration', 0.6),
-        tracking_step_duration=config.get('tracking_step_duration', 0.2),
+        tracking_step_duration=config.get('tracking_step_duration', 0.35),
         low_fill_threshold=config.get('low_fill_threshold', 0.30),
-        low_fill_velocity_cap=config.get('low_fill_velocity_cap', 0.15),
+        low_fill_velocity_cap=config.get('low_fill_velocity_cap', 0.30),
         low_fill_cap_full_offset=config.get('low_fill_cap_full_offset', 0.40),
         cam1_fallback_delay=config.get('cam1_fallback_delay', 3.0),
         investigate_enabled=config.get('investigate_enabled', False),

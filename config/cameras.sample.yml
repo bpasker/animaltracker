@@ -87,7 +87,7 @@ cameras:
       # Optimized for YOLO's ~50-150ms inference
       update_interval: 0.1        # 10 PTZ updates/sec (fast response)
       smoothing: 0.15             # Low smoothing for quick movement
-      patrol_return_delay: 2.0    # Quick return to patrol when animal lost
+      patrol_return_delay: 5.0    # Seconds without any sighting before returning to patrol
       patrol_enabled: true        # Sweep when no detections
       patrol_speed: 0.08          # Slow patrol for detection
       # Optional cam1/cam2 visibility-aware recovery. Create this with:

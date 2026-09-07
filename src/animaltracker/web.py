@@ -98,6 +98,14 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# A PTZ 'move' starts continuous motion that only ends when a 'stop' arrives. If that
+# stop is lost — dropped request, closed tab, backgrounded phone, a touchend that never
+# fires — the camera slews until it hits a limit. This is the server-side backstop: any
+# move is automatically stopped after this long unless another PTZ command supersedes it.
+# Generous on purpose, so it only ever catches the failure case and never interrupts a
+# deliberate long pan.
+PTZ_DEADMAN_SECONDS = 10.0
+
 
 # --- Pre-compiled regex patterns for /api/logs (compiled once at import) ---
 # HTTP access-log noise we always want to exclude.
@@ -197,6 +205,8 @@ class WebServer:
         self.state_file = config_dir / 'ptz_state.json' if config_dir else None
         # Track active reprocessing jobs: {clip_path: {'started': timestamp, 'clip_name': name}}
         self.reprocessing_jobs: Dict[str, dict] = {}
+        # Per-camera PTZ dead-man timers: {camera_id: asyncio.Task}
+        self._ptz_deadman: Dict[str, 'asyncio.Task'] = {}
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_root_redirect)
         self.app.router.add_get('/live', self.handle_index)
@@ -1232,6 +1242,38 @@ class WebServer:
         """
         return web.Response(text=html, content_type='text/html')
 
+    def _cancel_ptz_deadman(self, camera_id: str) -> None:
+        """Cancel any pending auto-stop for this camera."""
+        task = self._ptz_deadman.pop(camera_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _arm_ptz_deadman(self, camera_id: str, worker) -> None:
+        """(Re)arm the auto-stop watchdog for a camera that was just told to move."""
+        self._cancel_ptz_deadman(camera_id)
+
+        async def _auto_stop():
+            try:
+                await asyncio.sleep(PTZ_DEADMAN_SECONDS)
+            except asyncio.CancelledError:
+                return
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, worker.onvif_client.ptz_stop, worker.onvif_profile_token
+                )
+                LOGGER.warning(
+                    "PTZ dead-man stopped %s after %.0fs with no follow-up command "
+                    "(a 'stop' was probably lost)",
+                    camera_id, PTZ_DEADMAN_SECONDS,
+                )
+            except Exception as e:
+                LOGGER.error("PTZ dead-man stop failed for %s: %s", camera_id, e)
+            finally:
+                self._ptz_deadman.pop(camera_id, None)
+
+        self._ptz_deadman[camera_id] = asyncio.create_task(_auto_stop())
+
     async def handle_ptz(self, request):
         camera_id = request.match_info['camera_id']
         worker = self.workers.get(camera_id)
@@ -1255,7 +1297,10 @@ class WebServer:
                     worker.onvif_profile_token, 
                     pan, tilt, zoom
                 )
+                # Motion is now continuous; guarantee it ends even if the stop never arrives.
+                self._arm_ptz_deadman(camera_id, worker)
             elif action == 'stop':
+                self._cancel_ptz_deadman(camera_id)
                 await loop.run_in_executor(
                     None, 
                     worker.onvif_client.ptz_stop, 
@@ -1672,13 +1717,21 @@ class WebServer:
             def get_zoom_frame():
                 return get_fresh_frame(zoom_worker)
 
-            # Run calibration (this blocks but moves the PTZ)
+            # Calibration physically drives the PTZ and busy-waits for fresh frames at
+            # each zoom level, so it runs for tens of seconds. Off the event loop it goes:
+            # on the loop it stalls every MJPEG stream, every PTZ command and every request
+            # for the whole run. The frame callbacks read worker.latest_frame, which the
+            # capture threads keep updating, so they are safe to call from the executor.
             LOGGER.info(f"Starting zoom FOV calibration: wide={wide_camera_id}, zoom={zoom_camera_id}")
-            result = calibrator.calibrate_zoom_fov(
-                get_wide_frame=get_wide_frame,
-                get_zoom_frame=get_zoom_frame,
-                zoom_levels=zoom_levels,
-                settle_time=settle_time,
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: calibrator.calibrate_zoom_fov(
+                    get_wide_frame=get_wide_frame,
+                    get_zoom_frame=get_zoom_frame,
+                    zoom_levels=zoom_levels,
+                    settle_time=settle_time,
+                ),
             )
 
             if result.error:
@@ -5534,11 +5587,16 @@ class WebServer:
         return web.Response(text=f"Clip saved: {filename}")
 
     def _delete_file(self, rel_path: str) -> tuple[bool, str]:
-        # Security check: prevent path traversal
-        if '..' in rel_path or rel_path.startswith('/'):
-             return False, "Invalid path"
-
-        file_path = self.storage_root / 'clips' / rel_path
+        # Resolve and require containment in the clips directory. A substring test for
+        # '..' both misses encodings it should catch and rejects legitimate names that
+        # merely contain two dots. Both sides are resolved so a symlinked storage root
+        # (e.g. an SSD mount) compares correctly.
+        clips_root = (self.storage_root / 'clips').resolve()
+        try:
+            file_path = (clips_root / rel_path).resolve()
+            file_path.relative_to(clips_root)
+        except (ValueError, OSError):
+            return False, "Invalid path"
         try:
             if file_path.exists() and file_path.is_file():
                 file_path.unlink()

@@ -2756,6 +2756,9 @@ class WebServer:
                         position: absolute;
                         top: 10px;
                         right: 10px;
+                        max-width: calc(100% - 20px);
+                        box-sizing: border-box;
+                        overflow: hidden;
                         background: rgba(76, 175, 80, 0.9);
                         color: white;
                         font-size: 0.75em;
@@ -2769,6 +2772,13 @@ class WebServer:
                     }
                     .recording-species-badge .species-icon {
                         font-size: 1.1em;
+                        flex: 0 0 auto;
+                    }
+                    .recording-species-badge .species-text {
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                        min-width: 0;
                     }
                     /* Action buttons overlay (hidden by default, shown on hover) */
                     .recording-actions {
@@ -2804,6 +2814,31 @@ class WebServer:
                     .delete-btn { background: rgba(244, 67, 54, 0.95); color: white; }
                     .delete-btn:hover { background: #f44336; transform: scale(1.1); }
                     .action-btn svg { width: 22px; height: 22px; }
+
+                    /* Touch devices have no hover, so the hover-only card actions would be
+                       unreachable. Pin Quick Play to the card corner instead; Delete stays on
+                       the detail page and the bulk-select bar so a stray tap can't destroy a clip. */
+                    @media (hover: none) {
+                        .recording-actions {
+                            top: auto;
+                            left: auto;
+                            bottom: 8px;
+                            right: 8px;
+                            transform: none;
+                            opacity: 1;
+                            pointer-events: auto;
+                        }
+                        .recording-actions .delete-btn { display: none; }
+                        .action-btn { width: 44px; height: 44px; }
+                        .recording-overlay { padding-right: 60px; }
+                        /* Grow the select checkbox's tap area without growing the box itself */
+                        .recording-checkbox {
+                            width: 26px;
+                            height: 26px;
+                            padding: 6px;
+                            margin: -6px;
+                        }
+                    }
                     
                     /* Legacy fields hidden in grid view */
                     .recording-info { display: none; }
@@ -2818,7 +2853,7 @@ class WebServer:
                         left: 0;
                         right: 0;
                         background: #2a2a2a;
-                        padding: 12px 16px;
+                        padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)) 16px;
                         display: flex;
                         align-items: center;
                         justify-content: space-between;
@@ -3511,7 +3546,7 @@ class WebServer:
                             {thumbnail_html}
                             <div class="recording-species-badge">
                                 <span class="species-icon">{species_icon}</span>
-                                {species_display}
+                                <span class="species-text">{species_display}</span>
                             </div>
                             <div class="recording-overlay">
                                 <div class="recording-time-ago" data-time="{time_iso}">Loading...</div>
@@ -7704,7 +7739,7 @@ class WebServer:
                     /* Auto-refresh indicator */
                     .refresh-indicator {
                         position: fixed;
-                        bottom: 16px;
+                        bottom: calc(16px + env(safe-area-inset-bottom, 0px));
                         right: 16px;
                         background: #333;
                         padding: 8px 12px;
@@ -8571,7 +8606,7 @@ class WebServer:
                         left: 0;
                         right: 0;
                         background: #2a2a2a;
-                        padding: 16px;
+                        padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)) 16px;
                         display: flex;
                         gap: 12px;
                         border-top: 1px solid #444;

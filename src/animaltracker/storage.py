@@ -6,12 +6,14 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 import cv2
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 import numpy as np
 
@@ -28,17 +30,141 @@ class StreamingClipWriter:
     300 s ``max_event_seconds``). The MJPG AVI is later transcoded to a
     browser-friendly MP4 by ``StorageManager.transcode_avi_to_mp4``.
 
-    Lazily picks (width, height) from the first frame so no resolution
-    needs to be threaded in from the caller.
+    Encoding runs on a dedicated writer thread. ``seed()`` and ``write()``
+    only queue frame references and return immediately, so the asyncio
+    stream loop that calls them never waits on cv2: seeding a 10 s 1080p
+    pre-roll inline used to block that loop -- and every camera worker
+    gathered on it -- for ~5 s at each event start. The writer thread owns
+    the ``cv2.VideoWriter`` (opened lazily from the first frame's size,
+    released when the thread exits), so no two threads ever touch it.
+
+    ``close()`` drains the queue and joins the thread; call it from an
+    executor, not from the event loop.
     """
 
-    def __init__(self, temp_path: Path, fps: int = 15) -> None:
+    def __init__(self, temp_path: Path, fps: int = 15, max_pending: int = 300) -> None:
         self.temp_path = temp_path
         self.fps = fps
+        # Bound on queued *live* frames. Seed frames are exempt: the
+        # pre-roll is the point of the clip and its frames are already
+        # alive in the rolling buffer. Only binds when the encoder is
+        # slower than capture; each queued 1080p BGR frame is ~6 MB.
+        self.max_pending = max(1, int(max_pending))
         self._writer: Optional[cv2.VideoWriter] = None
         self._size: Optional[tuple[int, int]] = None  # (width, height)
         self.frame_count: int = 0
+        self.dropped_frames: int = 0
+        self.write_errors: int = 0
         self._failed: bool = False
+        self._pending: deque[np.ndarray] = deque()
+        self._cv = threading.Condition()
+        self._closing = False
+        self._thread = threading.Thread(
+            target=self._run, name=f"clip-writer-{temp_path.stem}", daemon=True
+        )
+        self._thread.start()
+
+    # -- producer side (event loop thread) ---------------------------------
+
+    def seed(self, frames: Iterable[np.ndarray]) -> int:
+        """Queue pre-roll frames ahead of any live frame; returns how many."""
+        queued = 0
+        with self._cv:
+            if self._closing:
+                return 0
+            for frame in frames:
+                if frame is not None:
+                    self._pending.append(frame)
+                    queued += 1
+            if queued:
+                self._cv.notify()
+        return queued
+
+    def write(self, frame: np.ndarray) -> None:
+        """Queue one live frame.
+
+        Sheds the frame (and counts it) rather than block the caller when
+        the backlog exceeds ``max_pending``.
+        """
+        if frame is None:
+            return
+        with self._cv:
+            if self._closing:
+                return
+            if len(self._pending) >= self.max_pending:
+                self.dropped_frames += 1
+                return
+            self._pending.append(frame)
+            self._cv.notify()
+
+    def close(self) -> Optional[Path]:
+        """Drain queued frames, release the encoder and return the temp AVI path.
+
+        Returns None on failure or if nothing was written. Blocks until the
+        writer thread has exited, so run it in an executor.
+        """
+        with self._cv:
+            self._closing = True
+            self._cv.notify_all()
+        self._thread.join(timeout=120.0)
+        if self._thread.is_alive():
+            LOGGER.error(
+                "Streaming writer for %s did not finish draining within 120s; leaving temp file in place",
+                self.temp_path,
+            )
+            return None
+        if self.dropped_frames:
+            LOGGER.warning(
+                "Streaming writer for %s dropped %d live frames: encoder fell behind capture (max_pending=%d)",
+                self.temp_path.name, self.dropped_frames, self.max_pending,
+            )
+        if self._failed or self.frame_count == 0:
+            self.discard()
+            return None
+        if not self.temp_path.exists() or self.temp_path.stat().st_size == 0:
+            return None
+        return self.temp_path
+
+    def discard(self) -> None:
+        """Best-effort delete of the temp AVI."""
+        try:
+            if self.temp_path.exists():
+                self.temp_path.unlink()
+        except OSError:
+            pass
+
+    # -- writer thread -----------------------------------------------------
+
+    def _run(self) -> None:
+        try:
+            while True:
+                with self._cv:
+                    while not self._pending and not self._closing:
+                        self._cv.wait()
+                    if not self._pending:
+                        break  # closing and fully drained
+                    frame = self._pending.popleft()
+                self._encode(frame)
+        finally:
+            self._release()
+
+    def _encode(self, frame: np.ndarray) -> None:
+        try:
+            if not self._ensure_open(frame):
+                return
+            # Guard against camera resolution change mid-event
+            h, w = frame.shape[:2]
+            if self._size != (w, h):
+                return
+            self._writer.write(frame)
+            self.frame_count += 1
+        except Exception as e:
+            # Keep draining so close() still completes and whatever was
+            # written before the error survives to be transcoded.
+            self.write_errors += 1
+            log = LOGGER.warning if self.write_errors == 1 else LOGGER.debug
+            log("Streaming writer error for %s (%d so far): %s",
+                self.temp_path.name, self.write_errors, e)
 
     def _ensure_open(self, frame: np.ndarray) -> bool:
         if self._writer is not None:
@@ -57,40 +183,13 @@ class StreamingClipWriter:
         self._size = (width, height)
         return True
 
-    def write(self, frame: np.ndarray) -> None:
-        if frame is None:
-            return
-        if not self._ensure_open(frame):
-            return
-        # Guard against camera resolution change mid-event
-        h, w = frame.shape[:2]
-        if self._size != (w, h):
-            return
-        self._writer.write(frame)
-        self.frame_count += 1
-
-    def close(self) -> Optional[Path]:
-        """Release the writer and return the temp AVI path (or None on failure)."""
+    def _release(self) -> None:
         if self._writer is not None:
             try:
                 self._writer.release()
             except Exception as e:  # pragma: no cover
                 LOGGER.warning("Error releasing streaming writer: %s", e)
             self._writer = None
-        if self._failed or self.frame_count == 0:
-            self.discard()
-            return None
-        if not self.temp_path.exists() or self.temp_path.stat().st_size == 0:
-            return None
-        return self.temp_path
-
-    def discard(self) -> None:
-        """Best-effort delete of the temp AVI."""
-        try:
-            if self.temp_path.exists():
-                self.temp_path.unlink()
-        except OSError:
-            pass
 
 # Default storage thresholds
 DEFAULT_MIN_FREE_BYTES = 500 * 1024 * 1024  # 500 MB minimum free space

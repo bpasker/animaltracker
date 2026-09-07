@@ -30,7 +30,7 @@ general:
     # YOLO settings (used when backend/realtime_backend: yolo)
     model_path: yolov8n.pt
     # SpeciesNet settings (used when backend/postprocess_backend: speciesnet)
-    speciesnet_version: v4.0.2a  # v4.0.2a (crop) or v4.0.2b (full-image)
+    speciesnet_version: v4.0.3a  # v4.0.3a (crop) or v4.0.3b (full-image)
     # Location priors for better species accuracy (filters out impossible species)
     country: USA                  # ISO 3166-1 alpha-3 code (e.g., USA, CAN, GBR)
     admin1_region: MN             # State/province code (US states supported)

@@ -250,7 +250,7 @@ class WebServer:
         <html>
             <head>
                 <title>Animal Tracker Dashboard</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
                 <meta name="apple-mobile-web-app-capable" content="yes">
                 <meta name="mobile-web-app-capable" content="yes">
                 <style>
@@ -264,25 +264,33 @@ class WebServer:
                     }
                     .nav { 
                         display: flex;
-                        gap: 12px;
-                        margin-bottom: 20px; 
-                        padding-bottom: 16px; 
+                        gap: 6px;
+                        margin: -16px -16px 20px -16px;
+                        padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px 12px;
                         border-bottom: 1px solid #333;
-                        width: 100vw;
-                        margin-left: calc(-50vw + 50%);
-                        padding-left: 16px;
-                        padding-right: 16px;
                         box-sizing: border-box;
+                        position: sticky;
+                        top: 0;
+                        z-index: 200;
+                        background: rgba(26, 26, 26, 0.95);
+                        backdrop-filter: blur(8px);
                     }
                     .nav a { 
+                        flex: 1 1 0;
+                        min-width: 0;
+                        text-align: center;
                         color: #fff;
                         background: #333;
                         text-decoration: none; 
-                        font-size: 0.95em;
+                        font-size: 0.8em;
                         font-weight: 500;
-                        padding: 10px 16px;
+                        padding: 11px 4px;
                         border-radius: 8px;
                         transition: background 0.2s;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        -webkit-tap-highlight-color: transparent;
                     }
                     .nav a:hover, .nav a.active { background: #4CAF50; }
                     h1 { font-size: 1.5em; margin: 0 0 16px 0; font-weight: 600; }
@@ -519,6 +527,8 @@ class WebServer:
                     }
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1200px; margin: 0 auto; }
+                        .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
+                        .nav a { flex: 0 0 auto; font-size: 0.95em; padding: 10px 16px; }
                         .camera-grid { flex-direction: row; flex-wrap: wrap; }
                         .camera-card { flex: 1 1 calc(50% - 8px); min-width: 300px; }
                     }
@@ -2088,7 +2098,7 @@ class WebServer:
         <html>
             <head>
                 <title>Recordings - Animal Tracker</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
                 <meta name="apple-mobile-web-app-capable" content="yes">
                 <meta name="mobile-web-app-capable" content="yes">
                 <style>
@@ -2103,25 +2113,33 @@ class WebServer:
                     }
                     .nav { 
                         display: flex;
-                        gap: 12px;
-                        margin-bottom: 20px; 
-                        padding-bottom: 16px; 
+                        gap: 6px;
+                        margin: -16px -16px 20px -16px;
+                        padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px 12px;
                         border-bottom: 1px solid #333;
-                        width: 100vw;
-                        margin-left: calc(-50vw + 50%);
-                        padding-left: 16px;
-                        padding-right: 16px;
                         box-sizing: border-box;
+                        position: sticky;
+                        top: 0;
+                        z-index: 200;
+                        background: rgba(26, 26, 26, 0.95);
+                        backdrop-filter: blur(8px);
                     }
                     .nav a { 
+                        flex: 1 1 0;
+                        min-width: 0;
+                        text-align: center;
                         color: #fff;
                         background: #333;
                         text-decoration: none; 
-                        font-size: 0.95em;
+                        font-size: 0.8em;
                         font-weight: 500;
-                        padding: 10px 16px;
+                        padding: 11px 4px;
                         border-radius: 8px;
                         transition: background 0.2s;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        -webkit-tap-highlight-color: transparent;
                     }
                     .nav a:hover, .nav a.active { background: #4CAF50; }
                     h1 { font-size: 1.5em; margin: 0 0 16px 0; font-weight: 600; }
@@ -3256,6 +3274,8 @@ class WebServer:
                     /* Desktop adjustments */
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1400px; margin: 0 auto; }
+                        .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
+                        .nav a { flex: 0 0 auto; font-size: 0.95em; padding: 10px 16px; }
                         .calendar-day { min-height: 90px; }
                         .day-panel-container { max-width: 500px; }
                         .filters-sidebar { max-width: 350px; }
@@ -5662,7 +5682,7 @@ class WebServer:
         <html>
             <head>
                 <title>{clip_info['species']} - Recording Detail</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
                 <meta name="apple-mobile-web-app-capable" content="yes">
                 <meta name="mobile-web-app-capable" content="yes">
                 <style>
@@ -5677,25 +5697,33 @@ class WebServer:
                     }}
                     .nav {{ 
                         display: flex;
-                        gap: 12px;
-                        margin-bottom: 20px; 
-                        padding-bottom: 16px; 
+                        gap: 6px;
+                        margin: -16px -16px 20px -16px;
+                        padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px 12px;
                         border-bottom: 1px solid #333;
-                        width: 100vw;
-                        margin-left: calc(-50vw + 50%);
-                        padding-left: 16px;
-                        padding-right: 16px;
                         box-sizing: border-box;
+                        position: sticky;
+                        top: 0;
+                        z-index: 200;
+                        background: rgba(26, 26, 26, 0.95);
+                        backdrop-filter: blur(8px);
                     }}
                     .nav a {{ 
+                        flex: 1 1 0;
+                        min-width: 0;
+                        text-align: center;
                         color: #fff;
                         background: #333;
                         text-decoration: none; 
-                        font-size: 0.95em;
+                        font-size: 0.8em;
                         font-weight: 500;
-                        padding: 10px 16px;
+                        padding: 11px 4px;
                         border-radius: 8px;
                         transition: background 0.2s;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        -webkit-tap-highlight-color: transparent;
                     }}
                     .nav a:hover, .nav a.active {{ background: #4CAF50; }}
                     .back-btn {{
@@ -6112,6 +6140,8 @@ class WebServer:
                     
                     @media (min-width: 768px) {{
                         body {{ padding: 24px; max-width: 900px; margin: 0 auto; }}
+                        .nav {{ margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }}
+                        .nav a {{ flex: 0 0 auto; font-size: 0.95em; padding: 10px 16px; }}
                         .thumbnail-gallery {{ grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }}
                     }}
                 </style>
@@ -6737,13 +6767,15 @@ class WebServer:
             return None
         
         stat = clip_path.stat()
-        species = self._parse_species_from_filename(clip_path.name)
+        species_display, raw_species = self._parse_species_from_filename(clip_path.name)
         thumbnails = self._get_thumbnails_for_clip(clip_path)
         
         # Try to load processing log for track timing info
         log_path = clip_path.with_suffix('.log.json')
         track_info = {}
         video_fps = 15.0  # Default
+        tracks_by_index = {}  # Index -> track data
+        tracks_by_species = {}  # Fallback for old-format thumbnails
         
         if log_path.exists():
             try:
@@ -6757,8 +6789,6 @@ class WebServer:
                 # Build track info - now keyed by track INDEX (order) not species
                 # This preserves individual track timing even for same-species tracks
                 tracking_summary = log_data.get('tracking_summary', {})
-                tracks_by_index = {}  # Index -> track data
-                tracks_by_species = {}  # Fallback for old-format thumbnails
                 
                 if tracking_summary and tracking_summary.get('tracks'):
                     # Sort tracks by first_frame to match thumbnail generation order
@@ -6841,7 +6871,8 @@ class WebServer:
             'path': rel_path,
             'filename': clip_path.name,
             'camera': camera,
-            'species': species,
+            'species': species_display,
+            'raw_species': raw_species,
             'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
             'size': stat.st_size,
             'size_mb': stat.st_size / (1024 * 1024),
@@ -7325,7 +7356,7 @@ class WebServer:
         <html>
             <head>
                 <title>Monitor - Animal Tracker</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
                 <meta name="apple-mobile-web-app-capable" content="yes">
                 <meta name="mobile-web-app-capable" content="yes">
                 <style>
@@ -7340,25 +7371,33 @@ class WebServer:
                     }
                     .nav { 
                         display: flex;
-                        gap: 12px;
-                        margin-bottom: 20px; 
-                        padding-bottom: 16px; 
+                        gap: 6px;
+                        margin: -16px -16px 20px -16px;
+                        padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px 12px;
                         border-bottom: 1px solid #333;
-                        width: 100vw;
-                        margin-left: calc(-50vw + 50%);
-                        padding-left: 16px;
-                        padding-right: 16px;
                         box-sizing: border-box;
+                        position: sticky;
+                        top: 0;
+                        z-index: 200;
+                        background: rgba(26, 26, 26, 0.95);
+                        backdrop-filter: blur(8px);
                     }
                     .nav a { 
+                        flex: 1 1 0;
+                        min-width: 0;
+                        text-align: center;
                         color: #fff;
                         background: #333;
                         text-decoration: none; 
-                        font-size: 0.95em;
+                        font-size: 0.8em;
                         font-weight: 500;
-                        padding: 10px 16px;
+                        padding: 11px 4px;
                         border-radius: 8px;
                         transition: background 0.2s;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        -webkit-tap-highlight-color: transparent;
                     }
                     .nav a:hover { background: #444; }
                     .nav a.active { background: #4CAF50; }
@@ -7690,6 +7729,8 @@ class WebServer:
                     
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1000px; margin: 0 auto; }
+                        .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
+                        .nav a { flex: 0 0 auto; font-size: 0.95em; padding: 10px 16px; }
                         .camera-grid { grid-template-columns: repeat(2, 1fr); }
                     }
                 </style>
@@ -8325,7 +8366,7 @@ class WebServer:
         <html>
             <head>
                 <title>Settings - Animal Tracker</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
                 <meta name="apple-mobile-web-app-capable" content="yes">
                 <meta name="mobile-web-app-capable" content="yes">
                 <style>
@@ -8340,25 +8381,33 @@ class WebServer:
                     }
                     .nav { 
                         display: flex;
-                        gap: 12px;
-                        margin-bottom: 20px; 
-                        padding-bottom: 16px; 
+                        gap: 6px;
+                        margin: -16px -16px 20px -16px;
+                        padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px 12px;
                         border-bottom: 1px solid #333;
-                        width: 100vw;
-                        margin-left: calc(-50vw + 50%);
-                        padding-left: 16px;
-                        padding-right: 16px;
                         box-sizing: border-box;
+                        position: sticky;
+                        top: 0;
+                        z-index: 200;
+                        background: rgba(26, 26, 26, 0.95);
+                        backdrop-filter: blur(8px);
                     }
                     .nav a { 
+                        flex: 1 1 0;
+                        min-width: 0;
+                        text-align: center;
                         color: #fff;
                         background: #333;
                         text-decoration: none; 
-                        font-size: 0.95em;
+                        font-size: 0.8em;
                         font-weight: 500;
-                        padding: 10px 16px;
+                        padding: 11px 4px;
                         border-radius: 8px;
                         transition: background 0.2s;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        -webkit-tap-highlight-color: transparent;
                     }
                     .nav a:hover, .nav a.active { background: #4CAF50; }
                     h1 { font-size: 1.5em; margin: 0 0 16px 0; font-weight: 600; }
@@ -8690,6 +8739,8 @@ class WebServer:
                     
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 700px; margin: 0 auto; padding-bottom: 100px; }
+                        .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
+                        .nav a { flex: 0 0 auto; font-size: 0.95em; padding: 10px 16px; }
                         .species-grid { grid-template-columns: repeat(3, 1fr); }
                     }
                 </style>
@@ -9541,7 +9592,7 @@ class WebServer:
                 'backend': detector_cfg.backend,
                 'realtime_backend': getattr(detector_cfg, 'realtime_backend', 'megadetector'),
                 'postprocess_backend': getattr(detector_cfg, 'postprocess_backend', 'speciesnet'),
-                'speciesnet_version': getattr(detector_cfg, 'speciesnet_version', 'v4.0.2a'),
+                'speciesnet_version': getattr(detector_cfg, 'speciesnet_version', 'v4.0.3a'),
                 'country': getattr(detector_cfg, 'country', None),
                 'admin1_region': getattr(detector_cfg, 'admin1_region', None),
                 'generic_confidence': getattr(detector_cfg, 'generic_confidence', 0.9),

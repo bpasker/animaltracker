@@ -35,11 +35,12 @@ Use this workflow when a user asks why PTZ tracking missed, overshot, failed to 
    - duplicate same-frame moves (`gap_capture_to_capture_ms` near `0`)
    - `tracking_step_stop` dispatch lateness
    - high `frame_age_ms` on moves
+   - holes in journal output right after `Started tracking` (`## Journal Stalls` in the report): a process-wide stall that the per-move `frame_age_ms` cannot see, because no decisions are logged during it
    - tiny target fill with high velocity
    - oversized or impossible detection boxes
    - immediate cam1 fallback after cam2 had the target
    - target-camera takeover or continuity rejection issues
-7. If changing `src/`, `config/`, or `systemd/`, follow the deployment workflow in `AGENTS.md`: commit, push, pull on the Jetson, and restart `animaltracker`.
+7. If changing `src/`, `config/`, or `systemd/`, follow the deployment workflow in `AGENTS.md`: commit, push, pull on the production host, and restart `animaltracker`.
 8. Validate with syntax checks, focused fake ONVIF checks when possible, and remote `journalctl` after restart.
 
 ## Reporting

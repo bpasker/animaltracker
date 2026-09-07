@@ -270,7 +270,7 @@ general:
     backend: speciesnet              # "speciesnet" (recommended) or "yolo" (fast)
     model_path: models/yolo11n.pt    # Only used for YOLO backend
     # SpeciesNet settings (see Detector Backends section below)
-    speciesnet_version: v4.0.2a      # v4.0.2a (crop-based) or v4.0.2b (full-image)
+    speciesnet_version: v4.0.3a      # v4.0.3a (crop-based) or v4.0.3b (full-image)
     country: USA                      # Your country code for geographic filtering
     admin1_region: MN                 # State/province code (optional)
     generic_confidence: 0.9           # Higher threshold for generic labels
@@ -337,7 +337,7 @@ export KAGGLE_KEY=your_kaggle_api_key
 general:
   detector:
     backend: speciesnet
-    speciesnet_version: v4.0.2a    # v4.0.2a (crop, faster) or v4.0.2b (full-image)
+    speciesnet_version: v4.0.3a    # v4.0.3a (crop, faster) or v4.0.3b (full-image)
     
     # Geographic filtering - IMPORTANT for accurate species ID
     country: USA                    # ISO 3166-1 alpha-3 code
@@ -370,8 +370,8 @@ Use standard 2-letter state abbreviations: `MN`, `CA`, `TX`, `NY`, `FL`, etc.
 **Model Versions:**
 | Version | Description | Use Case |
 |---------|-------------|----------|
-| `v4.0.2a` | Crop-based classifier | Faster, good for real-time |
-| `v4.0.2b` | Full-image classifier | More context, slightly slower |
+| `v4.0.3a` | Crop-based classifier | Faster, good for real-time |
+| `v4.0.3b` | Full-image classifier | More context, slightly slower |
 
 ---
 
@@ -619,7 +619,7 @@ chmod 600 ~/.kaggle/kaggle.json
 
 #### SpeciesNet is slow
 - SpeciesNet is more accurate but slower than YOLO
-- Use `speciesnet_version: v4.0.2a` (crop-based, faster) instead of `v4.0.2b`
+- Use `speciesnet_version: v4.0.3a` (crop-based, faster) instead of `v4.0.3b`
 - Consider using lower-resolution camera streams
 - For real-time needs with many cameras, use YOLO and `reprocess` clips later with SpeciesNet
 

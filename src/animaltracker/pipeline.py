@@ -656,21 +656,34 @@ class StreamWorker:
                     # mid-postprocess sidecars.
                     if self.event_state is not None:
                         if self.event_state.clip_writer is None:
-                            self.event_state.clip_writer = StreamingClipWriter(
+                            pre_seconds = self.runtime.general.clip.pre_seconds
+                            writer = StreamingClipWriter(
                                 temp_path=self.storage.build_event_temp_avi(
                                     self.camera.id, self.event_state.start_ts
                                 ),
                                 fps=15,
+                                # Room for the whole pre-roll plus live
+                                # frames while it drains; only binds when
+                                # the encoder is slower than capture.
+                                max_pending=max(300, int(pre_seconds * 30)),
                             )
                             # Seed with the pre-event rolling buffer so the
                             # saved clip still includes pre_seconds of
-                            # context. ``clip_buffer`` holds frames by
-                            # reference -- they were not copied on push --
-                            # so this is cheap.
-                            cutoff = self.event_state.start_ts - self.runtime.general.clip.pre_seconds
-                            for _ts, _frame in self.clip_buffer.dump():
-                                if _ts >= cutoff:
-                                    self.event_state.clip_writer.write(_frame)
+                            # context. ``dump()`` copies references only;
+                            # the MJPG encode of each frame happens on the
+                            # writer's own thread. Doing it inline here
+                            # blocked this loop -- and every other camera
+                            # gathered on it -- for ~5s per event start.
+                            cutoff = self.event_state.start_ts - pre_seconds
+                            seeded = writer.seed(
+                                _frame for _ts, _frame in self.clip_buffer.dump()
+                                if _ts >= cutoff
+                            )
+                            LOGGER.debug(
+                                "Seeded clip writer for %s with %d pre-roll frames",
+                                self.camera.id, seeded,
+                            )
+                            self.event_state.clip_writer = writer
                         # cap.read() returns a fresh ndarray each call, so
                         # writing by reference is safe -- no copy needed.
                         self.event_state.clip_writer.write(frame)
@@ -1780,33 +1793,16 @@ class StreamWorker:
         # Use tracked key frames if available
         species_key_frames = self.event_state.get_tracked_key_frames()
 
-        # Close the streaming MJPG writer NOW (before handing off to the
-        # executor) so the temp AVI is fully flushed when the executor
-        # picks it up. This must happen on the same thread that wrote
-        # frames to it.
-        temp_avi_path: Optional[Path] = None
-        frame_count = 0
-        if self.event_state.clip_writer is not None:
-            temp_avi_path = self.event_state.clip_writer.close()
-            frame_count = self.event_state.clip_writer.frame_count
-            self.event_state.clip_writer = None
-
-        loop.run_in_executor(
-            None,
-            finalize_event,
-            temp_avi_path,
-            frame_count,
-            self.camera.id,
-            self.event_state.start_ts,
-            self.runtime.general.clip.format,
-            ctx_base, 
-            self.camera.notification.priority, 
-            self.camera.notification.sound,
-            species_key_frames,
-            ptz_log,
-            detector_cfg,  # Pass detector config for split-model post-processing
-        )
-
+        # Detach the event from the stream loop *before* the writer drains.
+        # ``close()`` joins the writer thread, so it runs in an executor and
+        # this coroutine yields; ``run()`` keeps consuming frames meanwhile,
+        # and an attached event whose ``clip_writer`` is None would make it
+        # open and seed a brand-new writer for an event that is closing.
+        # Everything ``finalize_event`` needs is captured into locals first.
+        event = self.event_state
+        writer = event.clip_writer
+        event.clip_writer = None
+        start_ts = event.start_ts
         self.event_state = None
 
         # Event boundary cleanup: reset the persistent ObjectTracker so the
@@ -1814,6 +1810,8 @@ class StreamWorker:
         # previous event leaks into the new clip's species accumulation).
         # Also clear the PTZ lock so a recycled ByteTrack id of 1/2/... cannot
         # be silently treated as a continuation of the previous event's lock.
+        # Done before yielding so an event that opens while the writer
+        # drains is not reset out from under itself.
         if self.tracker is not None:
             try:
                 self.tracker.reset()
@@ -1824,6 +1822,32 @@ class StreamWorker:
                 self.ptz_tracker.clear_lock()
             except Exception:
                 pass
+
+        # Drain and release the streaming MJPG writer off-loop. The writer
+        # thread owns the cv2 handle and releases it on exit, so the temp
+        # AVI is fully flushed by the time ``close()`` returns and the
+        # executor picks it up.
+        temp_avi_path: Optional[Path] = None
+        frame_count = 0
+        if writer is not None:
+            temp_avi_path = await loop.run_in_executor(None, writer.close)
+            frame_count = writer.frame_count
+
+        loop.run_in_executor(
+            None,
+            finalize_event,
+            temp_avi_path,
+            frame_count,
+            self.camera.id,
+            start_ts,
+            self.runtime.general.clip.format,
+            ctx_base,
+            self.camera.notification.priority,
+            self.camera.notification.sound,
+            species_key_frames,
+            ptz_log,
+            detector_cfg,  # Pass detector config for split-model post-processing
+        )
 
     def _analyze_clip_frames(self, frames: List[tuple], num_samples: int = None) -> tuple[str, float]:
         """Analyze frames from a clip to get the most specific species identification.

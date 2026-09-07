@@ -7,11 +7,13 @@ src/animaltracker/cli.py
 src/animaltracker/clip_buffer.py
 src/animaltracker/config.py
 src/animaltracker/detector.py
-src/animaltracker/ebird.py
 src/animaltracker/notification.py
 src/animaltracker/onvif_client.py
 src/animaltracker/pipeline.py
 src/animaltracker/postprocess.py
+src/animaltracker/ptz_calibration.py
+src/animaltracker/ptz_tracker.py
+src/animaltracker/ptz_visual_calibration.py
 src/animaltracker/py.typed
 src/animaltracker/species_names.py
 src/animaltracker/storage.py
@@ -22,3 +24,6 @@ src/animaltracker.egg-info/SOURCES.txt
 src/animaltracker.egg-info/dependency_links.txt
 src/animaltracker.egg-info/requires.txt
 src/animaltracker.egg-info/top_level.txt
+tests/test_ptz_control_loop.py
+tests/test_ptz_tracking_regressions.py
+tests/test_reptile_false_positive.py

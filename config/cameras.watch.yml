@@ -1,0 +1,95 @@
+# Watch-only configuration: one camera, detection + clip recording, NO PTZ.
+#
+# Usage:
+#   python -m animaltracker.cli --config config/cameras.watch.yml run
+#
+# PTZ is impossible with this file for two independent reasons:
+#   1. The camera has no `onvif:` block. PTZTracker is only constructed when a
+#      worker has an ONVIF client + profile token (pipeline.py:2113, 2219), and
+#      the client is only built when `camera.onvif and camera.onvif.host`
+#      (pipeline.py:444). No client -> no tracker -> no PTZ command path.
+#      The web UI's PTZ endpoints are guarded the same way and will refuse.
+#   2. `ptz_tracking.enabled` and `self_track` are both false, so neither the
+#      target-camera nor the self-track branch is taken. `patrol_enabled` is
+#      left at its default but is never reached without a tracker.
+
+general:
+  storage_root: /Users/brandonasker/animaltracker/storage
+  logs_root: /Users/brandonasker/animaltracker/logs
+  metrics_port: 9500
+
+  clip:
+    pre_seconds: 10          # seconds of pre-roll kept before the trigger
+    post_seconds: 10
+    format: mp4
+    codec: h264
+    post_analysis: true      # re-run species ID on the saved clip
+    unified_post_processing: true
+    delete_if_no_animal: true
+    tracking_enabled: true
+    thumbnail_cropped: true
+
+  detector:
+    # Split-model: fast YOLO drives the live loop, SpeciesNet refines the clip.
+    realtime_backend: yolo
+    postprocess_backend: speciesnet
+    backend: yolo            # legacy field, kept consistent with the above
+    model_path: models/yolo11n.pt
+    speciesnet_version: v4.0.3a
+    country: USA
+    admin1_region: MN
+    generic_confidence: 0.9
+
+  exclusion_list: []
+
+  # Required by the schema (GeneralSettings.notification has no default).
+  # If PUSHOVER_APP_TOKEN / PUSHOVER_USER_KEY are unset, the clip is still
+  # written and kept -- only the notify step at the very end raises, and that
+  # exception is swallowed by the executor. Set them in config/secrets.env to
+  # actually get alerts.
+  notification:
+    pushover_app_token_env: PUSHOVER_APP_TOKEN
+    pushover_user_key_env: PUSHOVER_USER_KEY
+    web_base_url: null
+
+  retention:
+    min_days: 7
+    max_days: 30
+    max_utilization_pct: 80
+
+cameras:
+  - id: cam1
+    name: "Watch Camera"
+    location: "UniFi Protect"
+    rtsp:
+      # Quoted: the URL contains ':' and '?', which are YAML-significant bare.
+      # Passed verbatim to FFmpeg -- there is no {USERNAME}/{PASSWORD}
+      # substitution in the codebase despite what cameras.sample.yml implies.
+      uri: "rtsps://192.168.1.1:7441/d6bYSDxENyIIrt6d?enableSrtp"
+      transport: tcp         # rtsps is TLS; must be TCP
+      latency_ms: 200
+      frame_skip: 1
+      hwaccel: false         # NVDEC only; leave false on macOS
+
+    # No `onvif:` block on purpose -- see the header. Adding one is what would
+    # re-enable the PTZ code paths.
+
+    thresholds:
+      confidence: 0.6
+      min_frames: 3
+      min_duration: 2.0
+
+    ptz_tracking:
+      enabled: false
+      self_track: false
+
+    # Source stream measured at 1600x1200 @ 20fps. Downscale before realtime
+    # inference to cut per-frame CPU prep; bboxes are scaled back so clips,
+    # tracking, and thumbnails are unaffected. Set to 0 to disable.
+    inference_max_width: 1280
+
+    include_species: []      # empty = keep everything the detector reports
+    exclude_species: []
+    notification:
+      priority: 0
+      sound: pushover

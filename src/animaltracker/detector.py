@@ -209,13 +209,13 @@ class MegaDetectorBackend(BaseDetector):
     
     def __init__(
         self,
-        model_version: str = "v4.0.2a",
+        model_version: str = "v4.0.3a",
         cache_dir: Optional[str] = None,
     ) -> None:
         """Initialize MegaDetector backend.
         
         Args:
-            model_version: Model version (v4.0.2a or v4.0.2b)
+            model_version: Model version (v4.0.3a or v4.0.3b)
             cache_dir: Directory for model weights cache
         """
         try:
@@ -448,6 +448,11 @@ REGIONAL_BLOCKLISTS = {
         "elephant", "lion", "leopard", "cheetah", "hyena", "zebra", "giraffe", "hippopotamus",
         "rhinoceros", "warthog", "wildebeest", "gnu", "impala", "springbok", "kudu", "oryx",
         "african_buffalo", "cape_buffalo", "aardvark", "pangolin", "okapi", "serval", "caracal",
+        # Scientific names for the family/genus rollup labels SpeciesNet emits when it
+        # can't get to species level ("elephantidae family", "tapirus species"). The
+        # common-name entries above don't reach these, since "elephant" is only a stem
+        # of "elephantidae", not a whole token.
+        "elephantidae", "elephas", "loxodonta",
         # Asian megafauna
         "tiger", "asian_elephant", "gaur", "banteng", "sambar", "chital", "nilgai", "blackbuck",
         "water_buffalo", "yak", "takin", "serow", "goral", "giant_panda",
@@ -458,6 +463,7 @@ REGIONAL_BLOCKLISTS = {
         # South American (not in North America proper)
         "jaguar", "tapir", "capybara", "anteater", "sloth", "llama", "alpaca", "vicuna", 
         "guanaco", "mara", "chinchilla",
+        "tapiridae", "tapirus",
     },
     # Europe - different set of impossible species
     "europe": {
@@ -465,11 +471,13 @@ REGIONAL_BLOCKLISTS = {
         "lion", "elephant", "giraffe", "zebra", "hippopotamus", "rhinoceros",
         "tiger", "giant_panda", "gibbon", "orangutan", "gorilla", "chimpanzee",
         "capybara", "tapir", "jaguar", "anteater", "sloth",
+        "elephantidae", "elephas", "loxodonta", "tapiridae", "tapirus",
     },
     # Australia - filter out non-Australian species often misidentified
     "australia": {
         "lion", "tiger", "leopard", "cheetah", "elephant", "giraffe", "zebra",
         "gorilla", "chimpanzee", "orangutan", "gibbon", "rhinoceros", "hippopotamus",
+        "elephantidae", "elephas", "loxodonta",
     },
 }
 
@@ -483,6 +491,22 @@ COUNTRY_TO_REGION = {
     "AUS": "australia",
 }
 
+# Runs of anything that isn't alphanumeric: spaces, hyphens, and the ';' field
+# separators SpeciesNet uses in its taxonomy strings.
+_SPECIES_TOKEN_SEP_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _tokenize_species(text: str) -> str:
+    """Normalize a species label to `_token_token_` form for whole-word matching.
+
+    Collapsing every separator to a single underscore and padding both ends
+    means a plain `in` test against the result only succeeds on whole-token
+    boundaries. Without the padding, blocklist entries match mid-word and throw
+    away real species: "lion" hits "vespertilionidae" (the vesper bats), "gnu"
+    hits "cygnus" (swans), and "ape" hits "red-naped sapsucker".
+    """
+    return "_" + _SPECIES_TOKEN_SEP_RE.sub("_", text.lower()).strip("_") + "_"
+
 
 class SpeciesNetDetector(BaseDetector):
     """Google SpeciesNet detection backend for wildlife camera traps.
@@ -494,48 +518,98 @@ class SpeciesNetDetector(BaseDetector):
     
     def __init__(
         self,
-        model_version: str = "v4.0.2a",
+        model_version: str = "v4.0.3a",
         country: Optional[str] = None,
         admin1_region: Optional[str] = None,
         latitude: Optional[float] = None,
         longitude: Optional[float] = None,
         generic_confidence: float = 0.9,
-        detection_threshold: float = 0.1,  # NOT USED - SpeciesNet API doesn't support this
+        detection_threshold: float = 0.1,  # NOT USED - see the arg docs below
         cache_dir: Optional[str] = None,
     ) -> None:
         """Initialize SpeciesNet detector.
         
         Args:
-            model_version: Model version (v4.0.2a = crop, v4.0.2b = full-image)
+            model_version: Model version (v4.0.3a = crop, v4.0.3b = full-image)
             country: ISO 3166-1 alpha-3 country code for geofencing (e.g., "USA")
             admin1_region: State/province code for US (e.g., "TX")
             latitude: Camera latitude for species range filtering (-90 to 90)
             longitude: Camera longitude for species range filtering (-180 to 180)
             generic_confidence: Higher threshold for generic categories (animal, bird)
-            detection_threshold: NOT USED - SpeciesNet Python API doesn't expose this parameter.
-                                MegaDetector's internal threshold is fixed by the library.
+            detection_threshold: NOT USED - the detector's threshold lives on the
+                                library's own SpeciesNetDetector.DETECTION_THRESHOLD
+                                class constant (0.01), which is shared with
+                                MegaDetectorBackend, so we don't touch it here.
             cache_dir: Directory for model weights cache
         """
         try:
             from speciesnet import SpeciesNet  # type: ignore
+            # We drive the three components (detector -> classifier -> ensemble)
+            # directly rather than going through SpeciesNet.predict(filepaths=...).
+            # That wrapper only accepts paths, so each frame had to be JPEG-encoded
+            # to a tempfile and decoded back off disk, and predict() defaults to
+            # run_mode="multi_thread", standing up a thread pool per call to
+            # process a batch of one. The time saved is small -- ~4ms of a ~230ms
+            # frame at 512x896 on an M-series Mac (MPS); inference dominates --
+            # the real effect is fidelity: going through the JPEG meant the
+            # classifier scored a recompressed image rather than the frame we
+            # captured, which measurably shifts its scores.
+            # MegaDetectorBackend above already takes the in-memory route for the
+            # detector alone; this does the same for the full ensemble.
+            from speciesnet.geolocation import find_admin1_region  # type: ignore
+            from speciesnet.utils import BBox  # type: ignore
+            import PIL.Image as _PILImage  # type: ignore
         except ImportError:
             raise RuntimeError(
                 "SpeciesNet not installed - run: pip install speciesnet"
             )
-        
+
+        self._PILImage = _PILImage
+        self._BBox = BBox
+
         self.country = country
         self.admin1_region = admin1_region
         self.latitude = latitude
         self.longitude = longitude
         self.generic_confidence = generic_confidence
         self.model_version = model_version
-        # Note: detection_threshold is accepted but NOT used - SpeciesNet API doesn't support it
+        # Note: detection_threshold is accepted but NOT used - the library's own
+        # SpeciesNetDetector.DETECTION_THRESHOLD is a shared class constant.
         
         # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
         LOGGER.info(f"Loading SpeciesNet {model_version}...")
         model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
         self._model = SpeciesNet(model_name)
-        
+
+        # Bind the individual components. SpeciesNet(multiprocessing=False)
+        # exposes them as plain attributes. Fail here at startup if a future
+        # release stops doing so, rather than silently regressing to the slow
+        # file-based path at runtime.
+        missing = [
+            name for name in ("detector", "classifier", "ensemble")
+            if not hasattr(self._model, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"SpeciesNet is missing the {', '.join(missing)} component(s) needed "
+                f"for in-memory inference (tested against speciesnet 5.0.3)."
+            )
+        self._sn_detector = self._model.detector
+        self._sn_classifier = self._model.classifier
+        self._sn_ensemble = self._model.ensemble
+
+        # Geolocation depends only on the fixed camera location, so resolve it
+        # once here instead of per frame. find_admin1_region() derives the
+        # admin1 region from lat/long when it wasn't configured explicitly.
+        self._geolocation = {
+            "country": country,
+            "admin1_region": find_admin1_region(
+                country, admin1_region, latitude, longitude
+            ),
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+
         location_info = []
         if country:
             location_info.append(f"country={country}")
@@ -568,16 +642,15 @@ class SpeciesNetDetector(BaseDetector):
             return_filtered: If True, also returns filtered detections with reason.
                             Returns (detections, filtered_list) tuple instead.
         
-        Note: SpeciesNet is optimized for batch processing of images.
-        For real-time streaming, consider batching frames or using 
-        detector-only mode for speed.
-        
-        Note: latitude/longitude are stored but not currently passed to predict()
-        as the Python API only supports country/admin1_region for geofencing.
-        The lat/long would be used for batch JSON input format.
-        
-        Note: detection_threshold is not supported by SpeciesNet.predict() Python API.
-        The threshold is controlled internally by SpeciesNet's MegaDetector component.
+        Runs the detector -> classifier -> ensemble chain on an in-memory frame
+        instead of round-tripping it through a JPEG tempfile (see __init__: the
+        win is fidelity more than speed). Inference dominates the per-frame cost,
+        so the larger remaining win for whole-clip work would be feeding
+        SpeciesNet every sampled frame as one batch instead of one call per frame.
+
+        Note: detection_threshold is not applied here. The library's
+        SpeciesNetDetector.DETECTION_THRESHOLD class constant (0.01) is shared
+        with MegaDetectorBackend, so it is left alone.
         """
         # Track filtered detections if requested
         filtered_detections: List[Tuple[Detection, str]] = []  # (detection, reason)
@@ -585,39 +658,43 @@ class SpeciesNetDetector(BaseDetector):
         # Use instance default if not specified
         if generic_confidence is None:
             generic_confidence = self.generic_confidence
-        import tempfile
-        import cv2
-        
-        # SpeciesNet expects file paths, so we write to a temp file
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp_path = tmp.name
-            cv2.imwrite(tmp_path, frame)
-        
-        try:
-            # Build prediction request with location priors
-            # Note: detection_threshold is NOT supported by SpeciesNet.predict() Python API
-            # The MegaDetector threshold is controlled internally by SpeciesNet
-            result = self._model.predict(
-                filepaths=[tmp_path],
-                country=self.country,
-                admin1_region=self.admin1_region,
-            )
-        finally:
-            # Clean up temp file
-            import os
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
-        
+
+        # OpenCV hands us BGR; PIL/SpeciesNet expect RGB.
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            rgb = frame[:, :, ::-1]
+        else:
+            rgb = frame
+        pil_img = self._PILImage.fromarray(rgb)
+
+        # The three components join their results on a filepath key. Nothing
+        # loads an image from it -- both predict() docstrings note the filepath
+        # is "used for reporting purposes only" -- so a constant stands in for
+        # the tempfile we used to write.
+        key = "inmem"
+
+        detector_result = self._sn_detector.predict(
+            key, self._sn_detector.preprocess(pil_img)
+        )
+
+        # The crop classifier needs the detector's boxes to know what to crop to.
+        raw_dets = detector_result.get("detections") or []
+        bboxes = [self._BBox(*det["bbox"]) for det in raw_dets]
+        classifier_result = self._sn_classifier.predict(
+            key, self._sn_classifier.preprocess(pil_img, bboxes=bboxes)
+        )
+
+        # combine() returns the prediction list directly, where predict() wrapped
+        # it in {"predictions": [...]}.
+        predictions_list = self._sn_ensemble.combine(
+            filepaths=[key],
+            classifier_results={key: classifier_result},
+            detector_results={key: detector_result},
+            geolocation_results={key: self._geolocation},
+            partial_predictions={},
+        )
+
         detections: List[Detection] = []
-        
-        # Result is a dict like {"predictions": [{"filepath": ..., "prediction": ..., ...}]}
-        if result is None:
-            return detections
-            
-        predictions_list = result.get("predictions", []) if isinstance(result, dict) else []
-        
+
         # Generic categories that require higher confidence
         GENERIC_CATEGORIES = {
             "animal", "bird", "mammalia", "mammal", "aves",
@@ -777,18 +854,15 @@ class SpeciesNetDetector(BaseDetector):
         if not blocklist:
             return False
         
-        # Check display name
-        display_lower = display_name.lower().replace(" ", "_").replace("-", "_")
+        # Match whole tokens in the display name and in the taxonomy string
+        # (which also lets a family/order entry like "hylobatidae" fire on the
+        # "mammalia;primates;hylobatidae" part of the label).
+        haystacks = (_tokenize_species(display_name), _tokenize_species(taxonomy))
         for exotic in blocklist:
-            if exotic in display_lower:
+            needle = _tokenize_species(exotic)
+            if any(needle in haystack for haystack in haystacks):
                 return True
-        
-        # Check taxonomy parts (handles "mammalia_primates_hylobatidae")
-        taxonomy_lower = taxonomy.lower().replace(" ", "_").replace("-", "_")
-        for exotic in blocklist:
-            if exotic in taxonomy_lower:
-                return True
-        
+
         return False
 
     @staticmethod
@@ -982,10 +1056,10 @@ def create_detector(
         - class_map: Optional class ID to name mapping
         
     MegaDetector kwargs:
-        - model_version: "v4.0.2a" (crop) or "v4.0.2b" (full-image)
+        - model_version: "v4.0.3a" (crop) or "v4.0.3b" (full-image)
         
     SpeciesNet kwargs:
-        - model_version: "v4.0.2a" (crop) or "v4.0.2b" (full-image)
+        - model_version: "v4.0.3a" (crop) or "v4.0.3b" (full-image)
         - country: ISO 3166-1 alpha-3 code (e.g., "USA")
         - admin1_region: State code for US (e.g., "TX")
         - latitude: Camera latitude for species range filtering
@@ -1009,13 +1083,13 @@ def create_detector(
     
     elif backend == DetectorBackend.MEGADETECTOR:
         return MegaDetectorBackend(
-            model_version=kwargs.get("model_version", "v4.0.2a"),
+            model_version=kwargs.get("model_version", "v4.0.3a"),
             cache_dir=kwargs.get("cache_dir"),
         )
     
     elif backend == DetectorBackend.SPECIESNET:
         return SpeciesNetDetector(
-            model_version=kwargs.get("model_version", "v4.0.2a"),
+            model_version=kwargs.get("model_version", "v4.0.3a"),
             country=kwargs.get("country"),
             admin1_region=kwargs.get("admin1_region"),
             latitude=kwargs.get("latitude"),

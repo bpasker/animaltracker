@@ -63,7 +63,7 @@ class DetectorSettings(BaseModel):
     # YOLO settings
     model_path: str = "yolov8n.pt"
     # SpeciesNet settings
-    speciesnet_version: str = "v4.0.2a"  # v4.0.2a (crop) or v4.0.2b (full-image)
+    speciesnet_version: str = "v4.0.3a"  # v4.0.3a (crop) or v4.0.3b (full-image)
     country: Optional[str] = None  # ISO 3166-1 alpha-3 (e.g., "USA")
     admin1_region: Optional[str] = None  # State code for US (e.g., "TX")
     # Geospatial priors for improved species accuracy

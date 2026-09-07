@@ -168,12 +168,70 @@ def journal_perf_summary(path: Path | None) -> list[str]:
     return perf_lines[-6:]
 
 
+_JOURNAL_TS = re.compile(
+    r"^(?P<mon>[A-Z][a-z]{2}) +(?P<day>\d{1,2}) (?P<h>\d{2}):(?P<m>\d{2}):(?P<s>\d{2}) "
+)
+_JOURNAL_PREFIX = re.compile(r"^\S+ \S+\[\d+\]: (?:[A-Z]+:[\w.]+:)?")
+
+
+def journal_stall_summary(path: Path | None, min_gap_s: int = 2) -> list[str]:
+    """Holes in the journal's own output.
+
+    A live pipeline logs several lines a second while an animal is in view,
+    so a multi-second hole in *all* output is a process-wide stall (BUGS.md
+    item 3: the pre-roll clip seed blocking the shared event loop). The
+    per-move frame_age statistic cannot see it because no decisions are
+    logged during it; this is the check that can. Reports the gap after
+    each "Started tracking" line -- where the seed runs -- and every hole of
+    at least ``min_gap_s`` with the line that preceded it. Idle stretches
+    before or after the event show up here too; the ones that matter are
+    inside it. journalctl timestamps are whole seconds.
+    """
+    if not path or not path.exists():
+        return []
+    entries: list[tuple[int, str]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if '"GET /' in line:
+            continue  # web access noise
+        match = _JOURNAL_TS.match(line)
+        if not match:
+            continue
+        secs = int(match["day"]) * 86400 + int(match["h"]) * 3600 + int(match["m"]) * 60 + int(match["s"])
+        entries.append((secs, _JOURNAL_PREFIX.sub("", line[match.end():]).strip()))
+    if not entries:
+        return []
+
+    def _clock(secs: int) -> str:
+        secs %= 86400
+        return f"{secs // 3600:02d}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
+
+    lines: list[str] = []
+    for idx, (secs, text) in enumerate(entries):
+        if "Started tracking" not in text:
+            continue
+        following = next((t for t, _ in entries[idx + 1:] if t > secs), None)
+        gap = f"+{following - secs}s" if following is not None else "n/a"
+        lines.append(f"- event start {_clock(secs)}: {text[:70]} -> next log line {gap}")
+    holes = [
+        (t1 - t0, t0, t1, text0)
+        for (t0, text0), (t1, _) in zip(entries, entries[1:])
+        if t1 - t0 >= min_gap_s
+    ]
+    if holes:
+        for gap, t0, t1, text0 in sorted(holes, key=lambda h: -h[0])[:10]:
+            lines.append(f"- {gap}s hole {_clock(t0)} -> {_clock(t1)} after: {text0[:80]}")
+    else:
+        lines.append(f"- no holes >= {min_gap_s}s in journal output")
+    return lines
+
+
 def build_report(
     log: dict[str, Any],
     center_rows: list[dict[str, Any]],
     decision_rows: list[dict[str, Any]],
     perf_lines: list[str],
     output_dir: Path,
+    stall_lines: list[str] | None = None,
 ) -> str:
     video = log.get("video", {})
     summary = log.get("analysis_summary", {})
@@ -241,6 +299,9 @@ def build_report(
     if perf_lines:
         lines.extend(["", "## Recent Perf Lines"])
         lines.extend(f"- {line}" for line in perf_lines)
+    if stall_lines:
+        lines.extend(["", "## Journal Stalls"])
+        lines.extend(stall_lines)
 
     lines.extend([
         "", "## Outputs",
@@ -295,7 +356,10 @@ def main() -> int:
         ],
     )
     render_contact_sheet(args.clip, centers, output_dir / "ptz_keyframes.jpg")
-    report = build_report(log, centers, decisions, journal_perf_summary(args.journal), output_dir)
+    report = build_report(
+        log, centers, decisions, journal_perf_summary(args.journal), output_dir,
+        stall_lines=journal_stall_summary(args.journal),
+    )
     (output_dir / "ptz_review_report.md").write_text(report, encoding="utf-8")
     print(output_dir)
     return 0

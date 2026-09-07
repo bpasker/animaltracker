@@ -4,10 +4,11 @@ Conventions agents must follow when working in this repository.
 
 ## Deployment workflow (always use git, never scp)
 
-The production host `brandon@192.168.1.195` runs this code from
-`/opt/speciesnet/animaltracker`, which is a clone of the same `origin`
-(`github.com/bpasker/animaltracker`, branch `main`). Both ends use
-passwordless SSH key auth and `NOPASSWD` sudo for `brandon`.
+The production host `brandon@192.168.1.195` is a Linux desktop with an
+NVIDIA GTX 1080 GPU. It runs this code from `/opt/speciesnet/animaltracker`,
+which is a clone of the same `origin` (`github.com/bpasker/animaltracker`,
+branch `main`). Both ends use passwordless SSH key auth and `NOPASSWD` sudo
+for `brandon`.
 
 After ANY source change in `src/`, `config/`, or `systemd/`:
 
@@ -15,7 +16,7 @@ After ANY source change in `src/`, `config/`, or `systemd/`:
    ```bash
    git add -A && git commit -m "<concise message>" && git push origin main
    ```
-2. **Remote**: pull on the Jetson and restart the service.
+2. **Remote**: pull on the production host and restart the service.
    ```bash
    ssh brandon@192.168.1.195 'cd /opt/speciesnet/animaltracker && \
      sudo git pull --ff-only origin main && \

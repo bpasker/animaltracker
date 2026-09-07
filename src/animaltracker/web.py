@@ -360,7 +360,7 @@ class WebServer:
                         display: grid;
                         grid-template-columns: repeat(3, 1fr);
                         gap: 8px;
-                        max-width: 200px;
+                        max-width: 280px;
                         margin: 0 auto;
                     }
                     .ptz-controls button { 
@@ -369,7 +369,16 @@ class WebServer:
                         font-size: 0.85em;
                         background: #444;
                         width: 100%;
+                        /* These are press-and-hold jog buttons: a long press must not raise the
+                           iOS callout menu or start a text selection, and a double tap must not
+                           zoom the page, or the touchend that stops the camera never fires. */
+                        touch-action: manipulation;
+                        user-select: none;
+                        -webkit-user-select: none;
+                        -webkit-touch-callout: none;
+                        -webkit-tap-highlight-color: transparent;
                     }
+                    .ptz-grid button { min-height: 56px; font-size: 1.1em; }
                     .ptz-controls button:active { background: #666; }
                     .ptz-zoom {
                         display: flex;
@@ -525,10 +534,17 @@ class WebServer:
                     .toggle-switch input:checked + .toggle-slider:before {
                         transform: translateX(22px);
                     }
+                    /* iOS Safari zooms the page when a focused control is under 16px.
+                       !important because per-component class rules would otherwise win. */
+                    @media (max-width: 767px) {
+                        input, select, textarea { font-size: 16px !important; }
+                    }
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1200px; margin: 0 auto; }
                         .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
                         .nav a { flex: 0 0 auto; font-size: 0.95em; padding: 10px 16px; }
+                        .ptz-grid { max-width: 200px; }
+                        .ptz-grid button { min-height: 0; font-size: 0.85em; }
                         .camera-grid { flex-direction: row; flex-wrap: wrap; }
                         .camera-card { flex: 1 1 calc(50% - 8px); min-width: 300px; }
                     }
@@ -1158,18 +1174,18 @@ class WebServer:
                         <div class="ptz-content">
                             <div class="ptz-grid">
                                 <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▲</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')" ontouchcancel="sendPtz('{cam_id}', 'stop')">▲</button>
                                 <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', -1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">◄</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', -1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', -1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')" ontouchcancel="sendPtz('{cam_id}', 'stop')">◄</button>
                                 <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">►</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 1, 0, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 1, 0, 0)" ontouchend="sendPtz('{cam_id}', 'stop')" ontouchcancel="sendPtz('{cam_id}', 'stop')">►</button>
                                 <div></div>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, -1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')">▼</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, -1, 0)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, -1, 0)" ontouchend="sendPtz('{cam_id}', 'stop')" ontouchcancel="sendPtz('{cam_id}', 'stop')">▼</button>
                                 <div></div>
                             </div>
                             <div class="ptz-zoom">
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom +</button>
-                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')">Zoom -</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, 1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, 1)" ontouchend="sendPtz('{cam_id}', 'stop')" ontouchcancel="sendPtz('{cam_id}', 'stop')">Zoom +</button>
+                                <button onmousedown="sendPtz('{cam_id}', 'move', 0, 0, -1)" onmouseup="sendPtz('{cam_id}', 'stop')" onmouseleave="sendPtz('{cam_id}', 'stop')" ontouchstart="sendPtz('{cam_id}', 'move', 0, 0, -1)" ontouchend="sendPtz('{cam_id}', 'stop')" ontouchcancel="sendPtz('{cam_id}', 'stop')">Zoom -</button>
                             </div>
                             <div class="ptz-position" id="ptz-pos-{cam_id}">
                                 <div class="ptz-position-grid">
@@ -2272,17 +2288,20 @@ class WebServer:
 
                     /* Month Summary Stats */
                     .month-stats {
-                        display: flex;
-                        gap: 12px;
+                        display: grid;
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                        gap: 8px;
                         margin-bottom: 16px;
                         padding: 12px;
                         background: #2a2a2a;
                         border-radius: 8px;
-                        flex-wrap: wrap;
+                    }
+                    @media (min-width: 768px) {
+                        .month-stats { display: flex; gap: 12px; flex-wrap: wrap; }
+                        .month-stat { flex: 1; min-width: 80px; }
                     }
                     .month-stat {
-                        flex: 1;
-                        min-width: 80px;
+                        min-width: 0;
                         text-align: center;
                         padding: 8px;
                     }
@@ -2290,6 +2309,12 @@ class WebServer:
                         font-size: 1.4em;
                         font-weight: 700;
                         color: #4CAF50;
+                        overflow-wrap: anywhere;
+                    }
+                    /* Species names are words, not figures -- don't set them at numeral size. */
+                    .month-stat-value.is-text {
+                        font-size: 1.05em;
+                        line-height: 1.25;
                     }
                     .month-stat-label {
                         font-size: 0.75em;
@@ -2449,7 +2474,7 @@ class WebServer:
                         flex-direction: column;
                     }
                     .day-panel-header {
-                        padding: 16px;
+                        padding: calc(16px + env(safe-area-inset-top, 0px)) 16px 16px 16px;
                         border-bottom: 1px solid #333;
                         flex-shrink: 0;
                     }
@@ -2632,7 +2657,7 @@ class WebServer:
                     
                     /* Day Panel Footer Actions */
                     .day-panel-footer {
-                        padding: 12px 16px;
+                        padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)) 16px;
                         border-top: 1px solid #333;
                         background: #1a1a1a;
                         flex-shrink: 0;
@@ -2830,7 +2855,15 @@ class WebServer:
                         }
                         .recording-actions .delete-btn { display: none; }
                         .action-btn { width: 44px; height: 44px; }
-                        .recording-overlay { padding-right: 60px; }
+                        /* Leave room for the pinned play button and keep the timestamp on one
+                           line -- the longest string is "59 minutes ago". */
+                        .recording-overlay { padding-right: 58px; }
+                        .recording-time-ago {
+                            font-size: 0.85em;
+                            white-space: nowrap;
+                            overflow: hidden;
+                            text-overflow: ellipsis;
+                        }
                         /* Grow the select checkbox's tap area without growing the box itself */
                         .recording-checkbox {
                             width: 26px;
@@ -2900,7 +2933,7 @@ class WebServer:
                         display: flex;
                         align-items: center;
                         justify-content: space-between;
-                        padding: 12px 16px;
+                        padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 12px 16px;
                         background: #1a1a1a;
                     }
                     .modal-title {
@@ -2944,7 +2977,7 @@ class WebServer:
                     .modal-actions {
                         display: flex;
                         gap: 12px;
-                        padding: 16px;
+                        padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)) 16px;
                         background: #1a1a1a;
                     }
                     .modal-action-btn {
@@ -3108,7 +3141,7 @@ class WebServer:
                     .filters-overlay.visible { opacity: 1; visibility: visible; }
                     
                     .filters-header {
-                        padding: 16px;
+                        padding: calc(16px + env(safe-area-inset-top, 0px)) 16px 16px 16px;
                         border-bottom: 1px solid #333;
                         display: flex;
                         align-items: center;
@@ -3255,7 +3288,7 @@ class WebServer:
                     
                     /* Filters Footer */
                     .filters-footer {
-                        padding: 16px;
+                        padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px)) 16px;
                         border-top: 1px solid #333;
                         display: flex;
                         gap: 10px;
@@ -3307,6 +3340,11 @@ class WebServer:
                     }
                     
                     /* Desktop adjustments */
+                    /* iOS Safari zooms the page when a focused control is under 16px.
+                       !important because per-component class rules would otherwise win. */
+                    @media (max-width: 767px) {
+                        input, select, textarea { font-size: 16px !important; }
+                    }
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1400px; margin: 0 auto; }
                         .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
@@ -3334,6 +3372,7 @@ class WebServer:
                         .day-number { font-size: 0.85em; }
                         .day-count { font-size: 0.65em; padding: 2px 6px; }
                         .day-species { display: none; }
+                        .day-cameras { display: none; }
                         .current-month { font-size: 1.1em; min-width: 140px; }
                         .nav-btn { width: 36px; height: 36px; }
                         .filter-toggle-btn span { display: none; }
@@ -3463,7 +3502,7 @@ class WebServer:
                                 <div class="month-stat-label">Active Days</div>
                             </div>
                             <div class="month-stat">
-                                <div class="month-stat-value" id="statTopSpecies">-</div>
+                                <div class="month-stat-value is-text" id="statTopSpecies">-</div>
                                 <div class="month-stat-label">Top Species</div>
                             </div>
                             <div class="month-stat">
@@ -3531,6 +3570,9 @@ class WebServer:
             escaped_path = clip['path'].replace("'", "\\'")
             url_encoded_path = clip['path'].replace('#', '%23')
             species_display = clip.get('species', 'Unknown')
+            # Readable heading for the quick-play modal: the epoch-prefixed filename means
+            # nothing to a person glancing at a phone.
+            escaped_label = f"{species_display} \u00b7 {clip['time'].strftime('%b %d, %I:%M %p')}".replace("'", "\\'")
             raw_species = clip.get('raw_species', 'unknown')
             species_icon = get_species_icon(raw_species)
             thumbnails = clip.get('thumbnails', [])
@@ -3553,7 +3595,7 @@ class WebServer:
                                 <div class="recording-camera">{clip['camera']}</div>
                             </div>
                             <div class="recording-actions">
-                                <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}');" title="Quick Play">
+                                <button class="action-btn play-btn" onclick="event.stopPropagation(); playVideo('/clips/{clip['path']}', '{clip['filename']}', '{escaped_path}', '{escaped_label}');" title="Quick Play">
                                     <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                                 </button>
                                 <button class="action-btn delete-btn" onclick="event.stopPropagation(); deleteClip('{escaped_path}');" title="Delete">
@@ -4323,6 +4365,7 @@ class WebServer:
                             const escapedPath = clip.path.replace(/'/g, "\\'");
                             const urlPath = clip.path.replace(/#/g, '%23');
                             const filename = clip.path.split('/').pop();
+                            const playLabel = `${{clip.species || 'Unknown'}} \u00b7 ${{clip.time || ''}}`.replace(/'/g, "\\'");
                             
                             return `
                                 <div class="day-clip-card" data-index="${{index}}" data-path="${{clip.path}}"
@@ -4337,7 +4380,7 @@ class WebServer:
                                     </div>
                                     <div class="day-clip-actions">
                                         <button class="day-clip-btn play" 
-                                                onclick="event.stopPropagation(); playVideo('/clips/${{clip.path}}', '${{filename}}', '${{escapedPath}}');"
+                                                onclick="event.stopPropagation(); playVideo('/clips/${{clip.path}}', '${{filename}}', '${{escapedPath}}', '${{playLabel}}');"
                                                 title="Quick Play">
                                             <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                                         </button>
@@ -5035,7 +5078,7 @@ class WebServer:
                     // Existing functions for video modal and bulk actions
                     let currentClipPath = null;
                     
-                    function playVideo(url, title, clipPath) {{
+                    function playVideo(url, title, clipPath, label) {{
                         const modal = document.getElementById('videoModal');
                         const video = document.getElementById('modalVideo');
                         const titleEl = document.getElementById('modalTitle');
@@ -5043,7 +5086,8 @@ class WebServer:
                         
                         currentClipPath = clipPath;
                         video.src = url;
-                        titleEl.textContent = title;
+                        // `title` is the download filename; show the readable label when we have one.
+                        titleEl.textContent = label || title;
                         downloadBtn.href = url;
                         downloadBtn.download = title;
                         
@@ -5781,9 +5825,12 @@ class WebServer:
                         color: #aaa;
                         font-size: 0.9em;
                         margin-bottom: 4px;
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 4px 16px;
                     }}
                     .recording-meta span {{
-                        margin-right: 16px;
+                        white-space: nowrap;
                     }}
                     
                     .video-section {{
@@ -6165,14 +6212,21 @@ class WebServer:
                             flex: 1 1 calc(50% - 6px);
                             min-width: calc(50% - 6px);
                             padding: 12px 8px;
+                            min-height: 44px;
                             font-size: 0.85em;
                         }}
+                        .log-toggle {{ min-height: 44px; }}
                         .action-btn svg {{
                             width: 16px;
                             height: 16px;
                         }}
                     }}
                     
+                    /* iOS Safari zooms the page when a focused control is under 16px.
+                       !important because per-component class rules would otherwise win. */
+                    @media (max-width: 767px) {{
+                        input, select, textarea {{ font-size: 16px !important; }}
+                    }}
                     @media (min-width: 768px) {{
                         body {{ padding: 24px; max-width: 900px; margin: 0 auto; }}
                         .nav {{ margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }}
@@ -7608,10 +7662,16 @@ class WebServer:
                     
                     /* Log viewer */
                     .log-controls {
-                        display: flex;
+                        display: grid;
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
                         gap: 8px;
                         margin-bottom: 12px;
-                        flex-wrap: wrap;
+                        align-items: stretch;
+                    }
+                    .log-controls > * { min-width: 0; width: 100%; }
+                    @media (min-width: 768px) {
+                        .log-controls { display: flex; flex-wrap: wrap; }
+                        .log-controls > * { width: auto; }
                     }
                     .log-controls select {
                         background: #1a1a1a;
@@ -7741,6 +7801,8 @@ class WebServer:
                         position: fixed;
                         bottom: calc(16px + env(safe-area-inset-bottom, 0px));
                         right: 16px;
+                        pointer-events: none;
+                        opacity: 0.85;
                         background: #333;
                         padding: 8px 12px;
                         border-radius: 8px;
@@ -7762,6 +7824,11 @@ class WebServer:
                         50% { opacity: 0.3; }
                     }
                     
+                    /* iOS Safari zooms the page when a focused control is under 16px.
+                       !important because per-component class rules would otherwise win. */
+                    @media (max-width: 767px) {
+                        input, select, textarea { font-size: 16px !important; }
+                    }
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 1000px; margin: 0 auto; }
                         .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }
@@ -8454,7 +8521,15 @@ class WebServer:
                         margin-bottom: 16px;
                         overflow-x: auto;
                         padding-bottom: 8px;
+                        -webkit-overflow-scrolling: touch;
+                        scroll-snap-type: x proximity;
+                        /* A permanent scrollbar track under the tabs reads as a stray rule on a
+                           phone; the clipped tab already signals that the row scrolls. */
+                        scrollbar-width: none;
+                        -ms-overflow-style: none;
                     }
+                    .camera-tabs::-webkit-scrollbar { display: none; }
+                    .camera-tab { scroll-snap-align: start; }
                     .camera-tab {
                         background: #333;
                         color: #fff;
@@ -8772,6 +8847,11 @@ class WebServer:
                     }
                     .clear-btn:hover { background: #555; }
                     
+                    /* iOS Safari zooms the page when a focused control is under 16px.
+                       !important because per-component class rules would otherwise win. */
+                    @media (max-width: 767px) {
+                        input, select, textarea { font-size: 16px !important; }
+                    }
                     @media (min-width: 768px) {
                         body { padding: 24px; max-width: 700px; margin: 0 auto; padding-bottom: 100px; }
                         .nav { margin: -24px -24px 24px -24px; padding-left: 24px; padding-right: 24px; }

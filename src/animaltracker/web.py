@@ -106,6 +106,13 @@ LOGGER = logging.getLogger(__name__)
 # deliberate long pan.
 PTZ_DEADMAN_SECONDS = 10.0
 
+# Every archive read walks the whole clips tree and stats each file, and a single page
+# load does it twice. The detection pipeline writes new clips outside this process, so
+# explicit invalidation alone cannot keep a cache honest -- hence a short TTL. New
+# recordings therefore appear within this many seconds, which is well inside what anyone
+# notices, while repeat reads within a burst become free.
+RECORDINGS_CACHE_TTL = 3.0
+
 
 # --- Pre-compiled regex patterns for /api/logs (compiled once at import) ---
 # HTTP access-log noise we always want to exclude.
@@ -207,6 +214,9 @@ class WebServer:
         self.reprocessing_jobs: Dict[str, dict] = {}
         # Per-camera PTZ dead-man timers: {camera_id: asyncio.Task}
         self._ptz_deadman: Dict[str, 'asyncio.Task'] = {}
+        # Short-lived cache of the archive scan; see RECORDINGS_CACHE_TTL.
+        self._scan_cache = None
+        self._scan_cache_ts = 0.0
         self.app = web.Application()
         self.app.router.add_get('/', self.handle_root_redirect)
         self.app.router.add_get('/live', self.handle_index)
@@ -1798,6 +1808,24 @@ class WebServer:
             LOGGER.error(f"Error setting PTZ debug: {e}")
             return web.json_response({'error': str(e)}, status=500)
 
+    def _invalidate_scan_cache(self) -> None:
+        """Drop the archive cache after a mutation this process performed."""
+        self._scan_cache = None
+
+    def _scan_recordings_cached(self):
+        """TTL-cached archive scan for request handlers.
+
+        _scan_recordings itself stays uncached: it is the characterized primitive and
+        callers that need guaranteed-fresh results (and the tests) use it directly.
+        """
+        now = _time.monotonic()
+        if self._scan_cache is not None and (now - self._scan_cache_ts) < RECORDINGS_CACHE_TTL:
+            return self._scan_cache
+        clips = self._scan_recordings()
+        self._scan_cache = clips
+        self._scan_cache_ts = now
+        return clips
+
     def _scan_recordings(self):
         clips_dir = self.storage_root / 'clips'
         if not clips_dir.exists():
@@ -2133,7 +2161,7 @@ class WebServer:
     async def handle_calendar_api(self, request):
         """GET /api/recordings/calendar - Returns full calendar structure as JSON"""
         loop = asyncio.get_running_loop()
-        clips = await loop.run_in_executor(None, self._scan_recordings)
+        clips = await loop.run_in_executor(None, self._scan_recordings_cached)
         calendar_data = self._build_calendar_data(clips)
         return web.json_response(calendar_data)
 
@@ -2152,14 +2180,14 @@ class WebServer:
         species = request.query.get('species')
         
         loop = asyncio.get_running_loop()
-        clips = await loop.run_in_executor(None, self._scan_recordings)
+        clips = await loop.run_in_executor(None, self._scan_recordings_cached)
         day_data = self._get_clips_for_date(clips, date_str, camera, species)
         
         return web.json_response(day_data)
 
     async def handle_recordings(self, request):
         loop = asyncio.get_running_loop()
-        clips = await loop.run_in_executor(None, self._scan_recordings)
+        clips = await loop.run_in_executor(None, self._scan_recordings_cached)
         
         if not clips and not (self.storage_root / 'clips').exists():
              return web.Response(text="No recordings found (clips directory missing)", content_type='text/html')
@@ -5587,6 +5615,7 @@ class WebServer:
         return web.Response(text=f"Clip saved: {filename}")
 
     def _delete_file(self, rel_path: str) -> tuple[bool, str]:
+        self._invalidate_scan_cache()
         # Resolve and require containment in the clips directory. A substring test for
         # '..' both misses encodings it should catch and rejects legitimate names that
         # merely contain two dots. Both sides are resolved so a symlinked storage root

@@ -57,6 +57,10 @@ import { toast } from './core/toast.js';
 import { sheet, dialog, palette, closeTop, isOverlayOpen } from './core/overlay.js';
 import { shortAgo } from './core/format.js';
 import { view as recordingsView } from './views/recordings.js';
+import { view as liveView } from './views/live.js';
+import { view as monitorView } from './views/monitor.js';
+import { view as settingsView } from './views/settings.js';
+import { view as detailView } from './views/detail.js';
 
 var THEME_KEY = 'at:theme';
 var CAMERA_POLL_MS = 5000;
@@ -788,10 +792,10 @@ function boot() {
   /* --- routes ------------------------------------------------------------ */
   router.register('/', recordingsView);
   router.register('/recordings', recordingsView);
-  router.register('/live', placeholderView('Live', 'live'));
-  router.register('/monitor', placeholderView('Monitor', 'monitor'));
-  router.register('/settings', placeholderView('Settings', 'settings'));
-  router.register('/clips/:path*', placeholderView('Clip detail', 'film'));
+  router.register('/live', liveView);
+  router.register('/monitor', monitorView);
+  router.register('/settings', settingsView);
+  router.register('/clips/:path*', detailView);
   router.setFallback(notFoundView());
 
   router.subscribe(function (ctx) {

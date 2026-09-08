@@ -107,6 +107,12 @@ LOGGER = logging.getLogger(__name__)
 # deliberate long pan.
 PTZ_DEADMAN_SECONDS = 10.0
 
+# A frame older than this means the stream is no longer live: the snapshot and MJPEG
+# paths dim the frame and draw the STREAM DOWN banner, and /api/cameras reports 'stale'.
+# Defined once -- it was previously a local in two handlers, with a comment elsewhere
+# claiming a different value.
+STALE_AFTER_SECONDS = 5.0
+
 # Every archive read walks the whole clips tree and stats each file, and a single page
 # load does it twice. The detection pipeline writes new clips outside this process, so
 # explicit invalidation alone cannot keep a cache honest -- hence a short TTL. New
@@ -289,6 +295,11 @@ class WebServer:
         self.app.router.add_get('/api/settings', self.handle_get_settings)
         self.app.router.add_post('/api/settings', self.handle_update_settings)
         
+        # JSON API for the front-end
+        self.app.router.add_get('/api/recordings', self.handle_recordings_api)
+        self.app.router.add_get('/api/clip/{path:.*}', self.handle_clip_api)
+        self.app.router.add_get('/api/cameras', self.handle_cameras_api)
+
         # Calendar API endpoints
         self.app.router.add_get('/api/recordings/calendar', self.handle_calendar_api)
         self.app.router.add_get('/api/recordings/day/{date}', self.handle_day_api)
@@ -2198,6 +2209,155 @@ class WebServer:
                 'peak_hour': peak_hour
             }
         }
+
+    @staticmethod
+    def _clip_to_json(clip: dict) -> dict:
+        """Serialise a _scan_recordings entry for the API.
+
+        `time` is emitted as ISO-8601 with offset so the client never has to guess
+        a timezone, alongside the epoch for cheap sorting and relative formatting.
+        """
+        when = clip['time']
+        return {
+            'path': clip['path'],
+            'filename': clip['filename'],
+            'camera': clip['camera'],
+            'species': clip['species'],
+            'raw_species': clip.get('raw_species', 'unknown'),
+            'date': clip['date'],
+            'time': when.isoformat(),
+            'epoch': when.timestamp(),
+            'size': clip['size'],
+            'size_mb': round(clip['size'] / (1024 * 1024), 2),
+            'thumbnails': clip.get('thumbnails', []),
+            'thumbnail': (clip.get('thumbnails') or [{}])[0].get('url'),
+        }
+
+    def _filter_clips(self, clips: list, query: dict) -> list:
+        """Apply camera / species / date-range / free-text filters."""
+        cameras = {c for c in (query.get('camera') or '').split(',') if c}
+        species = {sp for sp in (query.get('species') or '').split(',') if sp}
+        date_from = query.get('from') or None
+        date_to = query.get('to') or None
+        text = (query.get('q') or '').strip().lower()
+
+        out = []
+        for clip in clips:
+            if cameras and clip['camera'] not in cameras:
+                continue
+            if species and clip['species'] not in species:
+                continue
+            # 'Manual' clips have no calendar date; a date range excludes them.
+            if date_from and (clip['date'] == 'Manual' or clip['date'] < date_from):
+                continue
+            if date_to and (clip['date'] == 'Manual' or clip['date'] > date_to):
+                continue
+            if text and text not in (
+                f"{clip['species']} {clip['camera']} {clip['filename']}".lower()
+            ):
+                continue
+            out.append(clip)
+        return out
+
+    async def handle_recordings_api(self, request):
+        """GET /api/recordings — filtered, sorted, paginated clip list plus facets."""
+        q = dict(request.query)
+        try:
+            limit = max(1, min(500, int(q.get('limit', 60))))
+            offset = max(0, int(q.get('offset', 0)))
+        except ValueError:
+            return web.json_response({'error': 'limit and offset must be integers'}, status=400)
+
+        loop = asyncio.get_running_loop()
+        clips = await loop.run_in_executor(None, self._scan_recordings_cached)
+        matched = self._filter_clips(clips, q)
+
+        sort = q.get('sort', 'newest')
+        if sort == 'oldest':
+            matched = sorted(matched, key=lambda c: c['time'])
+        elif sort == 'species':
+            matched = sorted(matched, key=lambda c: (c['species'].lower(), -c['time'].timestamp()))
+        elif sort == 'camera':
+            matched = sorted(matched, key=lambda c: (c['camera'], -c['time'].timestamp()))
+        elif sort == 'largest':
+            matched = sorted(matched, key=lambda c: -c['size'])
+        # 'newest' is the order _scan_recordings already returns.
+
+        # Facets describe the whole match, not the current page, so counts stay
+        # stable while paging.
+        cameras: Dict[str, int] = {}
+        species: Dict[str, int] = {}
+        for clip in matched:
+            cameras[clip['camera']] = cameras.get(clip['camera'], 0) + 1
+            species[clip['species']] = species.get(clip['species'], 0) + 1
+
+        page = matched[offset:offset + limit]
+        return web.json_response({
+            'clips': [self._clip_to_json(c) for c in page],
+            'total': len(matched),
+            'archive_total': len(clips),
+            'offset': offset,
+            'limit': limit,
+            'has_more': offset + limit < len(matched),
+            'facets': {
+                'cameras': sorted(
+                    ({'value': k, 'count': v} for k, v in cameras.items()),
+                    key=lambda x: x['value'],
+                ),
+                'species': sorted(
+                    ({'value': k, 'count': v} for k, v in species.items()),
+                    key=lambda x: (-x['count'], x['value']),
+                ),
+            },
+        })
+
+    async def handle_clip_api(self, request):
+        """GET /api/clip/{path} — detail for one clip, including track timing."""
+        rel_path = request.match_info.get('path', '')
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, self._get_clip_detail, rel_path)
+        if info is None:
+            return web.json_response({'error': 'Clip not found'}, status=404)
+
+        payload = dict(info)
+        payload['time'] = info['time'].isoformat()
+        payload['epoch'] = info['time'].timestamp()
+        payload['url'] = f"/clips/{rel_path}"
+        payload['reprocessing'] = rel_path in self.reprocessing_jobs
+        return web.json_response(payload)
+
+    async def handle_cameras_api(self, request):
+        """GET /api/cameras — identity plus live health for the shell chrome."""
+        now = _time.time()
+        cameras = []
+        for cam_id, worker in self.workers.items():
+            last_ts = float(getattr(worker, 'latest_frame_ts', 0.0) or 0.0)
+            age = (now - last_ts) if last_ts > 0 else None
+            connected = bool(getattr(worker, 'stream_connected', False))
+            has_frame = getattr(worker, 'latest_frame', None) is not None
+            if not has_frame:
+                state = 'offline'
+            elif not connected or (age is not None and age > STALE_AFTER_SECONDS):
+                state = 'stale'
+            else:
+                state = 'live'
+            ptz = getattr(worker.camera, 'ptz_tracking', None)
+            cameras.append({
+                'id': cam_id,
+                'name': getattr(worker.camera, 'name', cam_id),
+                'location': getattr(worker.camera, 'location', ''),
+                'state': state,
+                'frame_age': round(age, 1) if age is not None else None,
+                'stream_url': f'/stream/{cam_id}',
+                'snapshot_url': f'/snapshot/{cam_id}',
+                'has_ptz': bool(
+                    getattr(worker, 'onvif_client', None)
+                    and getattr(worker, 'onvif_profile_token', None)
+                ),
+                'has_tracker': getattr(worker, 'ptz_tracker', None) is not None,
+                'ptz_target': getattr(ptz, 'target_camera_id', None) if ptz else None,
+            })
+        return web.json_response({'cameras': cameras, 'timezone': TIMEZONE_DISPLAY})
 
     async def handle_calendar_api(self, request):
         """GET /api/recordings/calendar - Returns full calendar structure as JSON"""
@@ -5383,8 +5543,7 @@ class WebServer:
         last_ts = float(getattr(worker, 'latest_frame_ts', 0.0) or 0.0)
         stream_connected = bool(getattr(worker, 'stream_connected', False))
         age = now - last_ts if last_ts > 0 else float('inf')
-        STALE_AFTER_SEC = 5.0
-        is_stale = (not stream_connected) or age > STALE_AFTER_SEC
+        is_stale = (not stream_connected) or age > STALE_AFTER_SECONDS
 
         # If we have no frame at all, return a generated "STREAM DOWN" placeholder
         if worker.latest_frame is None:
@@ -5561,7 +5720,6 @@ class WebServer:
         MAX_FPS = 15.0
         min_interval = 1.0 / MAX_FPS
         idle_poll = 0.05
-        STALE_AFTER_SEC = 5.0
 
         try:
             while True:
@@ -5569,7 +5727,7 @@ class WebServer:
                 last_ts = float(getattr(worker, 'latest_frame_ts', 0.0) or 0.0)
                 stream_connected = bool(getattr(worker, 'stream_connected', False))
                 age = now - last_ts if last_ts > 0 else float('inf')
-                is_stale = (not stream_connected) or age > STALE_AFTER_SEC
+                is_stale = (not stream_connected) or age > STALE_AFTER_SECONDS
 
                 frame = worker.latest_frame
 

@@ -295,6 +295,12 @@ class WebServer:
         self.app.router.add_get('/api/settings', self.handle_get_settings)
         self.app.router.add_post('/api/settings', self.handle_update_settings)
         
+        # New client-side app. Served at /app while the rewrite is in progress so the
+        # existing pages stay available for comparison; the root routes move here at
+        # cutover.
+        self.app.router.add_get('/app', self.handle_app_shell)
+        self.app.router.add_get('/app/{tail:.*}', self.handle_app_shell)
+
         # JSON API for the front-end
         self.app.router.add_get('/api/recordings', self.handle_recordings_api)
         self.app.router.add_get('/api/clip/{path:.*}', self.handle_clip_api)
@@ -2258,6 +2264,49 @@ class WebServer:
                 continue
             out.append(clip)
         return out
+
+    async def handle_app_shell(self, request):
+        """The single HTML document behind every client-side route.
+
+        Deep links work because every app path returns this same shell and the
+        router reads location.pathname on boot.
+        """
+        v = self.asset_version
+        html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Animal Tracker</title>
+<link rel="stylesheet" href="/static/tokens.css?v={v}">
+<link rel="stylesheet" href="/static/app.css?v={v}">
+<script>
+  /* Resolve the theme before first paint so a manual choice never flashes the
+     other palette. Storage can throw in a private window; the OS preference is
+     the fallback and the stylesheet already handles it. */
+  try {{
+    var t = localStorage.getItem('at:theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  }} catch (e) {{}}
+</script>
+</head>
+<body>
+<a class="skiplink" href="#main">Skip to content</a>
+<div id="app" class="shell" aria-busy="true"></div>
+<script type="module" src="/static/app.js?v={v}"></script>
+<noscript>
+  <p style="padding:24px">Animal Tracker needs JavaScript enabled.</p>
+</noscript>
+</body>
+</html>"""
+        return web.Response(
+            text=html,
+            content_type='text/html',
+            headers={'Cache-Control': 'no-cache'},
+        )
 
     async def handle_recordings_api(self, request):
         """GET /api/recordings — filtered, sorted, paginated clip list plus facets."""

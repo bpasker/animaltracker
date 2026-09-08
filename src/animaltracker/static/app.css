@@ -1,0 +1,4674 @@
+/* ============================================================================
+   ANIMAL TRACKER — APPLICATION STYLESHEET
+   Hand-written. No build step, no preprocessor, no CDN, no webfont.
+
+   Load order: tokens.css  ->  app.css
+
+   Rules this file must always satisfy (checked in CI-style greps):
+     - No colour literal in any component rule. Colour comes only from the
+       LAYER 2 semantic tokens in tokens.css.
+     - iOS 15 floor: no color-mix(), no container queries, no :has(),
+       no dvh/svh/lvh, no @supports, no CSS nesting.
+     - Every interactive target >= 44x44 CSS px on a coarse pointer.
+     - Every interactive element has a visible :focus-visible ring.
+   ========================================================================= */
+
+
+/* ############################################################################
+   PRIMITIVES — Base layer, form and control primitives, instrument atoms
+   ######################################################################### */
+
+/* ============================================================================
+   ANIMAL TRACKER — PART 1 · BASE LAYER + FORM / CONTROL PRIMITIVES
+   Concatenated after tokens.css. Assumes LAYER 2 semantic tokens are loaded.
+
+   RULES OBSERVED HERE
+     · Zero colour literals. Every colour is a LAYER 2 semantic token.
+       (`transparent` and `currentColor` are used — they are keywordless of
+       hue and carry no palette value; nothing else appears.)
+     · iOS 15 floor. The banned set — colour mixing functions, container
+       queries, the parent selector, the new viewport units, feature queries
+       and native nesting — appears nowhere below, by name or by use.
+     · Mobile-first. min-width media queries only, at 640 / 1024 / 1440.
+     · Nothing interactive is smaller than 44x44 on a coarse pointer;
+       --control-h resolves to 44px there, so no rule below can undercut it.
+     · Every interactive element restates its own border-radius inside its
+       :focus-visible rule. tokens.css ships a global
+       `:focus-visible{border-radius:var(--r-xs)}` which would otherwise
+       square off a pill button the moment it takes focus.
+   ========================================================================= */
+
+
+/* ============================================================================
+   1 · BASE / RESET
+   tokens.css already ships the required base (box-sizing, body ground and
+   type, -webkit-text-size-adjust, ::selection, .sr-only, :focus-visible,
+   the reduced-motion damper). What follows ADDS to it and never contradicts
+   it; the few mirrored declarations carry byte-identical values so the
+   concatenation order cannot matter.
+   ========================================================================= */
+
+*,
+*::before,
+*::after{ box-sizing:border-box }
+
+html{
+  -webkit-text-size-adjust:100%;
+  text-size-adjust:100%;
+}
+
+body{
+  margin:0;
+  background:var(--c-canvas);
+  color:var(--c-text);
+  font-family:var(--font-sans);
+  font-size:var(--t-base);
+  line-height:var(--lh-normal);
+  text-rendering:optimizeSpeed; /* a 400-card archive; legibility hinting is
+                                   not worth the layout cost at this density */
+  -webkit-tap-highlight-color:transparent;
+}
+
+h1,h2,h3,h4,h5,h6,
+p,figure,blockquote,dl,dd,ol,ul,pre{ margin:0 }
+ol,ul{ padding:0; list-style:none }
+
+img,svg,video,canvas{ display:block; max-width:100% }
+img,video{ height:auto }
+
+a{ color:var(--c-accent-text); text-decoration:none }
+/* Hover affordances are always gated, so nothing sticks after a tap on iOS. */
+@media (hover: hover){
+  a:hover{ text-decoration:underline }
+}
+
+button,input,select,textarea{
+  font:inherit;
+  color:inherit;
+  margin:0;
+}
+button{ background:none; border:0; padding:0 }
+input,select,textarea{
+  font-size:var(--t-input); /* 16px floor — below this iOS Safari zooms the
+                               viewport on focus and never zooms back out */
+}
+textarea{ resize:vertical }
+
+/* Kills the 300ms synthetic-click delay everywhere except the surfaces that
+   own their own gestures (the PTZ pad, the video stage, sheet handles). */
+button,
+[role="button"],
+input[type="checkbox"],
+input[type="radio"],
+label,
+summary,
+a{ touch-action:manipulation }
+
+::selection{ background:var(--c-selection) }
+
+hr{
+  border:0;
+  border-top:1px solid var(--c-line);
+  margin:0;
+}
+
+[hidden]{ display:none !important }
+
+
+/* --- Visually hidden -------------------------------------------------- */
+/* .sr-only ships with the tokens; .visually-hidden is its alias so either
+   name is safe in markup. --focusable reveals on keyboard focus (skip link). */
+.visually-hidden{
+  position:absolute;
+  width:1px; height:1px;
+  padding:0; margin:-1px;
+  overflow:hidden;
+  clip-path:inset(50%);
+  white-space:nowrap;
+  border:0;
+}
+.visually-hidden--focusable:focus,
+.visually-hidden--focusable:focus-visible{
+  position:static;
+  width:auto; height:auto;
+  margin:0;
+  overflow:visible;
+  clip-path:none;
+  white-space:normal;
+}
+
+
+/* --- Focus ------------------------------------------------------------- */
+:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+}
+:focus:not(:focus-visible){ outline:none }
+
+/* Reusable halo for controls that read as a filled box rather than a glyph. */
+.focus-halo:focus-visible{
+  box-shadow:0 0 0 3px var(--c-focus-halo);
+}
+
+
+/* --- Motion damper ------------------------------------------------------ */
+/* Mirrors the tokens' damper and adds fill-mode:both, so a suppressed
+   entrance lands on its END state instead of disappearing. */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms !important;
+    animation-iteration-count:1 !important;
+    animation-fill-mode:both !important;
+    transition-duration:.01ms !important;
+    scroll-behavior:auto !important;
+  }
+}
+
+
+/* ============================================================================
+   2 · TYPOGRAPHY
+   ========================================================================= */
+
+h1,.t-h1{
+  font-size:var(--t-xl);
+  font-weight:var(--w-semi);
+  line-height:var(--lh-tight);
+  letter-spacing:var(--ls-tight);
+  color:var(--c-text);
+}
+h2,.t-h2{
+  font-size:var(--t-lg);
+  font-weight:var(--w-semi);
+  line-height:var(--lh-tight);
+  letter-spacing:var(--ls-tight);
+  color:var(--c-text);
+}
+h3,.t-h3{
+  font-size:var(--t-md);
+  font-weight:var(--w-semi);
+  line-height:var(--lh-snug);
+  color:var(--c-text);
+}
+h4,h5,h6,.t-h4{
+  font-size:var(--t-base);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-snug);
+  color:var(--c-text);
+}
+.t-display{
+  font-size:var(--t-2xl);
+  font-weight:var(--w-semi);
+  line-height:var(--lh-tight);
+  letter-spacing:var(--ls-tight);
+}
+
+.t-body   { font-size:var(--t-base); line-height:var(--lh-normal) }
+.t-sm     { font-size:var(--t-sm) }
+.t-xs     { font-size:var(--t-xs) }
+.t-micro  { font-size:var(--t-micro) }
+
+.t-2      { color:var(--c-text-2) }
+.t-3      { color:var(--c-text-3) }
+.t-accent { color:var(--c-accent-text) }
+.t-danger { color:var(--c-danger-text) }
+
+/* Every machine-produced number in the app goes through .mono. */
+.mono{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum" 1;
+  letter-spacing:var(--ls-normal);
+}
+
+/* Caps micro-label. The overline above a value, a section, or a rail group. */
+.overline{
+  display:block;
+  font-size:var(--t-micro);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-flat);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+.overline--strong{ color:var(--c-text-2) }
+
+/* Species names and any other model-supplied string wrap; they never
+   truncate. .truncate is for machine strings only — paths, ids, log
+   fragments — never for a species name or a camera name. */
+.clamp-2{
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+  overflow-wrap:anywhere;
+}
+.truncate{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+kbd,.kbd{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:20px;
+  padding:1px var(--s-1);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-xs);
+  background:var(--c-surface);
+  color:var(--c-text-3);
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  line-height:var(--lh-snug);
+}
+
+code,.code{
+  font-family:var(--font-mono);
+  font-size:.92em;
+  color:var(--c-text-2);
+}
+
+
+/* ============================================================================
+   3 · ICON SPRITE
+   One inline <symbol> sprite in the server-rendered shell; every icon is
+   <svg class="i"><use href="#i-play"></use></svg>. No external request ever.
+   ========================================================================= */
+
+.icon-sprite{
+  position:absolute;
+  width:0; height:0;
+  overflow:hidden;
+}
+
+.i{
+  width:20px; height:20px;
+  flex:none;
+  display:block;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.6;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.i-sm{ width:16px; height:16px; stroke-width:1.8 }
+.i-lg{ width:24px; height:24px; stroke-width:1.5 }
+
+/* Icons that carry meaning are paired with text or an aria-label; decorative
+   ones are aria-hidden in markup. Nothing here assumes either. */
+
+
+/* ============================================================================
+   4 · SPINNER
+   The only looping indicator in this file. Under reduced motion it stops
+   rotating and resolves to a complete static ring; aria-busy still carries
+   the meaning.
+   ========================================================================= */
+
+.spinner{
+  width:14px; height:14px;
+  flex:none;
+  border:2px solid currentColor;
+  border-top-color:transparent;
+  border-radius:var(--r-pill);
+  animation:at-spin 720ms linear infinite;
+}
+.spinner--lg{ width:20px; height:20px; border-width:2.5px }
+
+@keyframes at-spin{ to{ transform:rotate(360deg) } }
+
+@media (prefers-reduced-motion: reduce){
+  .spinner{
+    animation:none;
+    border-top-color:currentColor;
+    opacity:.55;
+  }
+}
+
+
+/* ============================================================================
+   5 · BUTTON  (.btn)
+   Variants: --primary --secondary --ghost --danger --danger-solid
+   Sizes:    --sm (fine pointer only) · default · --lg
+   ========================================================================= */
+
+.btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:var(--s-2);
+  min-height:var(--control-h);
+  min-width:var(--control-h);
+  padding:var(--s-1) var(--s-4);
+  border:1px solid transparent;
+  border-radius:var(--r-pill);
+  background:transparent;
+  color:var(--c-text);
+  font-family:inherit;
+  font-size:var(--t-sm);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-tight);
+  text-align:center;
+  text-decoration:none;
+  cursor:pointer;
+  user-select:none;
+  -webkit-user-select:none;
+  touch-action:manipulation;
+  transition:background-color var(--dur-fast) var(--ease-out),
+             border-color     var(--dur-fast) var(--ease-out),
+             color            var(--dur-fast) var(--ease-out),
+             box-shadow       var(--dur-fast) var(--ease-out),
+             transform        var(--dur-instant) var(--ease-out);
+}
+.btn:hover{ text-decoration:none }
+
+.btn:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-pill); /* restated: see header note */
+}
+.btn:active{ transform:scale(.97) }
+
+.btn[disabled],
+.btn[aria-disabled="true"]{
+  opacity:.5;
+  pointer-events:none;
+  box-shadow:none;
+}
+
+/* -- variants -- */
+.btn--primary{
+  background:var(--c-accent);
+  color:var(--c-on-accent);
+  box-shadow:var(--e-1);
+}
+.btn--secondary{
+  background:var(--c-surface);
+  border-color:var(--c-line-control); /* the ONLY border permitted here */
+  color:var(--c-text);
+  box-shadow:var(--e-1);
+}
+.btn--ghost{
+  background:transparent;
+  color:var(--c-text-2);
+}
+.btn--danger{
+  background:var(--c-danger-wash);
+  color:var(--c-danger-text);
+  border-color:transparent;
+}
+.btn--danger-solid{
+  background:var(--c-danger);
+  color:var(--c-on-danger);
+  border-color:transparent;
+}
+
+/* aria-pressed is the single source of truth — never a parallel .is-on. */
+.btn[aria-pressed="true"]{
+  background:var(--c-accent-wash);
+  color:var(--c-accent-text);
+  border-color:var(--c-accent-line);
+}
+
+@media (hover: hover){
+  .btn--primary:hover      { background:var(--c-accent-hover); box-shadow:var(--e-2) }
+  .btn--secondary:hover    { background:var(--c-surface-2); border-color:var(--c-line-strong) }
+  .btn--ghost:hover        { background:var(--c-surface-inset); color:var(--c-text) }
+  /* danger keeps its wash on hover and steps the border instead — swapping to
+     the solid fill would put --c-danger-text on --c-danger and fail AA. */
+  .btn--danger:hover       { border-color:var(--c-danger); color:var(--c-danger-text) }
+  .btn--danger-solid:hover { background:var(--c-danger-hover) }
+  .btn[aria-pressed="true"]:hover{ background:var(--c-accent-wash-strong) }
+}
+
+/* -- sizes -- */
+.btn--lg{
+  min-height:var(--tap-lg);
+  padding-inline:var(--s-6);
+  font-size:var(--t-base);
+}
+.btn--block{ width:100%; display:flex }
+
+/* --sm is a fine-pointer affordance only. It is BANNED on mobile, inside
+   toasts and inside the selection bar; the two guards below make that
+   physically true rather than a claim in a doc. */
+.btn--sm{
+  min-height:32px;
+  min-width:32px;
+  padding-inline:var(--s-3);
+  font-size:var(--t-xs);
+}
+@media (max-width: 640px){
+  .btn--sm{
+    min-height:var(--control-h);
+    min-width:var(--control-h);
+    padding-inline:var(--s-4);
+    font-size:var(--t-sm);
+  }
+}
+@media (pointer: coarse){
+  .btn--sm{ min-height:var(--control-h); min-width:var(--control-h) }
+}
+
+/* -- loading -- */
+/* The label stays put; only the leading icon is swapped, so the button does
+   not change width mid-action. */
+.btn__spinner{ display:none }
+.btn[aria-busy="true"]{ pointer-events:none; cursor:progress }
+.btn[aria-busy="true"] .btn__icon{ display:none }
+.btn[aria-busy="true"] .btn__spinner{ display:block }
+
+.btn__label{ min-width:0 }
+.btn__count{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);
+  opacity:.78;
+}
+
+/* Groups */
+.btn-row{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  flex-wrap:wrap;
+}
+.btn-row--split > *{ flex:1 1 0 }
+
+
+/* ============================================================================
+   6 · ICON BUTTON  (.icon-btn)
+   Width AND height are var(--tap) at all times. To make a glyph look smaller,
+   shrink the SVG (.i-sm) — never the box.
+   ========================================================================= */
+
+.icon-btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:var(--tap);
+  height:var(--tap);
+  flex:none;
+  padding:0;
+  border:1px solid transparent;
+  border-radius:var(--r-pill);
+  background:transparent;
+  color:var(--c-text-2);
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:background-color var(--dur-fast) var(--ease-out),
+             border-color     var(--dur-fast) var(--ease-out),
+             color            var(--dur-fast) var(--ease-out),
+             transform        var(--dur-instant) var(--ease-out);
+}
+.icon-btn:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-pill);
+}
+.icon-btn:active{ transform:scale(.92) }
+
+.icon-btn[disabled],
+.icon-btn[aria-disabled="true"]{ opacity:.5; pointer-events:none }
+
+.icon-btn[aria-pressed="true"]{
+  background:var(--c-accent-wash);
+  color:var(--c-accent-text);
+  border-color:var(--c-accent-line);
+}
+
+.icon-btn--solid{
+  background:var(--c-surface);
+  border-color:var(--c-line-control);
+  box-shadow:var(--e-1);
+  color:var(--c-text);
+}
+.icon-btn--danger{ color:var(--c-danger-text) }
+
+/* Over video: the on-media token set, which is theme-independent by design. */
+.icon-btn--on-media{
+  background:var(--c-media-scrim);
+  color:var(--c-on-media);
+  border-color:var(--c-on-media-line);
+}
+
+@media (hover: hover){
+  .icon-btn:hover          { background:var(--c-surface-inset); color:var(--c-text) }
+  .icon-btn--solid:hover   { background:var(--c-surface-2); border-color:var(--c-line-strong) }
+  .icon-btn--on-media:hover{ background:var(--c-media-scrim-strong); color:var(--c-on-media) }
+  .icon-btn--danger:hover  { background:var(--c-danger-wash) }
+  .icon-btn[aria-pressed="true"]:hover{ background:var(--c-accent-wash-strong) }
+}
+
+/* The one sanctioned shrink: icon-only controls inside a dense desktop table,
+   where a coarse pointer is not in play at all. */
+@media (pointer: fine){
+  .icon-btn--dense{ width:32px; height:32px }
+}
+
+
+/* ============================================================================
+   7 · CHIP  (.chip)
+   Filter chips, active-filter chips, PTZ preset recall.
+   ========================================================================= */
+
+.chip{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-2);
+  flex:none;
+  min-height:var(--control-h);
+  padding:var(--s-1) var(--s-4);
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-pill);
+  background:var(--c-surface);
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-tight);
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:background-color var(--dur-fast) var(--ease-out),
+             border-color     var(--dur-fast) var(--ease-out),
+             color            var(--dur-fast) var(--ease-out),
+             transform        var(--dur-instant) var(--ease-out);
+}
+.chip:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-pill);
+}
+.chip:active{ transform:scale(.97) }
+
+.chip[aria-pressed="true"]{
+  background:var(--c-accent);
+  border-color:var(--c-accent);
+  color:var(--c-on-accent);
+  box-shadow:var(--e-1);
+}
+
+/* Zero-result / disabled. The aria-label carries "no clips" — opacity alone
+   is never the signal. */
+.chip[disabled],
+.chip[aria-disabled="true"]{ opacity:.5; pointer-events:none }
+
+.chip--tonal{ background:var(--c-surface-inset); border-color:transparent }
+.chip--clear{ color:var(--c-text-3); border-style:dashed }
+
+@media (hover: hover){
+  .chip:hover{ border-color:var(--c-line-strong); color:var(--c-text) }
+  .chip[aria-pressed="true"]:hover{ background:var(--c-accent-hover); border-color:var(--c-accent-hover) }
+}
+
+/* Species chips carry the dot AND the word. */
+.chip__dot{
+  width:10px; height:10px;
+  flex:none;
+  border-radius:var(--r-pill);
+  background:var(--species-dot, var(--sp-unknown-dot));
+}
+.chip[aria-pressed="true"] .chip__dot{ background:var(--c-on-accent) }
+
+.chip__count{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);
+  opacity:.78;
+}
+
+/* The remove affordance. On a coarse pointer the whole chip toggles off and
+   the glyph is inert decoration; on a fine pointer a real sibling .icon-btn
+   inside .chip-group does the removing. An 18px inner button does not exist
+   in this system. */
+.chip__x{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:var(--i-x, 16px);
+  height:var(--i-x, 16px);
+  flex:none;
+  opacity:.7;
+  pointer-events:none;
+}
+.chip-group{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-1);
+}
+
+/* Edge-bleed horizontal strip: scrolls to the true screen edge in both
+   orientations, so the last chip never reads as clipped. */
+.chip-row{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  overflow-x:auto;
+  overscroll-behavior-x:contain;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+  padding-block:var(--s-1);
+  margin-inline:calc(var(--s-4) * -1);
+  padding-inline:calc(var(--s-4) + var(--inset-left))
+                 calc(var(--s-4) + var(--inset-right));
+}
+.chip-row::-webkit-scrollbar{ display:none }
+.chip-row--wrap{
+  flex-wrap:wrap;
+  overflow:visible;
+  margin-inline:0;
+  padding-inline:0;
+}
+
+
+/* ============================================================================
+   8 · SEGMENTED CONTROL  (.seg)
+   role="group" of aria-pressed buttons with roving tabindex. Not a tablist.
+   ========================================================================= */
+
+.seg{
+  display:inline-flex;
+  align-items:center;
+  gap:2px;
+  padding:3px;
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-pill);
+  background:var(--c-surface-sunken);
+  max-width:100%;
+}
+.seg__btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:var(--s-2);
+  flex:1 1 auto;
+  min-height:var(--control-h);
+  padding-inline:var(--s-4);
+  border:0;
+  border-radius:var(--r-pill);
+  background:transparent;
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-tight);
+  white-space:nowrap;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:background-color var(--dur-fast) var(--ease-out),
+             color            var(--dur-fast) var(--ease-out);
+}
+.seg__btn:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:-1px; /* inset, so the ring stays inside the track */
+  border-radius:var(--r-pill);
+}
+.seg__btn[aria-pressed="true"]{
+  background:var(--c-surface);
+  color:var(--c-text);
+  font-weight:var(--w-semi);
+  box-shadow:var(--e-1);
+}
+.seg__btn[disabled],
+.seg__btn[aria-disabled="true"]{ opacity:.5; pointer-events:none }
+
+@media (hover: hover){
+  .seg__btn:hover{ color:var(--c-text) }
+  .seg__btn[aria-pressed="true"]:hover{ background:var(--c-surface) }
+}
+
+.seg--block{ display:flex; width:100% }
+.seg--block .seg__btn{ flex:1 1 0 }
+
+/* Theme switch is a .seg of three; on a narrow bar it drops to glyphs, and
+   the aria-label (which names the resolved theme) carries the meaning. */
+.themeswitch{ flex:none }
+@media (max-width: 640px){
+  .themeswitch .seg__btn{ padding-inline:var(--s-3) }
+  .themeswitch .seg__btn .btn__label{ display:none }
+}
+
+
+/* ============================================================================
+   9 · SEARCH FIELD  (.search)
+   ========================================================================= */
+
+.search{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-height:var(--control-h);
+  min-width:0;
+  padding-inline:var(--s-4) var(--s-2);
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-pill);
+  background:var(--c-surface-sunken);
+  color:var(--c-text-3);
+  transition:background-color var(--dur-fast) var(--ease-out),
+             border-color     var(--dur-fast) var(--ease-out),
+             box-shadow       var(--dur-fast) var(--ease-out);
+}
+.search:focus-within{
+  background:var(--c-surface);
+  border-color:var(--c-accent);
+  box-shadow:0 0 0 3px var(--c-focus-halo);
+  color:var(--c-text);
+}
+
+.search__icon{ flex:none; color:var(--c-text-3) }
+.search__spinner{ display:none }
+.search--loading .search__icon{ display:none }
+.search--loading .search__spinner{ display:block; color:var(--c-text-3) }
+
+.search__input{
+  flex:1 1 auto;
+  min-width:0;
+  height:var(--control-h);
+  border:0;
+  padding:0;
+  background:transparent;
+  color:var(--c-text);
+  font-size:var(--t-input); /* mandatory 16px — iOS focus-zoom guard */
+}
+.search__input::placeholder{ color:var(--c-text-3); opacity:1 }
+.search__input::-webkit-search-cancel-button{ -webkit-appearance:none; appearance:none }
+
+/* The wrapper's focus-within ring IS the replacement for the inner outline;
+   without this the field would draw two rings, 3px apart. */
+.search__input:focus-visible{ outline:none }
+
+/* Clear button is a full 44px .icon-btn; it appears only when filled. */
+.search__clear{ display:none }
+.search--filled .search__clear{ display:inline-flex }
+
+.search__kbd{ display:none }
+@media (pointer: fine){
+  .search__kbd{ display:inline-flex; flex:none; margin-right:var(--s-1) }
+  /* A 44px clear button inside a 38px field makes the field 46px tall and
+     out of line with its neighbouring buttons. Shrinking it is allowed here
+     for the same reason .icon-btn--dense is: no coarse pointer is in play. */
+  .search__clear{ width:32px; height:32px }
+}
+
+.search--block{ width:100% }
+
+/* no-results is worded, not coloured: the note below the field names it. */
+.search__note{
+  margin-top:var(--s-2);
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+}
+.search--no-results .search__note{ color:var(--c-stale-text) }
+
+
+/* ============================================================================
+   10 · FORM FIELD  (.field) + inputs, textarea, stepper, checkbox
+   The Settings primitive: label + control + hint/error in one grid.
+   ========================================================================= */
+
+.field{
+  display:grid;
+  gap:var(--s-2);
+  min-width:0;
+}
+
+.field__label{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  font-size:var(--t-xs);
+  font-weight:var(--w-medium);
+  color:var(--c-text-2);
+  line-height:var(--lh-snug);
+}
+/* Dirty marker — 4px accent dot beside the label; the section's Save enables
+   in the same beat. Rendered only when the field is dirty. */
+.field__dirty{
+  width:4px; height:4px;
+  flex:none;
+  border-radius:var(--r-pill);
+  background:var(--c-accent);
+}
+.field__hint{
+  font-size:var(--t-xs);
+  line-height:var(--lh-snug);
+  color:var(--c-text-3);
+}
+/* Error replaces the hint rather than stacking under it. */
+.field__error{
+  display:flex;
+  align-items:flex-start;
+  gap:var(--s-2);
+  font-size:var(--t-xs);
+  line-height:var(--lh-snug);
+  color:var(--c-danger-text);
+}
+.field__error .i,
+.field__error .i-sm{ margin-top:1px; flex:none }
+
+.field__status{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-2);
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+}
+.field__saved{
+  color:var(--c-live-text);
+  animation:at-fade-out 2s var(--ease-out) 1 forwards;
+  animation-fill-mode:both;
+}
+@keyframes at-fade-out{
+  0%,60%{ opacity:1 }
+  100%  { opacity:0 }
+}
+
+/* -- the control itself -- */
+.input,
+.textarea{
+  display:block;
+  width:100%;
+  min-height:var(--tap);
+  padding:var(--s-2) var(--s-3);
+  border:1px solid var(--c-line-control); /* never --c-line: 1.4.11 */
+  border-radius:var(--r-sm);
+  background:var(--c-surface);
+  color:var(--c-text);
+  font-family:inherit;
+  font-size:var(--t-input);
+  line-height:var(--lh-snug);
+  transition:border-color var(--dur-fast) var(--ease-out),
+             box-shadow   var(--dur-fast) var(--ease-out),
+             background-color var(--dur-fast) var(--ease-out);
+}
+.textarea{ min-height:calc(var(--tap) * 2.5) }
+
+.input::placeholder,
+.textarea::placeholder{ color:var(--c-text-3); opacity:1 }
+
+.input:focus-visible,
+.textarea:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:1px;
+  border-radius:var(--r-sm);
+  border-color:var(--c-accent);
+  box-shadow:0 0 0 3px var(--c-focus-halo);
+}
+
+.input[aria-invalid="true"],
+.textarea[aria-invalid="true"]{ border-color:var(--c-danger) }
+
+.input[disabled],
+.textarea[disabled]{
+  opacity:.5;
+  background:var(--c-surface-sunken);
+  cursor:not-allowed;
+}
+/* readonly is a derived value (a resolved RTSP URL), not a broken control —
+   it stays legible and selectable, and it reads as machine output. */
+.input[readonly],
+.textarea[readonly]{
+  background:var(--c-surface-sunken);
+  border-color:var(--c-line);
+  color:var(--c-text-2);
+  font-family:var(--font-mono);
+  font-size:var(--t-sm);
+}
+.input--mono{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-size:var(--t-input);
+}
+
+.field--saving .input,
+.field--saving .textarea,
+.field--saving .select__el{ pointer-events:none; opacity:.6 }
+
+@media (hover: hover){
+  .input:hover,
+  .textarea:hover{ border-color:var(--c-line-strong) }
+}
+
+/* -- Number stepper: two 44px buttons flanking a mono input --------------- */
+.stepper{
+  display:flex;
+  align-items:center;
+  gap:var(--s-1);
+}
+.stepper .input{
+  flex:1 1 auto;
+  min-width:0;
+  text-align:center;
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+}
+/* Native spinners duplicate our two buttons and are 12px tall. */
+.stepper .input::-webkit-outer-spin-button,
+.stepper .input::-webkit-inner-spin-button{ -webkit-appearance:none; appearance:none; margin:0 }
+.stepper .input[type="number"]{ -moz-appearance:textfield; appearance:textfield }
+
+/* -- Checkbox / radio ---------------------------------------------------- */
+/* A real input, sized to 22px but wrapped in a 44px hit row. */
+.check{
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  min-height:var(--tap);
+  cursor:pointer;
+}
+.check__box{
+  width:22px; height:22px;
+  flex:none;
+  margin:0;
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-xs);
+  accent-color:var(--c-accent); /* ignored pre-15.4; the border still carries */
+  cursor:pointer;
+}
+.check__box:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-xs);
+}
+.check__label{
+  font-size:var(--t-sm);
+  color:var(--c-text);
+  line-height:var(--lh-snug);
+}
+.check__box[disabled] ~ .check__label,
+.check[aria-disabled="true"]{ opacity:.5 }
+
+/* -- Fieldset ------------------------------------------------------------ */
+.fieldset{
+  display:grid;
+  gap:var(--s-5);
+  border:0;
+  padding:0;
+  margin:0;
+  min-width:0;
+}
+.fieldset__legend{
+  padding:0;
+  font-size:var(--t-micro);
+  font-weight:var(--w-medium);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+
+
+/* ============================================================================
+   11 · SELECT  (.select)
+   A native <select> with appearance:none and a chevron drawn in markup.
+   Native gives the iOS wheel picker, keyboard type-ahead and zero JS.
+   ========================================================================= */
+
+.select{
+  position:relative;
+  display:block;
+  min-width:0;
+}
+.select__el{
+  -webkit-appearance:none;
+  appearance:none;
+  display:block;
+  width:100%;
+  min-height:var(--tap);
+  padding:var(--s-2) var(--s-8) var(--s-2) var(--s-3);
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-sm);
+  background-color:var(--c-surface);
+  background-image:none;
+  color:var(--c-text);
+  font-family:inherit;
+  font-size:var(--t-input);
+  line-height:var(--lh-snug);
+  cursor:pointer;
+  transition:border-color var(--dur-fast) var(--ease-out),
+             box-shadow   var(--dur-fast) var(--ease-out);
+}
+.select__el:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:1px;
+  border-radius:var(--r-sm);
+  border-color:var(--c-accent);
+  box-shadow:0 0 0 3px var(--c-focus-halo);
+}
+.select__el[aria-invalid="true"]{ border-color:var(--c-danger) }
+.select__el[disabled]{
+  opacity:.5;
+  background-color:var(--c-surface-sunken);
+  cursor:not-allowed;
+}
+/* iOS renders <option> with the system list colours; force ours so a dark
+   theme does not hand back light-on-light text in the popover. */
+.select__el option{
+  background-color:var(--c-surface);
+  color:var(--c-text);
+}
+.select__chevron{
+  position:absolute;
+  top:50%;
+  right:var(--s-3);
+  transform:translateY(-50%);
+  pointer-events:none;
+  color:var(--c-text-3);
+}
+
+@media (hover: hover){
+  .select__el:hover{ border-color:var(--c-line-strong) }
+}
+
+
+/* ============================================================================
+   12 · SWITCH  (.switch)
+   role="switch" with aria-checked. The visual track is 44x26 but the hit
+   area is the whole 44px settings row, so the entire row toggles.
+   ========================================================================= */
+
+.switch-row{
+  display:flex;
+  align-items:center;
+  gap:var(--s-4);
+  width:100%;
+  min-height:var(--tap);
+  padding:var(--s-2) 0;
+  background:transparent;
+  border:0;
+  color:inherit;
+  text-align:left;
+  cursor:pointer;
+  touch-action:manipulation;
+}
+.switch-row:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-sm);
+}
+.switch-row[disabled],
+.switch-row[aria-disabled="true"]{ opacity:.5; pointer-events:none }
+
+.switch-row__text{ flex:1 1 auto; min-width:0 }
+.switch-row__title{
+  display:block;
+  font-size:var(--t-base);
+  color:var(--c-text);
+  line-height:var(--lh-snug);
+}
+.switch-row__hint{
+  display:block;
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+  line-height:var(--lh-snug);
+}
+/* The state is written as a word, not only shown as a position. */
+.switch-row__state{
+  flex:none;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+
+.switch{
+  position:relative;
+  flex:none;
+  width:44px;
+  height:26px;
+  border-radius:var(--r-pill);
+  background:var(--c-track);
+  transition:background-color var(--dur) var(--ease-out);
+}
+.switch__knob{
+  position:absolute;
+  top:3px;
+  left:3px;
+  width:20px;
+  height:20px;
+  border-radius:var(--r-pill);
+  background:var(--c-surface);
+  /* --ring-control keeps the knob's boundary >=3:1 against BOTH the off
+     track and the accent-filled on track, in either theme. */
+  box-shadow:var(--e-1), var(--ring-control);
+  transition:transform var(--dur) var(--ease-spring);
+}
+.switch-row[aria-checked="true"] .switch{ background:var(--c-accent) }
+.switch-row[aria-checked="true"] .switch__knob{ transform:translateX(18px) }
+.switch-row[aria-checked="true"] .switch-row__state{ color:var(--c-accent-text) }
+
+/* Pending: the toggle has moved optimistically, the write is still in flight.
+   Reverts with a danger toast if the server rejects it. */
+.switch-row[aria-busy="true"]{ cursor:progress }
+.switch-row[aria-busy="true"] .switch{ opacity:.62 }
+.switch-row[aria-busy="true"] .switch-row__state{ color:var(--c-text-3) }
+
+@media (hover: hover){
+  .switch-row:hover .switch{ background:var(--c-line-strong) }
+  .switch-row[aria-checked="true"]:hover .switch{ background:var(--c-accent-hover) }
+}
+
+
+/* ============================================================================
+   13 · SLIDER  (.slider)
+   role="slider" + tabindex="0" + a real keydown handler. Position is driven
+   by --v, a unitless 0..1 fraction the JS writes on the element.
+   ========================================================================= */
+
+.slider{
+  --v:0;
+  position:relative;
+  display:flex;
+  align-items:center;
+  width:100%;
+  min-height:var(--tap);
+  touch-action:none;      /* we own the drag; the page must not scroll under it */
+  -webkit-touch-callout:none;
+  -webkit-user-select:none;
+  user-select:none;
+  cursor:pointer;
+}
+.slider:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-pill);
+}
+.slider[aria-disabled="true"]{ opacity:.5; pointer-events:none }
+
+.slider__rail{
+  position:relative;
+  width:100%;
+  height:6px;
+  border-radius:var(--r-pill);
+  background:var(--c-track);
+}
+.slider__fill{
+  position:absolute;
+  inset:0 auto 0 0;
+  width:calc(var(--v) * 100%);
+  border-radius:var(--r-pill);
+  background:var(--c-accent);
+}
+.slider__knob{
+  position:absolute;
+  top:50%;
+  left:calc(var(--v) * 100%);
+  width:24px;
+  height:24px;
+  margin:0;
+  transform:translate(-50%,-50%);
+  border-radius:var(--r-pill);
+  background:var(--c-surface);
+  box-shadow:var(--e-2), var(--ring-control);
+  transition:transform var(--dur-instant) var(--ease-out);
+}
+/* Transparent hit expansion: 24px knob + 10px on every side = 44px. */
+.slider__knob::before{
+  content:"";
+  position:absolute;
+  inset:calc(var(--hit-pad) * -1);
+  border-radius:var(--r-pill);
+}
+.slider--dragging .slider__knob{ transform:translate(-50%,-50%) scale(1.08) }
+
+.slider__output{
+  flex:none;
+  margin-left:var(--s-3);
+  min-width:5ch;
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-size:var(--t-sm);
+  color:var(--c-text);
+  text-align:right;
+  white-space:nowrap;
+}
+
+/* Ticks for a stepped slider (jog speed, playback rate). */
+.slider__ticks{
+  position:absolute;
+  inset:auto 0 -14px 0;
+  display:flex;
+  justify-content:space-between;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+  pointer-events:none;
+}
+
+@media (hover: hover){
+  .slider:hover .slider__knob{ box-shadow:var(--e-3), var(--ring-control) }
+}
+
+
+/* ============================================================================
+   14 · STATUS PILL  (.status)
+   Dot + word, always both. Never hue alone.
+   ========================================================================= */
+
+.status{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-2);
+  padding:3px var(--s-3);
+  border-radius:var(--r-pill);
+  background:var(--c-surface-sunken);
+  color:var(--c-text-2);
+  font-size:var(--t-micro);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  line-height:var(--lh-snug);
+}
+.status__dot{
+  position:relative;
+  width:7px; height:7px;
+  flex:none;
+  border-radius:var(--r-pill);
+  background:currentColor;
+}
+.status__label{ white-space:nowrap }
+.status__age{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  letter-spacing:var(--ls-normal);
+  opacity:.85;
+}
+
+.status--live       { color:var(--c-live-text);    background:var(--c-live-wash) }
+.status--stale      { color:var(--c-stale-text);   background:var(--c-stale-wash) }
+.status--offline    { color:var(--c-offline-text); background:var(--c-offline-wash) }
+.status--recording  { color:var(--c-rec-text);     background:var(--c-rec-wash) }
+.status--reconnecting{ color:var(--c-info-text);   background:var(--c-info-wash) }
+.status--unknown    { color:var(--c-text-3);       background:var(--c-surface-sunken) }
+
+/* The expanding ring is the sole proof a still frame is a LIVE frame. */
+.status--live .status__dot::after{
+  content:"";
+  position:absolute;
+  inset:-4px;
+  border-radius:var(--r-pill);
+  border:1px solid currentColor;
+  animation:at-beacon 2s var(--ease-out) infinite;
+}
+@keyframes at-beacon{
+  0%       { transform:scale(.6);  opacity:.9 }
+  70%,100% { transform:scale(1.5); opacity:0 }
+}
+
+/* REC is a different hue from OFFLINE, a different word, and a pulse. */
+.status--recording .status__dot{ animation:at-pulse 1.6s var(--ease-inout) infinite }
+@keyframes at-pulse{ 0%,100%{ opacity:1 } 50%{ opacity:.45 } }
+
+.status--reconnecting .status__dot{ animation:at-pulse 900ms var(--ease-inout) infinite }
+
+@media (prefers-reduced-motion: reduce){
+  .status--live .status__dot::after{ animation:none; opacity:.55; transform:scale(1.2) }
+  .status--recording .status__dot,
+  .status--reconnecting .status__dot{ animation:none }
+}
+
+/* Over video, in either theme, on the on-media token set. */
+.status--on-media{
+  background:var(--c-media-scrim);
+  color:var(--c-on-media);
+}
+.status--on-media.status--live   { color:var(--c-on-media-live) }
+.status--on-media.status--stale  { color:var(--c-on-media-stale) }
+.status--on-media.status--offline{ color:var(--c-on-media-2) }
+
+
+/* ============================================================================
+   15 · SPECIES BADGE  (.badge) + the species colour channel
+   The .sp--<key> class is the ONLY place a species maps to its token trio.
+   Put it on a badge, a dot, a chip, a track lane or a scrubber lane.
+   ========================================================================= */
+
+.sp--deer     { --species-fg:var(--sp-deer-fg);     --species-bg:var(--sp-deer-bg);     --species-dot:var(--sp-deer-dot) }
+.sp--squirrel { --species-fg:var(--sp-squirrel-fg); --species-bg:var(--sp-squirrel-bg); --species-dot:var(--sp-squirrel-dot) }
+.sp--rabbit   { --species-fg:var(--sp-rabbit-fg);   --species-bg:var(--sp-rabbit-bg);   --species-dot:var(--sp-rabbit-dot) }
+.sp--coyote   { --species-fg:var(--sp-coyote-fg);   --species-bg:var(--sp-coyote-bg);   --species-dot:var(--sp-coyote-dot) }
+.sp--raccoon  { --species-fg:var(--sp-raccoon-fg);  --species-bg:var(--sp-raccoon-bg);  --species-dot:var(--sp-raccoon-dot) }
+.sp--opossum  { --species-fg:var(--sp-opossum-fg);  --species-bg:var(--sp-opossum-bg);  --species-dot:var(--sp-opossum-dot) }
+.sp--bird     { --species-fg:var(--sp-bird-fg);     --species-bg:var(--sp-bird-bg);     --species-dot:var(--sp-bird-dot) }
+.sp--fox      { --species-fg:var(--sp-fox-fg);      --species-bg:var(--sp-fox-bg);      --species-dot:var(--sp-fox-dot) }
+.sp--unknown  { --species-fg:var(--sp-unknown-fg);  --species-bg:var(--sp-unknown-bg);  --species-dot:var(--sp-unknown-dot) }
+
+/* The 10px swatch that precedes a species name on a card. */
+.sp-dot{
+  width:10px; height:10px;
+  flex:none;
+  border-radius:var(--r-pill);
+  background:var(--species-dot, var(--sp-unknown-dot));
+}
+
+.badge{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-2);
+  padding:2px var(--s-3);
+  border:1px solid transparent;
+  border-radius:var(--r-pill);
+  background:var(--species-bg, var(--sp-unknown-bg));
+  color:var(--species-fg, var(--sp-unknown-fg));
+  font-size:var(--t-xs);
+  font-weight:var(--w-semi);
+  line-height:var(--lh-snug);
+  /* Long binomials wrap. "North American Porcupine" is not abbreviated. */
+  overflow-wrap:anywhere;
+}
+.badge__dot{
+  width:8px; height:8px;
+  flex:none;
+  border-radius:var(--r-pill);
+  background:var(--species-dot, var(--sp-unknown-dot));
+}
+
+/* Unclassified differs in weight AND style, not only in hue. */
+.badge--unclassified{
+  font-style:italic;
+  font-weight:var(--w-medium);
+}
+/* Below 0.5 the badge gains a dashed edge and the number is always shown. */
+.badge--low{
+  border-style:dashed;
+  border-color:var(--species-fg, var(--sp-unknown-fg));
+}
+.badge__conf{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);
+  opacity:.85;
+}
+/* Human-corrected: a pencil glyph; "corrected" is in the aria-label. */
+.badge--corrected .badge__pencil{ flex:none; opacity:.85 }
+
+.badge--lg{
+  padding:var(--s-1) var(--s-4);
+  font-size:var(--t-sm);
+}
+
+
+/* ============================================================================
+   16 · METER  (.meter)
+   Segmented instrument, grafted from Field Console. Driven ENTIRELY by --n
+   (lit segments) and --of (total): two repeating gradients, one ::after,
+   no child markup and no JS. Always paired with an sr-only numeric value —
+   a gradient conveys nothing to a screen reader.
+   ========================================================================= */
+
+.meter{
+  --n:0;
+  --of:8;
+  --meter-seg:5px;
+  --meter-gap:2px;
+  --meter-pitch:calc(var(--meter-seg) + var(--meter-gap));
+  --meter-on:var(--c-text-2);
+  position:relative;
+  display:inline-block;
+  flex:none;
+  width:calc(var(--of) * var(--meter-pitch) - var(--meter-gap));
+  height:10px;
+  border-radius:1px;
+  background:repeating-linear-gradient(90deg,
+    var(--c-meter-off) 0 var(--meter-seg),
+    transparent var(--meter-seg) var(--meter-pitch));
+}
+/* Width is the one property this animates. It is 10px tall and has no
+   children, so the reflow is free — the general ban still stands elsewhere. */
+.meter::after{
+  content:"";
+  position:absolute;
+  inset:0 auto 0 0;
+  width:calc(var(--n) * var(--meter-pitch) - var(--meter-gap));
+  background:repeating-linear-gradient(90deg,
+    var(--meter-on) 0 var(--meter-seg),
+    transparent var(--meter-seg) var(--meter-pitch));
+  transition:width var(--dur-slow) var(--ease-out);
+}
+
+.meter--live  { --meter-on:var(--c-live) }
+.meter--stale { --meter-on:var(--c-stale) }
+.meter--danger{ --meter-on:var(--c-danger) }
+.meter--accent{ --meter-on:var(--c-accent) }
+
+.meter--tall { height:14px }
+.meter--wide { --meter-seg:8px; --meter-gap:3px }
+
+/* Indeterminate: every segment sits at --c-meter-off and a two-segment
+   highlight travels the track on transform only. */
+.meter--indeterminate::after{
+  width:calc(2 * var(--meter-pitch) - var(--meter-gap));
+  transition:none;
+  animation:at-meter-travel 1400ms var(--ease-inout) infinite;
+}
+@keyframes at-meter-travel{
+  from{ transform:translateX(0) }
+  to  { transform:translateX(calc(var(--of) * var(--meter-pitch) - 2 * var(--meter-pitch))) }
+}
+@media (prefers-reduced-motion: reduce){
+  /* A looping indicator becomes a static treatment, not a fast one. */
+  .meter--indeterminate::after{
+    animation:none;
+    width:calc(var(--of) * var(--meter-pitch) - var(--meter-gap));
+    opacity:.4;
+  }
+}
+
+
+/* ============================================================================
+   17 · READOUT  (.readout)
+   The telemetry atom, and the ONLY way telemetry is ever displayed:
+   a caps micro-label over a mono tabular-nums value.
+   ========================================================================= */
+
+.readout{
+  display:flex;
+  flex-direction:column;
+  gap:var(--s-1);
+  min-width:0;
+}
+.readout__label{
+  font-size:var(--t-micro);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-flat);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+.readout__value{
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  font-size:var(--t-base);
+  font-weight:var(--w-semi);
+  line-height:var(--lh-flat);
+  letter-spacing:var(--ls-normal);
+  color:var(--c-text);
+  /* The one sanctioned nowrap: a mono readout or timecode never breaks. */
+  white-space:nowrap;
+}
+.readout__unit{
+  margin-left:2px;
+  font-size:var(--t-xs);
+  font-weight:var(--w-regular);
+  color:var(--c-text-3);
+}
+
+.readout--live   .readout__value{ color:var(--c-live-text) }
+.readout--warn   .readout__value{ color:var(--c-stale-text) }
+.readout--danger .readout__value{ color:var(--c-danger-text) }
+
+/* Stale: the value dims and the age is appended in words. */
+.readout--stale .readout__value{ color:var(--c-text-3) }
+.readout__age{
+  margin-left:var(--s-2);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+}
+
+.readout--lg .readout__value{ font-size:var(--t-lg) }
+.readout--inline{
+  flex-direction:row;
+  align-items:baseline;
+  gap:var(--s-2);
+}
+
+/* The horizontally scrolling telemetry strip on a live card. */
+.readout-strip{
+  display:flex;
+  align-items:center;
+  gap:var(--s-5);
+  min-height:var(--tap);
+  overflow-x:auto;
+  overscroll-behavior-x:contain;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+  padding-inline:var(--inset-left) var(--inset-right);
+}
+.readout-strip::-webkit-scrollbar{ display:none }
+.readout-strip .readout{ flex:none }
+
+/* On media, over the scrim. */
+.readout--on-media .readout__label{ color:var(--c-on-media-2) }
+.readout--on-media .readout__value{ color:var(--c-on-media) }
+.readout--on-media.readout--live  .readout__value{ color:var(--c-on-media-live) }
+.readout--on-media.readout--warn  .readout__value{ color:var(--c-on-media-stale) }
+
+
+/* ============================================================================
+   18 · SKELETON  (.skel)
+   Zero-CLS. The card skeleton IS the card with content removed; the sheen is
+   a translated ::after, never an animated background-position.
+   ========================================================================= */
+
+.skel{
+  position:relative;
+  overflow:hidden;
+  background:var(--c-skeleton);
+  border-radius:var(--r-xs);
+}
+.skel::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  background:linear-gradient(90deg,
+    transparent,
+    var(--c-skeleton-sheen) 45%,
+    transparent);
+  transform:translateX(-100%);
+  animation:at-sheen 1400ms var(--ease-inout) infinite;
+}
+@keyframes at-sheen{ to{ transform:translateX(100%) } }
+
+.skel--media{
+  aspect-ratio:var(--thumb-ratio);
+  border-radius:var(--r-md);
+  width:100%;
+}
+.skel--text{
+  height:1em;
+  border-radius:var(--r-xs);
+}
+.skel--title{ height:1.1em; width:72% }
+.skel--meta { height:.85em; width:48% }
+.skel--row  { height:40px; border-radius:var(--r-sm) }
+.skel--pill { height:22px; width:88px; border-radius:var(--r-pill) }
+
+@media (prefers-reduced-motion: reduce){
+  .skel::after{ display:none }
+}
+
+
+/* ============================================================================
+   19 · LAYOUT HELPERS FOR CONTROLS
+   Small, boring, and used by every screen. Nothing here paints.
+   ========================================================================= */
+
+.stack   { display:grid; gap:var(--s-4); min-width:0 }
+.stack--tight{ gap:var(--s-2) }
+.stack--loose{ gap:var(--s-6) }
+
+.row{
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  min-width:0;
+}
+.row--wrap { flex-wrap:wrap }
+.row--between{ justify-content:space-between }
+.row__grow { flex:1 1 auto; min-width:0 }
+.spacer    { flex:1 1 auto }
+
+
+/* ============================================================================
+   20 · RESPONSIVE — controls only
+   Type sizes and --control-h are reassigned at the TOKEN layer; nothing here
+   redefines them. These rules change layout affordances, not scale.
+   ========================================================================= */
+
+@media (min-width: 640px){
+  .chip-row{
+    margin-inline:calc(var(--s-6) * -1);
+    padding-inline:calc(var(--s-6) + var(--inset-left))
+                   calc(var(--s-6) + var(--inset-right));
+  }
+}
+
+@media (min-width: 1024px){
+  /* The rail's controls sit in a 260px column: search and selects fill it. */
+  .search--rail,
+  .select--rail{ width:100% }
+}
+
+@media (min-width: 1440px){
+  /* A settings form has no business being 2000px wide. */
+  .field-form{ max-width:720px }
+}
+
+
+/* ############################################################################
+   SHELL — App shell, navigation, overlays
+   ######################################################################### */
+
+/* ============================================================================
+   ANIMAL TRACKER — PART: APP SHELL · NAVIGATION · OVERLAYS
+   Requires tokens.css (LAYER 2 semantic tokens + REQUIRED BASE).
+
+   Floor is iOS 15 / Safari 15. Nothing here uses color-mix(), container
+   queries, :has(), dvh/svh/lvh, @supports or CSS nesting. Base styles are the
+   phone; min-width media queries scale up. Breakpoints: 640 / 1024 / 1440.
+
+   NAVIGATION MODEL
+     < 1024px   sticky .topbar  +  fixed .tabbar (4 tabs). No rail; the rail's
+                content is rendered inside the filter .sheet instead.
+     >=1024px   sticky .appbar (64px) + optional 260px .rail. No tab bar.
+
+   DOM CONTRACT (see the notes at each component, and the summary at the end)
+     <body>
+       <a class="skiplink">
+       <div class="shell shell--rail">          <- surface modifiers here
+         <header class="appbar">   (>=1024)
+         <header class="topbar">   (<1024)
+         <div class="shell__body">
+           <aside class="rail">    (>=1024, direct child only)
+           <main class="main" id="main">
+         <nav class="tabbar">      (<1024)
+       <div class="scrim">                      <- overlay hosts are SIBLINGS
+       <div class="sheet-host"> / .dialog-host / .palette-host / .menu
+       <div class="toast-host">
+   ========================================================================= */
+
+
+/* ============================================================================
+   1 · CHROME OFFSETS  —  --chrome-top / --chrome-bottom / --toolbar-h
+   These are owned here and nowhere else. Any sticky, fixed or floating
+   element measures from them; a hardcoded pixel offset against the nav or the
+   tab bar is a bug. tokens.css seeds the phone values; the blocks below
+   re-point them per breakpoint (later rule, same specificity, so they win).
+   ========================================================================= */
+:root{
+  /* Height of the secondary toolbar row that rides under the top bar (the
+     species chip strip on Recordings). 0 unless the shell opts in, because
+     .dayhead sticks at calc(var(--chrome-top) + var(--toolbar-h)). */
+  --toolbar-h:0px;
+
+  /* Clearance a floating bar (.selbar) needs above the chrome. */
+  --float-clear:64px;
+}
+
+.shell--toolbar{ --toolbar-h:52px; }
+
+
+/* ============================================================================
+   2 · SHELL GRID
+   Document scroll, not a 100vh flex box: without dvh there is no honest way
+   to size a fixed-height shell against the iOS URL bar, and a scrolling
+   <main> breaks momentum scrolling and pull-to-refresh on the phone. So the
+   page scrolls, the bars are sticky/fixed, and the rail is sticky.
+   ========================================================================= */
+.shell{
+  display:block;
+  min-height:100vh;
+  background:var(--c-canvas);
+  isolation:isolate; /* keeps --z-raised card lifts out of the chrome's layer */
+}
+
+.shell__body{
+  display:block;
+  min-height:0;
+}
+
+.main{
+  display:block;
+  min-width:0;                /* lets grids inside actually shrink */
+  background:var(--c-bg);
+  padding-left:var(--inset-left);
+  padding-right:var(--inset-right);
+  /* clears the fixed tab bar so the last row is never covered */
+  padding-bottom:calc(var(--chrome-bottom) + var(--s-4));
+}
+
+/* Selection mode floats the .selbar above the tab bar; give the scroll
+   container matching room so the bar never sits on top of the last row. */
+.shell--selbar .main{
+  padding-bottom:calc(var(--chrome-bottom) + var(--float-clear) + var(--s-4));
+}
+
+/* Route focus target: JS moves focus to the view's <h1 tabindex="-1">. */
+.main:focus{ outline:none; }
+
+@media (min-width:640px){
+  .main{ padding-bottom:calc(var(--chrome-bottom) + var(--s-6)); }
+}
+
+@media (min-width:1024px){
+  :root{
+    --chrome-top:calc(var(--appbar-h) + var(--inset-top));
+    --chrome-bottom:var(--inset-bottom);   /* no tab bar at this size */
+  }
+  .shell--toolbar{ --toolbar-h:56px; }
+
+  .shell__body{
+    display:grid;
+    grid-template-columns:var(--rail-w) minmax(0,1fr);
+    align-items:start;
+  }
+  /* Live and Settings render no rail; so does a collapsed rail. */
+  .shell--norail .shell__body,
+  .shell--rail-collapsed .shell__body{
+    grid-template-columns:minmax(0,1fr);
+  }
+  .main{
+    padding-bottom:var(--s-10);
+    padding-right:var(--inset-right);
+    padding-left:0;
+  }
+  .shell--norail .main,
+  .shell--rail-collapsed .main{ padding-left:var(--inset-left); }
+}
+
+@media (min-width:1440px){
+  /* The rail holds at 260px and the content column absorbs the extra width;
+     there is deliberately no max-width on .main. */
+  .main{ padding-bottom:var(--s-11); }
+}
+
+
+/* ============================================================================
+   3 · SKIP LINK
+   ========================================================================= */
+.skiplink{
+  position:fixed;
+  top:calc(var(--inset-top) + var(--s-2));
+  left:calc(var(--inset-left) + var(--s-2));
+  z-index:var(--z-toast);
+  display:inline-flex;
+  align-items:center;
+  min-height:var(--tap);
+  padding:0 var(--s-4);
+  border-radius:var(--r-pill);
+  background:var(--c-surface);
+  color:var(--c-text);
+  box-shadow:var(--e-3);
+  font-size:var(--t-sm);
+  font-weight:var(--w-medium);
+  text-decoration:none;
+  transform:translateY(-200%);
+}
+.skiplink:focus{ transform:translateY(0); }
+
+
+/* ============================================================================
+   4 · DESKTOP APP BAR  (>=1024px)
+   Sticky, never scrolls away — a 400-clip page must keep search and the tabs
+   reachable. min-height + padding-top so a notch inset ADDS to the bar
+   instead of clipping its contents.
+
+   The two-background pattern below is the sanctioned blur idiom: the solid
+   fallback is declared first so a UA without backdrop-filter still paints an
+   opaque bar, then the translucent value and both prefixed filters follow.
+   ========================================================================= */
+.appbar{
+  display:none;
+}
+
+@media (min-width:1024px){
+  .appbar{
+    position:sticky;
+    top:0;
+    z-index:var(--z-nav);
+    display:flex;
+    align-items:center;
+    gap:var(--s-5);
+    min-height:var(--appbar-h);
+    padding-top:var(--inset-top);
+    padding-left:calc(var(--s-5) + var(--inset-left));
+    padding-right:calc(var(--s-5) + var(--inset-right));
+    border-bottom:1px solid var(--c-line-soft);
+    background:var(--c-overlay-solid);
+    background:var(--c-overlay);
+    backdrop-filter:blur(18px) saturate(1.6);
+    -webkit-backdrop-filter:blur(18px) saturate(1.6);
+  }
+}
+
+/* Live owns the compositor with MJPEG decode; drop the blur there. */
+.shell--no-blur .appbar,
+.shell--no-blur .topbar,
+.shell--no-blur .tabbar{
+  background:var(--c-overlay-solid);
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+
+.brand{
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  flex:none;
+  min-width:0;
+  color:inherit;
+  text-decoration:none;
+}
+.brand__mark{
+  width:30px;
+  height:30px;
+  flex:none;
+  display:grid;
+  place-items:center;
+  border-radius:var(--r-sm);
+  background:var(--c-accent);
+  color:var(--c-on-accent);
+  box-shadow:var(--e-1);
+}
+.brand__name{
+  font-size:var(--t-sm);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+.brand__name span{
+  color:var(--c-text-3);
+  font-weight:var(--w-regular);
+}
+
+.appbar__tabs{
+  display:flex;
+  align-items:center;
+  gap:var(--s-1);
+}
+.appbar__spacer{ flex:1; min-width:var(--s-4); }
+.appbar__end{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  flex:none;
+}
+.appbar__search{ flex:1 1 220px; max-width:340px; }
+
+/* Desktop nav tab. aria-current="page" is the single source of truth. */
+.tab{
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-height:var(--control-h);
+  padding:0 var(--s-4);
+  border:0;
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--c-text-3);
+  font-size:var(--t-sm);
+  font-weight:var(--w-medium);
+  text-decoration:none;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:color var(--dur-fast) var(--ease-out),
+             background var(--dur-fast) var(--ease-out);
+}
+@media (hover:hover){
+  .tab:hover{ color:var(--c-text); background:var(--c-surface-inset); }
+}
+.tab[aria-current="page"]{
+  color:var(--c-text);
+  font-weight:var(--w-semi);
+}
+.tab[aria-current="page"]::after{
+  content:"";
+  position:absolute;
+  left:var(--s-3);
+  right:var(--s-3);
+  bottom:-2px;
+  height:2px;
+  border-radius:var(--r-pill);
+  background:var(--c-accent);
+}
+.tab:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+}
+.tab .i{ color:currentColor; flex:none; }
+
+
+/* ============================================================================
+   5 · MOBILE TOP BAR  (<1024px)
+   min-height (never height) + padding-top: var(--inset-top), so the notch
+   inset adds to the bar rather than eating the title.
+   ========================================================================= */
+.topbar{
+  position:sticky;
+  top:0;
+  z-index:var(--z-nav);
+  display:block;
+  border-bottom:1px solid var(--c-line-soft);
+  background:var(--c-overlay-solid);
+  background:var(--c-overlay);
+  backdrop-filter:blur(18px) saturate(1.6);
+  -webkit-backdrop-filter:blur(18px) saturate(1.6);
+  padding-top:var(--inset-top);
+}
+
+.topbar__row{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-height:var(--bar-h);
+  padding-left:calc(var(--s-3) + var(--inset-left));
+  padding-right:calc(var(--s-3) + var(--inset-right));
+}
+.topbar__title{
+  min-width:0;
+  flex:1;
+  font-size:var(--t-md);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);
+  line-height:var(--lh-snug);
+  padding-inline:var(--s-1);
+}
+.topbar__title small{
+  display:block;
+  font-size:var(--t-micro);
+  font-weight:var(--w-regular);
+  letter-spacing:var(--ls-normal);
+  color:var(--c-text-3);
+  font-variant-numeric:tabular-nums;
+}
+.topbar__actions{
+  display:flex;
+  align-items:center;
+  gap:var(--s-1);
+  flex:none;
+}
+
+/* The whole-system status button. A real <button> at 44px — iOS has no
+   tooltips, so a title-attribute div would be invisible on a phone. */
+.topbar__status{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-height:var(--tap);
+  padding:0 var(--s-3);
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-pill);
+  background:transparent;
+  color:var(--c-text-2);
+  font-size:var(--t-micro);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-wide);
+  cursor:pointer;
+  touch-action:manipulation;
+}
+.topbar__status:active{ transform:scale(.97); }
+
+/* Toolbar row that rides with the bar (the sticky species chip strip).
+   Its height is --toolbar-h so .dayhead can stick beneath it. */
+.topbar__toolbar{
+  display:flex;
+  align-items:center;
+  min-height:var(--toolbar-h);
+  border-top:1px solid var(--c-line-soft);
+}
+
+/* Edge-bleed horizontal strip: negative margin plus matching padding so the
+   last chip scrolls to the true screen edge instead of reading as clipped.
+   Safe-area padding is on BOTH inline edges for landscape. */
+.topbar__strip{
+  flex:1;
+  min-width:0;
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  overflow-x:auto;
+  overflow-y:hidden;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior-x:contain;
+  padding:var(--s-2) calc(var(--s-3) + var(--inset-right))
+          var(--s-2) calc(var(--s-3) + var(--inset-left));
+  scrollbar-width:none;
+}
+.topbar__strip::-webkit-scrollbar{ display:none; }
+
+@media (min-width:1024px){
+  .topbar{ display:none; }
+}
+
+
+/* ============================================================================
+   6 · MOBILE BOTTOM TAB BAR  (<1024px)
+   Fixed, four equal cells, safe-area padded on bottom AND both sides.
+   Active state is triple-marked: colour, aria-current="page", and a tinted
+   lozenge behind the icon.
+   ========================================================================= */
+.tabbar{
+  position:fixed;
+  left:0;
+  right:0;
+  bottom:0;
+  z-index:var(--z-nav);
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  border-top:1px solid var(--c-line-soft);
+  background:var(--c-overlay-solid);
+  background:var(--c-overlay);
+  backdrop-filter:blur(20px) saturate(1.6);
+  -webkit-backdrop-filter:blur(20px) saturate(1.6);
+  padding-bottom:var(--inset-bottom);
+  padding-left:var(--inset-left);
+  padding-right:var(--inset-right);
+}
+
+.tabbar__item{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:3px;
+  min-height:var(--tabbar-h);   /* 56 >= 44; the whole cell is the target */
+  padding:var(--s-2) var(--s-1) var(--s-1);
+  border:0;
+  background:transparent;
+  color:var(--c-text-3);
+  font-size:var(--t-micro);
+  font-weight:var(--w-medium);
+  line-height:var(--lh-flat);
+  text-decoration:none;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:color var(--dur-fast) var(--ease-out);
+}
+.tabbar__icon{
+  position:relative;
+  z-index:1;
+  flex:none;
+  transition:transform var(--dur) var(--ease-spring);
+}
+.tabbar__label{
+  position:relative;
+  z-index:1;
+}
+/* Tinted lozenge behind the icon — one of exactly two things allowed to
+   overshoot (--ease-spring). */
+.tabbar__item::before{
+  content:"";
+  position:absolute;
+  top:6px;
+  width:44px;
+  height:26px;
+  border-radius:var(--r-pill);
+  background:var(--c-accent-wash);
+  opacity:0;
+  transform:scale(.6);
+  transition:opacity var(--dur-fast) var(--ease-out),
+             transform var(--dur) var(--ease-spring);
+}
+.tabbar__item[aria-current="page"]{ color:var(--c-accent-text); }
+.tabbar__item[aria-current="page"]::before{ opacity:1; transform:scale(1); }
+.tabbar__item[aria-current="page"] .tabbar__icon{ transform:translateY(-1px); }
+.tabbar__item:active .tabbar__icon{ transform:scale(.92); }
+.tabbar__item:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:-3px;    /* inset: the bar clips a positive offset */
+  border-radius:var(--r-sm);
+}
+/* Unread / fault badge on a tab (e.g. Monitor has a warning). */
+.tabbar__badge{
+  position:absolute;
+  top:4px;
+  left:50%;
+  z-index:2;
+  margin-left:6px;
+  min-width:8px;
+  height:8px;
+  border-radius:var(--r-pill);
+  background:var(--c-stale);
+}
+
+@media (min-width:1024px){
+  .tabbar{ display:none; }
+}
+
+
+/* ============================================================================
+   7 · FILTER RAIL  (.rail)
+   Two homes, one stylesheet. As a direct child of .shell__body it is the
+   persistent desktop operator rail; the identical markup dropped inside
+   .sheet__body is the mobile filter sheet. The direct-child selector is what
+   keeps those apart — no :has(), no duplicate class set.
+
+   On desktop this is NOT a modal drawer over the grid: filters apply live and
+   the result count updates in place.
+   ========================================================================= */
+.rail{
+  display:flex;
+  flex-direction:column;
+  gap:var(--s-5);
+  min-width:0;
+}
+
+/* Hidden in the page flow below 1024; the sheet copy is unaffected. */
+.shell__body > .rail{ display:none; }
+
+@media (min-width:1024px){
+  .shell__body > .rail{
+    display:flex;
+    position:sticky;
+    top:var(--chrome-top);
+    align-self:start;
+    height:calc(100vh - var(--chrome-top));
+    overflow-y:auto;
+    overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+    border-right:1px solid var(--c-line-soft);
+    background:var(--c-bg);
+    padding:var(--s-5) var(--s-4) var(--s-6);
+    padding-left:calc(var(--s-4) + var(--inset-left));
+  }
+  .shell--rail-collapsed .shell__body > .rail{ display:none; }
+}
+
+.rail__section{
+  display:flex;
+  flex-direction:column;
+  gap:var(--s-1);
+  min-width:0;
+}
+.rail__label{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  padding:var(--s-2) var(--s-3) var(--s-1);
+  font-size:var(--t-micro);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+.rail__label .count{
+  margin-left:auto;
+  font-family:var(--font-mono);
+  font-variant-numeric:tabular-nums;
+  letter-spacing:var(--ls-normal);
+  text-transform:none;
+  font-weight:var(--w-regular);
+}
+.rail__foot{
+  margin-top:auto;
+  display:flex;
+  flex-direction:column;
+  gap:var(--s-3);
+  padding-top:var(--s-5);
+  border-top:1px solid var(--c-line-soft);
+}
+.rail__fields{
+  display:flex;
+  flex-direction:column;
+  gap:var(--s-4);
+  padding-inline:var(--s-3);
+}
+
+/* Collapse toggle — persisted, reclaims the 260px on a small laptop. */
+.rail__toggle{
+  display:none;
+}
+@media (min-width:1024px){
+  .rail__toggle{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:var(--tap);
+    height:var(--tap);
+    flex:none;
+    border:0;
+    border-radius:var(--r-sm);
+    background:transparent;
+    color:var(--c-text-3);
+    cursor:pointer;
+  }
+  .rail__toggle:hover{ background:var(--c-surface-inset); color:var(--c-text); }
+  .rail__toggle[aria-expanded="false"] .i{ transform:scaleX(-1); }
+}
+
+/* --- Per-camera health row ------------------------------------------------
+   dot + name + a mono sub-line ("cam3 · stale 42s"), so pipeline state is
+   legible from Recordings without opening Monitor. */
+.camrow{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  align-items:center;
+  gap:var(--s-1) var(--s-3);
+  min-height:var(--control-h);
+  padding:var(--s-2) var(--s-3);
+  border:0;
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  text-align:left;
+  text-decoration:none;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:background var(--dur-fast) var(--ease-out);
+}
+@media (hover:hover){
+  .camrow:hover{ background:var(--c-surface-inset); color:var(--c-text); }
+}
+.camrow__dot{
+  grid-row:1 / span 2;
+  width:8px;
+  height:8px;
+  flex:none;
+  border-radius:var(--r-pill);
+  background:var(--c-offline);
+}
+.camrow__dot--live{ background:var(--c-live); }
+.camrow__dot--stale{ background:var(--c-stale); }
+.camrow__dot--offline{ background:var(--c-offline); }
+.camrow__dot--rec{ background:var(--c-rec); }
+.camrow__name{
+  min-width:0;
+  color:var(--c-text);
+  font-weight:var(--w-medium);
+  overflow-wrap:anywhere;
+}
+.camrow__meta{
+  grid-column:2;
+  min-width:0;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  font-variant-numeric:tabular-nums;
+  color:var(--c-text-3);
+  overflow-wrap:anywhere;
+}
+.camrow--stale .camrow__meta{ color:var(--c-stale-text); }
+.camrow--offline .camrow__meta{ color:var(--c-offline-text); }
+
+
+/* ============================================================================
+   8 · SAVED VIEWS  (.savedviews)
+   Named persistent queries with live counts. What turns a 1,284-clip backlog
+   into a finite work queue. aria-current="true" is the active state.
+   ========================================================================= */
+.savedviews{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  min-width:0;
+}
+.savedview{
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  min-height:var(--control-h);
+  padding:var(--s-2) var(--s-3);
+  border:0;
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  text-align:left;
+  text-decoration:none;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:background var(--dur-fast) var(--ease-out),
+             color var(--dur-fast) var(--ease-out);
+}
+@media (hover:hover){
+  .savedview:hover{ background:var(--c-surface-inset); color:var(--c-text); }
+}
+.savedview .i{ flex:none; color:var(--c-text-3); }
+.savedview__name{
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+.savedview__count{
+  margin-left:auto;
+  flex:none;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  font-variant-numeric:tabular-nums;
+  color:var(--c-text-3);
+  transition:color var(--dur-fast) var(--ease-out);
+}
+.savedview[aria-current="true"]{
+  background:var(--c-accent-wash);
+  color:var(--c-accent-text);
+  font-weight:var(--w-medium);
+}
+.savedview[aria-current="true"] .i,
+.savedview[aria-current="true"] .savedview__count{ color:var(--c-accent-text); }
+.savedview[aria-current="true"]::before{
+  content:"";
+  position:absolute;
+  left:0;
+  top:50%;
+  width:3px;
+  height:18px;
+  margin-top:-9px;
+  border-radius:0 var(--r-xs) var(--r-xs) 0;
+  background:var(--c-accent);
+}
+/* A count that just changed gets a one-beat colour nudge, not a motion. */
+.savedview--updating .savedview__count{ color:var(--c-accent-text); }
+
+/* Rename in place. */
+.savedview__input{
+  flex:1;
+  min-width:0;
+  min-height:var(--control-h);
+  padding:0 var(--s-2);
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-xs);
+  background:var(--c-surface);
+  color:var(--c-text);
+  font-size:var(--t-input);
+}
+
+/* "Save this view" — appears whenever the current filter set is dirty and
+   unnamed. */
+.savedviews__save{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-height:var(--control-h);
+  margin-top:var(--s-1);
+  padding:var(--s-2) var(--s-3);
+  border:1px dashed var(--c-line-control);
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--c-accent-text);
+  font-size:var(--t-sm);
+  font-weight:var(--w-medium);
+  text-align:left;
+  cursor:pointer;
+  touch-action:manipulation;
+}
+@media (hover:hover){
+  .savedviews__save:hover{ background:var(--c-accent-wash); }
+}
+.savedviews__empty{
+  padding:var(--s-2) var(--s-3) var(--s-3);
+  color:var(--c-text-3);
+  font-size:var(--t-xs);
+}
+
+
+/* ----------------------------------------------------------------------------
+   FOCUS RINGS INSIDE CLIPPING CONTAINERS
+   tokens.css gives every element a 2px --c-focus ring at +2px offset. Inside
+   an overflow:auto or overflow:hidden ancestor (the rail, the sheet body, the
+   strips) a positive offset is clipped on the inline edges, so these controls
+   pull the ring inside their own box. Never `outline:none` without one.
+   ------------------------------------------------------------------------- */
+.camrow:focus-visible,
+.savedview:focus-visible,
+.savedviews__save:focus-visible,
+.savedview__input:focus-visible,
+.sheet__item:focus-visible,
+.sheet__cancel:focus-visible,
+.palette__input input:focus-visible,
+.topbar__status:focus-visible,
+.rail__toggle:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:-2px;
+  border-radius:var(--r-sm);
+}
+.brand:focus-visible,
+.skiplink:focus-visible,
+.toast__action:focus-visible,
+.selbar__actions > *:focus-visible,
+.empty__actions > *:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+}
+
+
+/* ============================================================================
+   9 · STACKING ORDER + SCRIM + SCROLL LOCK
+   ------------------------------------------------------------------------
+   The whole app in one comment, bottom to top (values from tokens.css):
+
+     --z-base    0    page content
+     --z-raised  10   hover-lifted cards, in-grid affordances
+     --z-sticky  100  in-view sticky toolbars
+     --z-daybar  110  .dayhead, which must sit over a sticky toolbar
+     --z-nav     150  .appbar / .topbar / .tabbar — chrome is above content
+     --z-selbar  180  .selbar (floats clear of the tab bar, never over it)
+     --z-drawer  200  NON-modal push drawer (desktop day panel) — no scrim,
+                      so it deliberately sits BELOW --z-scrim
+     --z-scrim   300  the modal scrim
+     --z-modal   400  .dialog / .sheet / .palette — above the scrim
+     --z-popover 450  .menu — may open from inside a modal surface
+     --z-toast   500  toasts outrank everything, including a dialog
+
+   Every modal surface is a sibling of .shell in <body>, so none of them can
+   be trapped in a stacking context created by a transformed ancestor.
+   ========================================================================= */
+.scrim{
+  position:fixed;
+  inset:0;
+  z-index:var(--z-scrim);
+  background:var(--c-scrim);
+  animation:fade-in var(--dur) var(--ease-out) both;
+}
+.scrim--blur{
+  backdrop-filter:blur(2px);
+  -webkit-backdrop-filter:blur(2px);
+}
+.scrim.is-closing{
+  animation:fade-out var(--dur-instant) var(--ease-in) both;
+}
+
+@keyframes fade-in{  from{ opacity:0 } to{ opacity:1 } }
+@keyframes fade-out{ from{ opacity:1 } to{ opacity:0 } }
+
+/* Body scroll lock. JS records window.scrollY, sets top:-Npx, and restores
+   both on close. position:fixed is required — overflow:hidden alone does not
+   lock the document on iOS Safari. */
+body.is-locked{
+  position:fixed;
+  left:0;
+  right:0;
+  width:100%;
+  overflow:hidden;
+}
+
+/* Belt-and-braces for the inert polyfill gap on older WebKit. */
+[inert]{ pointer-events:none; cursor:default; }
+[inert] *{ pointer-events:none; }
+
+
+/* ============================================================================
+   10 · TOAST  (.toast + .toast-host)
+   Replaces every alert() and every confirm() on a reversible action.
+   Host measures from --chrome-bottom, so it clears the tab bar on the phone
+   and the home indicator on desktop without a magic number.
+   ========================================================================= */
+.toast-host{
+  position:fixed;
+  left:0;
+  right:0;
+  bottom:calc(var(--chrome-bottom) + var(--s-3));
+  z-index:var(--z-toast);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:var(--s-2);
+  padding-left:calc(var(--s-3) + var(--inset-left));
+  padding-right:calc(var(--s-3) + var(--inset-right));
+  pointer-events:none;   /* the host must never eat taps on the grid */
+}
+
+.toast{
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  width:100%;
+  max-width:440px;
+  min-height:var(--tap-lg);
+  padding:var(--s-3) var(--s-2) var(--s-3) var(--s-4);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-lg);
+  background:var(--c-surface);
+  box-shadow:var(--e-4);
+  overflow:hidden;      /* clips the timer bar to the rounded corners */
+  pointer-events:auto;
+  animation:toast-in var(--dur) var(--ease-out) both;
+}
+.toast.is-closing{
+  animation:fade-out var(--dur-instant) var(--ease-in) both;
+}
+@keyframes toast-in{
+  from{ opacity:0; transform:translateY(14px) scale(.97) }
+  to{   opacity:1; transform:none }
+}
+
+.toast__icon{
+  width:26px;
+  height:26px;
+  flex:none;
+  display:grid;
+  place-items:center;
+  border-radius:var(--r-pill);
+  background:var(--c-live-wash);
+  color:var(--c-live-text);
+}
+.toast__text{
+  min-width:0;
+  flex:1;
+  font-size:var(--t-sm);
+  line-height:var(--lh-snug);
+}
+.toast__title{
+  display:block;
+  font-weight:var(--w-semi);
+  color:var(--c-text);
+  overflow-wrap:anywhere;
+}
+.toast__detail{
+  display:block;
+  margin-top:1px;
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+/* Actions are full-size. --btn--sm is banned inside a toast. */
+.toast__action{
+  flex:none;
+  margin-left:auto;
+  min-height:var(--tap);
+}
+.toast__close{
+  flex:none;
+  width:var(--tap);
+  height:var(--tap);
+}
+
+.toast--success .toast__icon{ background:var(--c-live-wash);   color:var(--c-live-text); }
+.toast--info .toast__icon{    background:var(--c-info-wash);   color:var(--c-info-text); }
+.toast--danger .toast__icon{  background:var(--c-danger-wash); color:var(--c-danger-text); }
+.toast--progress .toast__icon{background:var(--c-accent-wash); color:var(--c-accent-text); }
+.toast--error{ border-color:var(--c-danger); }
+.toast--error .toast__icon{   background:var(--c-danger-wash); color:var(--c-danger-text); }
+
+/* --- The undo deadline ----------------------------------------------------
+   A literal visible countdown, not decoration. transform: scaleX from a left
+   origin — animating `width` would relayout the toast 60x a second. */
+.toast__timer{
+  position:absolute;
+  left:0;
+  bottom:0;
+  width:100%;
+  height:3px;
+  transform-origin:left center;
+  transform:scaleX(1);
+  background:var(--c-danger);
+  animation:toast-drain var(--dur-undo) linear forwards;
+}
+.toast--success .toast__timer,
+.toast--info .toast__timer{ background:var(--c-accent); }
+@keyframes toast-drain{
+  from{ transform:scaleX(1) }
+  to{   transform:scaleX(0) }
+}
+/* Hover or focus pauses the drain; JS pauses its own timer to match. */
+.toast:focus-within .toast__timer{ animation-play-state:paused; }
+@media (hover:hover){
+  .toast:hover .toast__timer{ animation-play-state:paused; }
+}
+
+/* Indeterminate progress bar for --progress toasts (no known deadline). */
+.toast__progress{
+  position:absolute;
+  left:0;
+  bottom:0;
+  width:40%;
+  height:3px;
+  background:var(--c-accent);
+  animation:toast-indet 1.4s var(--ease-inout) infinite;
+}
+@keyframes toast-indet{
+  from{ transform:translateX(-100%) }
+  to{   transform:translateX(350%) }
+}
+
+
+/* ============================================================================
+   11 · DIALOG  (.dialog)
+   role="alertdialog" aria-modal="true". Only for irreversible or ambiguous
+   actions; the reversible path is optimistic + an undo toast, never both.
+
+   ACTION DOM ORDER IS DESTRUCTIVE FIRST, CANCEL SECOND. On the phone that
+   stacks the destructive button ABOVE Cancel (safe action nearest the thumb);
+   at >=640 row-reverse lays them out as Cancel-then-Confirm left to right.
+   Visual order therefore always equals DOM order — no reversed tab sequence.
+   ========================================================================= */
+.dialog-host{
+  position:fixed;
+  inset:0;
+  z-index:var(--z-modal);
+  display:grid;
+  place-items:center;
+  padding:calc(var(--s-4) + var(--inset-top))
+          calc(var(--s-4) + var(--inset-right))
+          calc(var(--s-4) + var(--inset-bottom))
+          calc(var(--s-4) + var(--inset-left));
+  pointer-events:none;
+}
+
+.dialog{
+  position:relative;
+  width:min(440px,100%);
+  max-height:100%;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding:var(--s-6);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-lg);
+  background:var(--c-surface);
+  box-shadow:var(--e-4);
+  pointer-events:auto;
+  animation:dialog-in var(--dur) var(--ease-out) both;
+}
+.dialog.is-closing{ animation:fade-out var(--dur-instant) var(--ease-in) both; }
+@keyframes dialog-in{
+  from{ opacity:0; transform:translateY(10px) scale(.97) }
+  to{   opacity:1; transform:none }
+}
+
+.dialog__icon{
+  width:42px;
+  height:42px;
+  display:grid;
+  place-items:center;
+  margin-bottom:var(--s-4);
+  border-radius:var(--r-pill);
+  background:var(--c-danger-wash);
+  color:var(--c-danger-text);
+}
+.dialog__title{
+  margin:0;
+  font-size:var(--t-md);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);
+  color:var(--c-text);
+}
+.dialog__body{
+  margin:var(--s-2) 0 0;
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  line-height:var(--lh-normal);
+}
+/* The concrete amount at risk — "3 recordings, 54 MB". */
+.dialog__stakes{
+  display:block;
+  margin-top:var(--s-3);
+  padding:var(--s-3) var(--s-4);
+  border-radius:var(--r-sm);
+  background:var(--c-surface-sunken);
+  font-family:var(--font-mono);
+  font-size:var(--t-xs);
+  font-variant-numeric:tabular-nums;
+  color:var(--c-text-2);
+}
+.dialog__actions{
+  display:flex;
+  flex-direction:column;
+  gap:var(--s-2);
+  margin-top:var(--s-6);
+}
+.dialog__actions > *{ min-height:var(--tap); }
+
+@media (min-width:640px){
+  .dialog__actions{
+    flex-direction:row-reverse;
+    justify-content:flex-start;   /* packs to the right edge in row-reverse */
+  }
+  .dialog__actions > *{ flex:none; }
+}
+
+
+/* ============================================================================
+   12 · BOTTOM SHEET  (.sheet)
+   Mobile equivalent of a dialog, a menu, or the filter drawer.
+   88vh (not dvh — deliberate, iOS 15 floor). Destructive item sits ABOVE
+   Cancel so the easiest thumb position is the safe one.
+   ========================================================================= */
+.sheet-host{
+  position:fixed;
+  inset:0;
+  z-index:var(--z-modal);
+  display:flex;
+  align-items:flex-end;
+  justify-content:center;
+  pointer-events:none;
+}
+
+.sheet{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  width:100%;
+  max-width:640px;
+  max-height:88vh;
+  border-top-left-radius:var(--r-xl);
+  border-top-right-radius:var(--r-xl);
+  background:var(--c-surface);
+  box-shadow:var(--e-4);
+  pointer-events:auto;
+  overflow:hidden;
+  /* set by the drag handler; 0 at rest */
+  transform:translateY(var(--sheet-drag,0px));
+  animation:sheet-in var(--dur-sheet) var(--ease-spring) both;
+}
+.sheet.is-closing{
+  animation:sheet-out var(--dur-fast) var(--ease-in) both;
+}
+@keyframes sheet-in{
+  from{ transform:translateY(100%) }
+  to{   transform:translateY(0) }
+}
+@keyframes sheet-out{
+  from{ transform:translateY(0) }
+  to{   transform:translateY(100%) }
+}
+/* Snap points. */
+.sheet--peek{ max-height:min(38vh,420px); }
+.sheet--half{ max-height:min(60vh,680px); }
+.sheet--full{ max-height:88vh; }
+/* Mid-drag: no transition fighting the pointer, and a compositor layer that
+   is removed the instant the gesture ends. */
+.sheet.is-dragging{
+  animation:none;
+  transition:none;
+  will-change:transform;
+}
+
+/* Grab handle. A real 44px target, with the visible bar inside it. */
+.sheet__handle{
+  flex:none;
+  display:grid;
+  place-items:center;
+  width:100%;
+  height:var(--tap);
+  border:0;
+  background:transparent;
+  cursor:grab;
+  touch-action:none;              /* or iOS scrolls the page mid-drag */
+  -webkit-touch-callout:none;
+}
+.sheet__handle:active{ cursor:grabbing; }
+.sheet__handle::before{
+  content:"";
+  width:40px;
+  height:4px;
+  border-radius:var(--r-pill);
+  background:var(--c-line-strong);
+}
+.sheet__handle:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:-4px;
+  border-radius:var(--r-sm);
+}
+
+.sheet__head{
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  padding:0 var(--s-4) var(--s-3);
+}
+.sheet__title{
+  margin:0;
+  min-width:0;
+  flex:1;
+  font-size:var(--t-md);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);
+  color:var(--c-text);
+}
+.sheet__body{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;    /* the page behind must not scroll */
+  -webkit-overflow-scrolling:touch;
+  padding:0 var(--s-4) var(--s-4);
+}
+.sheet__foot{
+  flex:none;
+  display:flex;
+  gap:var(--s-2);
+  padding:var(--s-3) var(--s-4);
+  padding-bottom:max(var(--s-6),var(--inset-bottom));
+  border-top:1px solid var(--c-line-soft);
+  background:var(--c-surface);
+}
+.sheet__foot > *{ min-height:var(--tap); }
+/* Filter sheet footer: Reset takes a third, the live-count primary two. */
+.sheet__foot--filter .sheet__reset{ flex:1; }
+.sheet__foot--filter .sheet__apply{ flex:2; }
+
+.sheet__list{
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  padding-bottom:max(var(--s-4),var(--inset-bottom));
+}
+.sheet__item{
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  width:100%;
+  min-height:var(--tap-lg);
+  padding:0 var(--s-3);
+  border:0;
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--c-text);
+  font-size:var(--t-base);
+  text-align:left;
+  text-decoration:none;
+  cursor:pointer;
+  touch-action:manipulation;
+}
+.sheet__item .i{ flex:none; color:var(--c-text-3); }
+.sheet__item:active{ background:var(--c-surface-inset); }
+@media (hover:hover){
+  .sheet__item:hover{ background:var(--c-surface-inset); }
+}
+.sheet__item[aria-disabled="true"]{
+  opacity:.5;
+  pointer-events:none;
+}
+/* Destructive item — placed ABOVE .sheet__cancel in the DOM, always. */
+.sheet__item--danger,
+.sheet__item--danger .i{ color:var(--c-danger-text); }
+.sheet__item--danger:active{ background:var(--c-danger-wash); }
+@media (hover:hover){
+  .sheet__item--danger:hover{ background:var(--c-danger-wash); }
+}
+/* Cancel is last in the DOM and last on screen — the safe end of the reach. */
+.sheet__cancel{
+  width:100%;
+  min-height:var(--tap-lg);
+  margin-top:var(--s-2);
+  border:1px solid var(--c-line-control);
+  border-radius:var(--r-pill);
+  background:var(--c-surface);
+  color:var(--c-text-2);
+  font-size:var(--t-base);
+  font-weight:var(--w-medium);
+  cursor:pointer;
+  touch-action:manipulation;
+}
+
+/* A sheet is a phone/tablet surface. At desktop width the same content is a
+   .dialog, a .menu or the persistent .rail; never show both. */
+@media (min-width:1024px){
+  .sheet-host--mobile-only{ display:none; }
+}
+
+
+/* ============================================================================
+   13 · POPOVER MENU  (.menu)
+   Desktop counterpart of the action sheet. role="menu", roving tabindex,
+   closes on Escape, outside click and scroll. Position is computed in JS with
+   a viewport flip and written to --menu-x / --menu-y; position:fixed keeps it
+   out of every overflow:hidden ancestor in the grid.
+   ========================================================================= */
+.menu{
+  position:fixed;
+  left:var(--menu-x,0px);
+  top:var(--menu-y,0px);
+  z-index:var(--z-popover);
+  min-width:212px;
+  max-width:min(320px,calc(100vw - var(--s-6)));
+  max-height:min(60vh,480px);
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding:var(--s-2);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-md);
+  background:var(--c-surface);
+  box-shadow:var(--e-4);
+  transform-origin:top left;
+  animation:menu-in var(--dur-fast) var(--ease-out) both;
+}
+.menu.is-closing{ animation:fade-out var(--dur-instant) var(--ease-in) both; }
+/* Flip modifiers only change the growth origin; JS already moved the box. */
+.menu--up{    transform-origin:bottom left; }
+.menu--left{  transform-origin:top right; }
+.menu--upleft{transform-origin:bottom right; }
+@keyframes menu-in{
+  from{ opacity:0; transform:translateY(-4px) scale(.98) }
+  to{   opacity:1; transform:none }
+}
+
+.menu__label{
+  padding:var(--s-2) var(--s-3) var(--s-1);
+  font-size:var(--t-micro);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+.menu__sep{
+  height:1px;
+  margin:var(--s-2) var(--s-1);
+  border:0;
+  background:var(--c-line-soft);
+}
+.menu__item{
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  width:100%;
+  min-height:var(--control-h);
+  padding:0 var(--s-3);
+  border:0;
+  border-radius:var(--r-sm);
+  background:transparent;
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  text-align:left;
+  text-decoration:none;
+  cursor:pointer;
+  touch-action:manipulation;
+  transition:background var(--dur-fast) var(--ease-out),
+             color var(--dur-fast) var(--ease-out);
+}
+.menu__item .i{ flex:none; color:var(--c-text-3); }
+@media (hover:hover){
+  .menu__item:hover{ background:var(--c-surface-inset); color:var(--c-text); }
+  .menu__item:hover .i{ color:var(--c-text-2); }
+}
+.menu__item:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:-2px;   /* the menu clips a positive offset */
+}
+.menu__item[aria-checked="true"],
+.menu__item[aria-current="true"]{
+  background:var(--c-accent-wash);
+  color:var(--c-accent-text);
+}
+.menu__item[aria-checked="true"] .i,
+.menu__item[aria-current="true"] .i{ color:var(--c-accent-text); }
+.menu__item[aria-disabled="true"]{
+  opacity:.5;
+  pointer-events:none;
+}
+.menu__item--danger,
+.menu__item--danger .i{ color:var(--c-danger-text); }
+@media (hover:hover){
+  .menu__item--danger:hover{ background:var(--c-danger-wash); color:var(--c-danger-text); }
+}
+.menu__hint{
+  margin-left:auto;
+  flex:none;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+}
+
+
+/* ============================================================================
+   14 · COMMAND PALETTE  (.palette)
+   Cmd/Ctrl+K. A combobox, not a listbox with focus in it: focus stays in the
+   input and aria-activedescendant moves, so CSS keys the active row off
+   [aria-selected="true"] rather than :focus.
+   Entries are ACTIONS as well as navigation. Desktop only.
+   ========================================================================= */
+/* Base is the phone, and the phone has no palette: it stays hidden until the
+   desktop nav model exists. JS must not open it below 1024 either. */
+.palette-host{ display:none; }
+
+@media (min-width:1024px){
+  .palette-host{
+    position:fixed;
+    inset:0;
+    z-index:var(--z-modal);
+    display:grid;
+    justify-items:center;
+    align-content:start;
+    padding:clamp(var(--s-8),12vh,var(--s-12)) var(--s-4) var(--s-4);
+    pointer-events:none;
+  }
+}
+
+.palette{
+  width:min(560px,100%);
+  max-height:70vh;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  border:1px solid var(--c-line);
+  border-radius:var(--r-lg);
+  background:var(--c-surface);
+  box-shadow:var(--e-4);
+  pointer-events:auto;
+  animation:dialog-in var(--dur) var(--ease-out) both;
+}
+.palette.is-closing{ animation:fade-out var(--dur-instant) var(--ease-in) both; }
+
+.palette__input{
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  min-height:var(--tap-lg);
+  padding:0 var(--s-4);
+  border-bottom:1px solid var(--c-line-soft);
+  color:var(--c-text-3);
+}
+.palette__input input{
+  flex:1;
+  min-width:0;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:var(--c-text);
+  font-size:var(--t-input);   /* 16px minimum or iOS zooms on focus */
+}
+.palette__input input::placeholder{ color:var(--c-text-3); }
+.palette__spinner{ flex:none; color:var(--c-accent-text); }
+
+.palette__list{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  padding:var(--s-2);
+}
+.palette__group{
+  padding:var(--s-3) var(--s-2) var(--s-1);
+  font-size:var(--t-micro);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
+}
+.palette__item{
+  display:flex;
+  align-items:center;
+  gap:var(--s-3);
+  width:100%;
+  min-height:var(--control-h);
+  padding:0 var(--s-3);
+  border-radius:var(--r-sm);
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  cursor:pointer;
+  transition:background var(--dur-fast) var(--ease-out),
+             color var(--dur-fast) var(--ease-out);
+}
+.palette__item .i{ flex:none; color:var(--c-text-3); }
+.palette__item[aria-selected="true"]{
+  background:var(--c-accent-wash);
+  color:var(--c-text);
+}
+.palette__item[aria-selected="true"] .i{ color:var(--c-accent-text); }
+@media (hover:hover){
+  .palette__item:hover{ background:var(--c-surface-inset); color:var(--c-text); }
+}
+.palette__name{
+  min-width:0;
+  overflow-wrap:anywhere;
+}
+.palette__scope{
+  flex:none;
+  margin-left:auto;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+}
+.palette__empty{
+  padding:var(--s-6) var(--s-4);
+  text-align:center;
+  color:var(--c-text-3);
+  font-size:var(--t-sm);
+}
+.palette__foot{
+  flex:none;
+  display:flex;
+  align-items:center;
+  gap:var(--s-4);
+  padding:var(--s-2) var(--s-4);
+  border-top:1px solid var(--c-line-soft);
+  background:var(--c-surface-sunken);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+}
+/* Executing: the row stays put and reports busy in place. */
+.palette__item[aria-busy="true"]{ color:var(--c-text-3); }
+
+
+/* ============================================================================
+   15 · SELECTION BAR  (.selbar)
+   Bulk actions on a multi-selection. Floats above the tab bar by
+   --chrome-bottom; .shell--selbar pads the scroll container to match.
+   Every button is full size. A 26px Delete here is disqualifying.
+   ========================================================================= */
+.selbar{
+  position:fixed;
+  /* The inset lives in the offsets, not in a margin, so the bar clears the
+     notch in landscape (one-sided) as well as the home indicator. Auto
+     margins then centre it inside that box once it stops being full-width. */
+  left:calc(var(--s-3) + var(--inset-left));
+  right:calc(var(--s-3) + var(--inset-right));
+  bottom:calc(var(--chrome-bottom) + var(--s-3));
+  z-index:var(--z-selbar);
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  width:auto;
+  max-width:100%;
+  margin:0 auto;
+  padding:var(--s-2) var(--s-3);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-lg);
+  background:var(--c-surface);
+  box-shadow:var(--e-4);
+  animation:selbar-in var(--dur) var(--ease-out) both;
+}
+.selbar.is-closing{ animation:fade-out var(--dur-instant) var(--ease-in) both; }
+@keyframes selbar-in{
+  from{ opacity:0; transform:translateY(12px) }
+  to{   opacity:1; transform:none }
+}
+
+.selbar__count{
+  flex:none;
+  padding-left:var(--s-2);
+  font-size:var(--t-sm);
+  font-weight:var(--w-semi);
+  font-variant-numeric:tabular-nums;
+  color:var(--c-text);
+}
+.selbar__count span{
+  display:block;
+  font-size:var(--t-micro);
+  font-weight:var(--w-regular);
+  color:var(--c-text-3);
+}
+.selbar__actions{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-width:0;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  overscroll-behavior-x:contain;
+  scrollbar-width:none;
+}
+.selbar__actions::-webkit-scrollbar{ display:none; }
+.selbar__actions > *{
+  flex:none;
+  min-height:var(--control-h);   /* 44px on any coarse pointer */
+}
+.selbar__sep{
+  flex:none;
+  width:1px;
+  height:24px;
+  background:var(--c-line);
+}
+/* Acting: controls disable, and progress is reported in place. */
+.selbar--acting .selbar__actions > *{
+  opacity:.5;
+  pointer-events:none;
+}
+.selbar__progress{
+  position:absolute;
+  left:var(--s-3);
+  right:var(--s-3);
+  bottom:5px;
+  height:3px;
+  border-radius:var(--r-pill);
+  background:var(--c-track);
+  overflow:hidden;
+}
+.selbar__progress i{
+  display:block;
+  height:100%;
+  border-radius:var(--r-pill);
+  background:var(--c-accent);
+  transform-origin:left center;
+  transform:scaleX(var(--n,0));
+  transition:transform var(--dur) var(--ease-out);
+}
+
+@media (min-width:640px){
+  .selbar{
+    width:max-content;
+    border-radius:var(--r-pill);
+    padding-right:var(--s-2);
+  }
+}
+
+
+/* ============================================================================
+   16 · EMPTY STATE  (.empty)
+   Diagnose, do not shrug. The filtered variant names the applied filters AND
+   the probable cause, and offers two distinct recoveries.
+   ========================================================================= */
+.empty{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:var(--s-3);
+  padding:var(--s-10) var(--s-5) var(--s-11);
+  text-align:center;
+}
+.empty__art{
+  color:var(--c-line-strong);
+  margin-bottom:var(--s-1);
+}
+.empty__title{
+  margin:0;
+  font-size:var(--t-md);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);
+  color:var(--c-text);
+}
+.empty__body{
+  margin:0;
+  max-width:44ch;
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  line-height:var(--lh-normal);
+}
+/* The probable cause — "Creek has been stale for 4 minutes, which may be
+   why." Carries a status dot so the diagnosis is not colour-only text. */
+.empty__cause{
+  display:flex;
+  align-items:flex-start;
+  gap:var(--s-3);
+  max-width:52ch;
+  margin-top:var(--s-1);
+  padding:var(--s-3) var(--s-4);
+  border-radius:var(--r-sm);
+  background:var(--c-surface-sunken);
+  color:var(--c-text-2);
+  font-size:var(--t-sm);
+  text-align:left;
+  line-height:var(--lh-snug);
+}
+.empty__cause .camrow__dot{ margin-top:6px; }
+/* The endpoint a load error was attempting, in the pipeline's own words. */
+.empty__endpoint{
+  max-width:100%;
+  overflow-wrap:anywhere;
+  font-family:var(--font-mono);
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+}
+.empty__actions{
+  display:flex;
+  flex-direction:column;
+  align-items:stretch;
+  gap:var(--s-2);
+  width:100%;
+  max-width:320px;
+  margin-top:var(--s-3);
+}
+.empty__actions > *{ min-height:var(--tap); }
+.empty--error .empty__art{ color:var(--c-danger); }
+
+@media (min-width:640px){
+  .empty{ padding:var(--s-11) var(--s-6) var(--s-12); }
+  .empty__actions{
+    flex-direction:row;
+    justify-content:center;
+    width:auto;
+    max-width:none;
+  }
+  .empty__actions > *{ flex:none; }
+}
+
+
+/* ============================================================================
+   17 · REDUCED MOTION
+   tokens.css already collapses every duration and forces animation-duration
+   to .01ms with !important. Two things here need more than "faster":
+
+   1. The undo drain bar is a DEADLINE, not decoration. Sped to .01ms it would
+      snap to empty instantly and lie about the remaining time — so the
+      animation is removed entirely and the bar rests full. The toast's own
+      text carries the deadline, and JS still fires the timeout.
+   2. Looping indicators get a static treatment rather than a fast one.
+
+   `animation:none` resets animation-name, so the !important duration in the
+   global reset has nothing left to apply to.
+   ========================================================================= */
+@media (prefers-reduced-motion: reduce){
+  .toast__timer{
+    animation:none;
+    transform:scaleX(1);
+  }
+  .toast__progress{
+    animation:none;
+    width:100%;
+    opacity:.5;
+  }
+  .tabbar__item::before{
+    transition:none;
+  }
+  .sheet.is-dragging{ will-change:auto; }
+}
+
+
+/* ============================================================================
+   DOM CONTRACT — what the markup and JS must supply
+   ------------------------------------------------------------------------
+   SHELL MODIFIERS on .shell
+     .shell--rail            default; renders the 260px rail at >=1024
+     .shell--norail          Live and Settings — no rail at any width
+     .shell--rail-collapsed  persisted collapse toggle
+     .shell--toolbar         a toolbar row rides under the top bar; sets
+                             --toolbar-h so .dayhead can stick beneath it
+     .shell--selbar          selection mode is active; pads .main for .selbar
+                             (.selbar itself is a child of .shell, not an
+                             overlay sibling — it is chrome, not a modal)
+     .shell--no-blur         Live; drops backdrop-filter on all three bars
+
+   ATTRIBUTE STATE (CSS keys off these, never a parallel class)
+     [aria-current="page"]   .tab, .tabbar__item
+     [aria-current="true"]   .savedview, .menu__item
+     [aria-selected="true"]  .palette__item (aria-activedescendant target)
+     [aria-checked="true"]   .menu__item
+     [aria-disabled="true"]  .menu__item, .sheet__item
+     [aria-expanded]         .rail__toggle
+     [aria-busy="true"]      .palette__item
+     [inert]                 everything outside an open modal surface
+
+   CLASSES SET BY JS
+     .is-closing   on .scrim/.toast/.dialog/.sheet/.menu/.palette/.selbar for
+                   one exit duration, then the element is removed or hidden
+     .is-dragging  on .sheet during a handle drag
+     .is-locked    on <body> while a modal is open (with top:-Npx)
+
+   CUSTOM PROPERTIES SET BY JS
+     --menu-x / --menu-y   .menu position, after the viewport flip
+     --sheet-drag          .sheet live drag offset, e.g. 84px
+     --n                   .selbar__progress fill, 0..1
+
+   OWNED HERE, CONSUMED EVERYWHERE
+     --chrome-top     top of the content area below the bar
+     --chrome-bottom  bottom chrome to clear (tab bar + inset, or inset alone)
+     --toolbar-h      secondary toolbar row height, 0 when absent
+   ========================================================================= */
+
+
+/* ############################################################################
+   DOMAIN — Wildlife-domain components
+   ######################################################################### */
+
+/* ============================================================================
+   ANIMAL TRACKER — PART: WILDLIFE DOMAIN COMPONENTS
+   The product-carrying surfaces: media boxes, clip cards & rows, the archive
+   spine, the calendar, camera cards and their failure states, PTZ, the player
+   and its per-track lanes, key frames, tracks, logs, tables and gauges.
+
+   Contract: tokens.css is loaded first. LAYER 2 semantic tokens only —
+   no colour literal appears below this banner. iOS 15 floor: no color-mix(),
+   no container queries, no :has(), no dvh/svh/lvh, no @supports, no nesting.
+   Base styles are mobile; min-width queries scale up.
+   ========================================================================= */
+
+
+/* ============================================================================
+   3 · MEDIA BOX (.frame)
+   Every thumbnail, poster, live stage and key frame is this box. Zero CLS:
+   the aspect ratio is reserved before the image exists, and the skeleton is
+   the identical box with its content removed.
+   ========================================================================= */
+.frame{
+  position:relative;overflow:hidden;isolation:isolate;
+  aspect-ratio:var(--thumb-ratio);
+  border-radius:var(--r-md);
+  background:var(--c-surface-sunken);
+}
+.frame--sm   { border-radius:var(--r-sm); }
+.frame--flush{ border-radius:0; }
+
+/* Film stock: a plausible poster while the real frame is in flight, chosen
+   from the clip's capture condition. Sits under the image, never over it. */
+.frame__film{ position:absolute;inset:0;z-index:0;pointer-events:none; }
+.film--ir   { background:var(--film-ir); }
+.film--night{ background:var(--film-night); }
+.film--dusk { background:var(--film-dusk); }
+.film--dawn { background:var(--film-dawn); }
+.film--day  { background:var(--film-day); }
+.film--rain { background:var(--film-rain); }
+
+.frame__img{
+  position:absolute;inset:0;z-index:1;
+  width:100%;height:100%;object-fit:cover;display:block;
+  transition:transform var(--dur-slow) var(--ease-out);
+}
+
+/* Legibility bed for on-media furniture. Not a vignette, not decoration. */
+.frame__scrim{
+  position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:var(--c-media-gradient);
+}
+
+/* Furniture corners. Padding-inline picks up the landscape safe area so a
+   full-bleed mobile stage does not tuck its pills under the notch. */
+.frame__tl,.frame__tr,.frame__bl,.frame__br{
+  position:absolute;z-index:6;display:flex;align-items:center;gap:var(--s-2);
+  max-width:calc(100% - var(--s-6));
+}
+.frame__tl{ top:var(--s-3);left:calc(var(--s-3) + var(--inset-left)); }
+.frame__tr{ top:var(--s-3);right:calc(var(--s-3) + var(--inset-right)); }
+.frame__bl{ bottom:var(--s-3);left:calc(var(--s-3) + var(--inset-left)); }
+.frame__br{ bottom:var(--s-3);right:calc(var(--s-3) + var(--inset-right)); }
+
+/* On-media pill. Its token set is theme-independent — it sits over video,
+   and the worst case (a blown-out white frame) is already measured. */
+.mpill{
+  display:inline-flex;align-items:center;gap:var(--s-1);
+  padding:3px var(--s-2);border-radius:var(--r-xs);
+  background:var(--c-media-scrim);
+  color:var(--c-on-media);
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);font-weight:var(--w-semi);
+  letter-spacing:var(--ls-wide);line-height:var(--lh-flat);
+}
+.mpill--strong{ background:var(--c-media-scrim-strong); }
+.mpill--live  { color:var(--c-on-media-live); }
+.mpill--stale { color:var(--c-on-media-stale); }
+.mpill--accent{ color:var(--c-on-media-accent); }
+.mpill--rec   { color:var(--c-on-media-stale); }
+.mpill__dot{
+  flex:none;width:7px;height:7px;border-radius:var(--r-pill);background:currentColor;
+}
+.mpill--rec .mpill__dot{ animation:rec-pulse 1.6s var(--ease-inout) infinite; }
+@keyframes rec-pulse{ 0%,100%{opacity:1} 50%{opacity:.35} }
+@media (prefers-reduced-motion: reduce){
+  .mpill--rec .mpill__dot{ animation:none; }
+}
+
+/* Thumbnail failed to load: dim the film stock and say so in words. */
+.frame--error .frame__film{ filter:brightness(.6) saturate(.5); }
+.frame--error .frame__img{ display:none; }
+.frame__errpill{
+  position:absolute;z-index:6;left:50%;top:50%;
+  transform:translate(-50%,-50%);
+  padding:var(--s-1) var(--s-3);border-radius:var(--r-pill);
+  background:var(--c-media-scrim-strong);color:var(--c-on-media);
+  font-size:var(--t-micro);letter-spacing:var(--ls-wide);white-space:nowrap;
+}
+
+/* Skeleton media: the identical box, content removed, so the swap is free. */
+.frame--skel{ background:var(--c-skeleton); }
+.frame--skel .frame__film,
+.frame--skel .frame__img{ display:none; }
+.frame--skel::after{
+  content:"";position:absolute;inset:0;z-index:3;
+  background:linear-gradient(90deg,transparent,var(--c-skeleton-sheen),transparent);
+  transform:translateX(-100%);
+  animation:frame-sheen 1.5s var(--ease-inout) infinite;
+}
+/* transform, never background-position — the latter repaints every card in a
+   400-card grid on every frame. */
+@keyframes frame-sheen{
+  from{ transform:translateX(-100%); }
+  to  { transform:translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce){
+  .frame--skel::after{ animation:none;background:none; }
+}
+
+
+/* ============================================================================
+   4 · CLIP CARD (.clip)
+   DOM contract (valid HTML, no button-wrapping-figure, no nested interactive):
+     <li class="cliptile sp--deer">
+       <article class="clip">
+         <a class="clip__open" href="#/clips/123">White-tailed Deer, 18:42</a>
+         <input type="checkbox" id="sel-123" class="clip__check">
+         <label class="sr-only" for="sel-123">Select clip</label>
+         <div class="clip__media frame"> … </div>
+         <div class="clip__meta"> … </div>
+       </article>
+     </li>
+   The anchor and the checkbox precede the visual content so sibling selectors
+   can paint focus and checked state onto it without :has().
+   ========================================================================= */
+.cliplist{ list-style:none;margin:0;padding:0; }
+.clipgrid{
+  display:grid;gap:var(--s-4) var(--s-3);
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  list-style:none;margin:0;padding:0;
+}
+
+.clip{
+  position:relative;display:flex;flex-direction:column;gap:var(--s-3);
+  border-radius:var(--r-md);
+  -webkit-touch-callout:none;           /* long-press enters selection mode */
+  transition:transform var(--dur-fast) var(--ease-out),
+             opacity var(--dur) var(--ease-out);
+}
+.clip__media{
+  box-shadow:var(--e-1), 0 0 0 1px var(--c-line-soft);
+  transition:box-shadow var(--dur) var(--ease-out),
+             transform var(--dur) var(--ease-out);
+}
+
+/* The open target: a text link for assistive tech, an invisible full-card
+   hit area for everyone else. */
+.clip__open{
+  position:absolute;inset:0;z-index:5;
+  display:block;overflow:hidden;
+  text-indent:-9999px;white-space:nowrap;
+  border-radius:var(--r-md);
+  -webkit-tap-highlight-color:transparent;
+}
+.clip__open:focus-visible{ outline:none; }
+.clip__open:focus-visible ~ .clip__media{
+  box-shadow:0 0 0 2px var(--c-focus), 0 0 0 6px var(--c-focus-halo), var(--e-2);
+}
+.clip__open:focus-visible ~ .clip__meta .clip__title{ color:var(--c-accent-text); }
+
+/* Selection: a real checkbox, never a permanently visible one. In browse mode
+   it is display:none so it takes no tab stop at all. */
+.clip__check{ display:none; }
+.cliplist--select .clip__check,
+.clipgrid--select .clip__check{
+  display:block;position:absolute;z-index:6;
+  top:0;right:0;width:var(--tap);height:var(--tap);
+  margin:0;padding:0;border:0;background:transparent;
+  -webkit-appearance:none;appearance:none;cursor:pointer;
+}
+/* The visible box is a 24px mark centred in the 44px hit area. */
+.cliplist--select .clip__check::before,
+.clipgrid--select .clip__check::before{
+  content:"";position:absolute;top:50%;left:50%;
+  width:24px;height:24px;margin:-12px 0 0 -12px;
+  border-radius:var(--r-xs);
+  border:2px solid var(--c-on-media-line);
+  background:var(--c-media-scrim);
+  transition:background var(--dur-fast) var(--ease-out),
+             border-color var(--dur-fast) var(--ease-out);
+}
+.cliplist--select .clip__check:checked::before,
+.clipgrid--select .clip__check:checked::before{
+  background:var(--c-accent);border-color:var(--c-accent);
+}
+/* Tick mark: two borders rotated, so no glyph and no sprite dependency. */
+.cliplist--select .clip__check:checked::after,
+.clipgrid--select .clip__check:checked::after{
+  content:"";position:absolute;top:50%;left:50%;
+  width:6px;height:11px;margin:-8px 0 0 -3px;
+  border:solid var(--c-on-accent);border-width:0 2px 2px 0;
+  transform:rotate(42deg);
+}
+.clip__check:focus-visible::before{
+  outline:2px solid var(--c-focus);outline-offset:2px;
+}
+
+.clip--selected .clip__media{
+  box-shadow:0 0 0 3px var(--c-accent), var(--e-2);
+}
+.clip--selected .clip__title{ color:var(--c-accent-text); }
+
+/* Meta. Species is the darkest, largest thing in the body and it WRAPS —
+   "North American Porcupine" must render in full. */
+.clip__meta{
+  display:flex;flex-direction:column;gap:2px;
+  padding-inline:2px;min-width:0;
+}
+.clip__title{
+  margin:0;
+  font-size:var(--t-base);font-weight:var(--w-medium);
+  letter-spacing:var(--ls-tight);line-height:var(--lh-snug);
+  color:var(--c-text);
+  overflow-wrap:anywhere;
+  /* Two lines, then clamp — "North American Porcupine" never abbreviates to
+     one line. -webkit-box is the only clamp available at the iOS 15 floor,
+     so the leading dot rides as inline content rather than a flex child. */
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+  overflow:hidden;
+}
+.clip__title .sp-dot{ margin-right:var(--s-2); }
+.clip__sub{
+  margin:0;display:flex;align-items:center;gap:var(--s-2);
+  min-width:0;font-size:var(--t-sm);color:var(--c-text-3);
+}
+.clip__sep{
+  flex:none;width:3px;height:3px;border-radius:var(--r-pill);
+  background:currentColor;opacity:.6;
+}
+.clip__when{ font-variant-numeric:tabular-nums;flex:none; }
+.clip__cam{
+  color:var(--c-text-2);min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.clip__conf{ margin-left:auto; }
+
+/* Unclassified: different weight AND style, not merely a different hue. */
+.clip--unclassified .clip__title{
+  color:var(--c-text-3);font-style:italic;font-weight:var(--w-regular);
+}
+
+/* SpeciesNet still running. */
+.clip--processing .clip__media::after{
+  content:"";position:absolute;z-index:7;left:0;right:0;bottom:0;height:4px;
+  background:var(--c-info);
+}
+.clip__processing{
+  display:flex;align-items:center;gap:var(--s-2);
+  font-size:var(--t-xs);color:var(--c-info-text);
+}
+
+/* Optimistic delete: collapsing out while the undo toast is live. */
+.clip--deleting{
+  opacity:0;transform:scale(.94);pointer-events:none;
+}
+
+/* Skeleton card: same box, bars instead of type. Renders in situ at the tail
+   of the list, never as a full-screen loading state. */
+.clip__skelbar{
+  height:11px;border-radius:var(--r-pill);background:var(--c-skeleton);
+}
+.clip__skelbar--short{ width:52%; }
+
+@media (hover:hover){
+  .clip:hover .clip__media{
+    box-shadow:var(--e-3), 0 0 0 1px var(--c-line);
+    transform:translateY(-2px);
+  }
+  .clip:hover .frame__img{ transform:scale(1.06); }
+}
+.clip:active{ transform:scale(.97); }
+
+@media (min-width:640px){
+  .clipgrid{
+    gap:var(--s-5) var(--s-4);
+    grid-template-columns:repeat(auto-fill,minmax(208px,1fr));
+  }
+  .clipgrid--compact{
+    gap:var(--s-3) var(--s-2);
+    grid-template-columns:repeat(auto-fill,minmax(168px,1fr));
+  }
+  .clipgrid--compact .clip__sub{ font-size:var(--t-xs); }
+}
+
+
+/* ============================================================================
+   5 · CLIP ROW (.cliprow) — the dense list / day-panel density
+   A real <tr> inside .table, or a <li> in the day panel. 64px thumbnail.
+   ========================================================================= */
+.cliprow{
+  display:grid;align-items:center;gap:var(--s-3);
+  grid-template-columns:64px minmax(0,1fr) auto;
+  padding:var(--s-2) var(--s-3);
+  min-height:var(--tap);
+  border-radius:var(--r-sm);
+  position:relative;
+  transition:background var(--dur-fast) var(--ease-out);
+}
+.cliprow .frame{ width:64px;border-radius:var(--r-xs); }
+.cliprow__main{ min-width:0;display:flex;flex-direction:column;gap:1px; }
+.cliprow__title{
+  margin:0;font-size:var(--t-sm);font-weight:var(--w-medium);color:var(--c-text);
+  overflow-wrap:anywhere;line-height:var(--lh-snug);
+}
+.cliprow__sub{
+  margin:0;font-size:var(--t-xs);color:var(--c-text-3);
+  display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
+}
+.cliprow__num{
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-xs);color:var(--c-text-2);
+}
+.cliprow__open{ position:absolute;inset:0;z-index:2;border-radius:var(--r-sm); }
+@media (hover:hover){
+  .cliprow:hover{ background:var(--c-surface-2); }
+}
+.cliprow--selected{ background:var(--c-accent-wash); }
+.cliprow--anchor{ box-shadow:inset 0 0 0 1px var(--c-accent-line); }
+.cliprow__open:focus-visible{
+  outline:2px solid var(--c-focus);outline-offset:-2px;border-radius:var(--r-sm);
+}
+
+
+/* ============================================================================
+   6 · DAY GROUP HEADER (.dayhead) — the archive's sticky spine
+   The mockup's bare top:0 let this paint over the app bar. It is offset from
+   --chrome-top (never a literal), plus the local toolbar height.
+   ========================================================================= */
+.daygroup + .daygroup{ margin-top:var(--s-8); }
+.dayhead{
+  position:sticky;
+  top:calc(var(--chrome-top) + var(--toolbar-h,48px));
+  z-index:var(--z-daybar);
+  display:flex;align-items:baseline;gap:var(--s-3);
+  padding:var(--s-3) 0;margin-bottom:var(--s-1);
+  background:var(--c-bg);          /* solid: a gradient let thumbnails show */
+}
+.dayhead__title{
+  margin:0;font-size:var(--t-lg);font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);line-height:var(--lh-tight);
+}
+.dayhead__when{ font-size:var(--t-sm);color:var(--c-text-3); }
+.dayhead__count{
+  margin-left:auto;font-size:var(--t-xs);color:var(--c-text-3);
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+}
+.dayhead__toggle{
+  flex:none;width:var(--tap);height:var(--tap);
+  display:grid;place-items:center;
+  border:0;background:transparent;color:var(--c-text-2);
+  border-radius:var(--r-pill);cursor:pointer;
+}
+.dayhead__toggle svg{ transition:transform var(--dur-fast) var(--ease-out); }
+.dayhead__toggle[aria-expanded="false"] svg{ transform:rotate(-90deg); }
+.daygroup--collapsed .clipgrid{ display:none; }
+
+@media (min-width:1024px){
+  .dayhead{ top:var(--appbar-h); }
+}
+
+
+/* ============================================================================
+   7 · MONTH CALENDAR (.calendar) + DAY PANEL
+   7-column roving-tabindex grid. Cells are real buttons.
+   ========================================================================= */
+.calendar{ display:flex;flex-direction:column;gap:var(--s-3); }
+.calendar__head{
+  display:flex;align-items:center;gap:var(--s-2);
+}
+.calendar__month{
+  flex:1;text-align:center;
+  font-size:var(--t-md);font-weight:var(--w-semi);letter-spacing:var(--ls-tight);
+  min-height:var(--tap);
+  border:0;background:transparent;color:var(--c-text);cursor:pointer;
+  border-radius:var(--r-sm);
+}
+.calendar__nav{
+  flex:none;width:var(--tap);height:var(--tap);
+  display:grid;place-items:center;
+  border:1px solid var(--c-line-control);border-radius:var(--r-pill);
+  background:var(--c-surface);color:var(--c-text-2);cursor:pointer;
+}
+.calendar__dow{
+  display:grid;grid-template-columns:repeat(7,minmax(0,1fr));
+  gap:var(--s-1);
+  font-size:var(--t-micro);text-transform:uppercase;letter-spacing:var(--ls-caps);
+  color:var(--c-text-3);text-align:center;
+}
+.calendar__grid{
+  display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:var(--s-1);
+}
+.calendar__cell{
+  position:relative;
+  aspect-ratio:1;min-height:var(--tap);
+  display:flex;flex-direction:column;align-items:flex-start;gap:2px;
+  padding:var(--s-1);
+  border:1px solid var(--c-line-soft);border-radius:var(--r-sm);
+  background:var(--c-surface);color:var(--c-text-2);
+  cursor:pointer;overflow:hidden;
+  transition:background var(--dur-fast) var(--ease-out),
+             border-color var(--dur-fast) var(--ease-out);
+}
+.calendar__num{
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-xs);font-weight:var(--w-semi);color:var(--c-text);
+}
+.calendar__count{
+  font-size:var(--t-micro);color:var(--c-text-3);
+  font-variant-numeric:tabular-nums;
+}
+.calendar__dots{ display:flex;gap:2px;margin-top:auto; }
+.calendar__strip{ display:none; }
+
+.calendar__cell--empty{
+  background:var(--c-bg);
+}
+.calendar__cell--empty .calendar__num{ color:var(--c-text-3); }
+.calendar__cell[aria-disabled="true"]{
+  opacity:.5;pointer-events:none;
+}
+/* Today is ringed; the selected day is filled. Two different treatments. */
+.calendar__cell[aria-current="date"]{
+  border-color:var(--c-accent);box-shadow:inset 0 0 0 1px var(--c-accent);
+}
+.calendar__cell[aria-pressed="true"]{
+  background:var(--c-accent-wash);border-color:var(--c-accent);
+}
+.calendar__cell[aria-pressed="true"] .calendar__num{ color:var(--c-accent-text); }
+@media (hover:hover){
+  .calendar__cell:hover{ background:var(--c-surface-2);border-color:var(--c-line); }
+}
+.calendar__cell:focus-visible{
+  outline:2px solid var(--c-focus);outline-offset:2px;z-index:1;
+}
+
+/* Loading month: same grid, cells emptied. */
+.calendar__cell--skel{
+  background:var(--c-skeleton);border-color:transparent;pointer-events:none;
+}
+
+@media (min-width:1024px){
+  .calendar__cell{
+    aspect-ratio:auto;min-height:96px;gap:var(--s-1);padding:var(--s-2);
+  }
+  .calendar__num{ font-size:var(--t-sm); }
+  .calendar__strip{
+    display:flex;gap:2px;margin-top:auto;width:100%;
+  }
+  .calendar__strip .frame{
+    width:32px;border-radius:2px;
+  }
+}
+
+/* Day panel — a bottom sheet below 1024, a pushing right drawer above. */
+.daypanel{
+  display:flex;flex-direction:column;min-height:0;
+  background:var(--c-surface);
+}
+.daypanel__head{
+  position:sticky;top:0;z-index:var(--z-sticky);
+  display:flex;align-items:center;gap:var(--s-3);
+  padding:var(--s-3) var(--s-4);
+  background:var(--c-surface);
+  border-bottom:1px solid var(--c-line);
+}
+.daypanel__title{
+  margin:0;font-size:var(--t-md);font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);min-width:0;
+}
+.daypanel__count{
+  margin-left:auto;font-family:var(--font-mono);font-size:var(--t-xs);
+  color:var(--c-text-3);font-variant-numeric:tabular-nums;
+}
+.daypanel__body{
+  flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+  padding:var(--s-3) var(--s-4);
+}
+.daypanel__foot{
+  padding:var(--s-3) var(--s-4);
+  padding-bottom:max(var(--s-4),var(--inset-bottom));
+  border-top:1px solid var(--c-line);
+}
+@media (min-width:1024px){
+  .daypanel{
+    width:420px;flex:none;
+    border-left:1px solid var(--c-line);
+  }
+}
+
+
+/* ============================================================================
+   8 · CAMERA CARD (.cam) AND THE DEGRADED-VIDEO TREATMENT
+   The most important state in the app. A dead stream is desaturated, hatched,
+   scanline-veiled and age-stamped, and its body is replaced by a worded fault
+   block — identically on mobile and desktop.
+   ========================================================================= */
+.cam{
+  display:flex;flex-direction:column;
+  background:var(--c-surface);
+  border:1px solid var(--c-line);border-radius:var(--r-lg);
+  box-shadow:var(--e-2);
+  overflow:hidden;
+}
+.cam__head{
+  display:flex;align-items:center;gap:var(--s-3);
+  padding:var(--s-4) var(--s-4) var(--s-3);
+}
+.cam__name{
+  margin:0;font-size:var(--t-md);font-weight:var(--w-semi);
+  letter-spacing:var(--ls-tight);line-height:var(--lh-snug);min-width:0;
+}
+.cam__id{
+  display:block;font-size:var(--t-micro);font-weight:var(--w-regular);
+  text-transform:uppercase;letter-spacing:var(--ls-caps);
+  color:var(--c-text-3);font-family:var(--font-mono);
+}
+.cam__headend{ margin-left:auto;display:flex;align-items:center;gap:var(--s-2); }
+
+.cam__stage{
+  position:relative;margin-inline:var(--s-3);
+  touch-action:none;                 /* tap-to-centre, drag-pan, pinch-zoom */
+  -webkit-touch-callout:none;
+}
+.cam--bleed .cam__stage{ margin-inline:0; }
+.cam--bleed .cam__stage .frame{ border-radius:0; }
+
+.cam__body{ padding:var(--s-4);display:flex;flex-direction:column;gap:var(--s-4); }
+
+/* Telemetry strip: horizontally scrollable on a phone, edge-bled so the last
+   readout does not read as clipped. */
+.cam__telemetry{
+  display:flex;gap:var(--s-5);
+  min-height:var(--tap);align-items:center;
+  overflow-x:auto;overscroll-behavior-x:contain;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:thin;
+  margin-inline:calc(-1 * var(--s-4));
+  padding-inline:calc(var(--s-4) + var(--inset-left)) calc(var(--s-4) + var(--inset-right));
+}
+.cam__telemetry .readout{ flex:none; }
+
+/* --- DEGRADED / STALE ---------------------------------------------------
+   Four simultaneous signals, none of them hue alone: desaturation, a 135deg
+   hazard hatch, a freeze scanline veil, and an on-media age pill. */
+.cam--stale .frame__img,
+.cam--stale .frame__film{
+  filter:saturate(.35) brightness(.72);
+}
+.cam--stale .cam__stage::after{
+  content:"";position:absolute;inset:0;z-index:4;pointer-events:none;
+  border-radius:var(--r-md);
+  background:repeating-linear-gradient(135deg,
+    transparent 0 14px, var(--c-stale-wash) 14px 28px);
+  opacity:.42;
+}
+/* The freeze veil. Scanlines survive in exactly one place in this system,
+   and this is it — here they mean "this frame is not advancing". */
+/* Default hidden: the veil must be impossible to render over a live feed. */
+.cam__veil{
+  display:none;
+  position:absolute;inset:0;z-index:5;pointer-events:none;
+  border-radius:var(--r-md);
+  background:repeating-linear-gradient(0deg,
+    transparent 0 2px, var(--c-media-scrim) 2px 3px);
+  opacity:.5;
+}
+.cam--stale .cam__veil,
+.cam--offline .cam__veil,
+.cam--no-route .cam__veil{ display:block; }
+.cam__age{
+  position:absolute;z-index:6;left:50%;bottom:var(--s-4);
+  transform:translateX(-50%);
+  padding:var(--s-1) var(--s-3);border-radius:var(--r-pill);
+  background:var(--c-media-scrim-strong);color:var(--c-on-media-stale);
+  font-family:var(--font-mono);font-size:var(--t-micro);
+  letter-spacing:var(--ls-caps);text-transform:uppercase;white-space:nowrap;
+}
+
+/* --- OFFLINE / NO ROUTE — a harder fault than stale. */
+.cam--offline .frame__img,
+.cam--offline .frame__film,
+.cam--no-route .frame__img,
+.cam--no-route .frame__film{
+  filter:grayscale(1) brightness(.38);
+}
+.cam--offline .cam__age,
+.cam--no-route .cam__age{ color:var(--c-on-media-2); }
+
+/* --- FAULT BLOCK — part of the card, never desktop-only. */
+.cam__fault{
+  display:flex;flex-direction:column;gap:var(--s-3);
+  padding:var(--s-4);
+  background:var(--c-danger-wash);
+  border-radius:var(--r-md);
+}
+.cam__fault-head{
+  display:flex;align-items:flex-start;gap:var(--s-3);
+  color:var(--c-danger-text);
+}
+.cam__fault-title{
+  margin:0;font-size:var(--t-base);font-weight:var(--w-semi);
+  line-height:var(--lh-snug);
+}
+.cam__fault-cause{
+  margin:0;font-family:var(--font-mono);font-size:var(--t-xs);
+  color:var(--c-text-2);overflow-wrap:anywhere;
+}
+.cam__fault-retry{
+  margin:0;font-size:var(--t-sm);color:var(--c-text-2);
+  font-variant-numeric:tabular-nums;
+}
+.cam__fault-retry b{ font-family:var(--font-mono);font-weight:var(--w-semi); }
+.cam__fault-actions{ display:flex;flex-direction:column;gap:var(--s-2); }
+.cam__fault-actions > *{ width:100%; }
+
+/* Reconnect spinner — proof the retry loop is alive; suppressed and replaced
+   by a static ring under reduced motion. */
+.cam__spinner{
+  flex:none;width:16px;height:16px;border-radius:var(--r-pill);
+  border:2px solid var(--c-line-control);
+  border-top-color:var(--c-accent);
+  animation:cam-spin 900ms linear infinite;
+}
+@keyframes cam-spin{ to{ transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){
+  .cam__spinner{ animation:none;border-top-color:var(--c-line-control); }
+}
+
+/* Controls unavailable while the stream is down. */
+.cam--offline .ptz,
+.cam--no-route .ptz{ display:none; }
+.cam__nocontrol{
+  margin:0;font-size:var(--t-sm);color:var(--c-text-3);text-align:center;
+  padding:var(--s-3) 0;
+}
+
+/* Multi-camera hand-off, from this codebase's actual PTZ behaviour. */
+.cam__handoff{
+  display:inline-flex;align-items:center;gap:var(--s-2);
+  padding:var(--s-1) var(--s-3);border-radius:var(--r-pill);
+  background:var(--c-accent-wash);color:var(--c-accent-text);
+  font-size:var(--t-micro);font-weight:var(--w-semi);
+  text-transform:uppercase;letter-spacing:var(--ls-caps);
+}
+
+/* Desktop Live: a focused stage plus a filmstrip, not a wall of equal tiles. */
+.camwall{ display:grid;gap:var(--s-5);grid-template-columns:minmax(0,1fr); }
+.camstrip{
+  display:flex;gap:var(--s-3);overflow-x:auto;
+  -webkit-overflow-scrolling:touch;scrollbar-width:thin;
+  padding-bottom:var(--s-2);
+  padding-inline:var(--inset-left) var(--inset-right);
+}
+.camstrip__item{
+  flex:none;width:220px;border-radius:var(--r-md);
+  border:1px solid var(--c-line);background:var(--c-surface);
+  overflow:hidden;cursor:pointer;padding:0;
+  transition:box-shadow var(--dur-fast) var(--ease-out);
+}
+.camstrip__item[aria-pressed="true"]{ box-shadow:0 0 0 2px var(--c-accent); }
+.camstrip__item:focus-visible{ outline:2px solid var(--c-focus);outline-offset:2px; }
+.camstrip__label{
+  display:flex;align-items:center;gap:var(--s-2);
+  padding:var(--s-2) var(--s-3);font-size:var(--t-xs);color:var(--c-text-2);
+  min-height:var(--tap);
+}
+
+@media (min-width:1024px){
+  .camwall--focus{
+    grid-template-columns:minmax(0,1fr) 320px;
+    align-items:start;
+  }
+  /* Cap the primary stage so a tall window cannot push the filmstrip and the
+     operator column below the fold. */
+  .cam--primary .cam__stage{
+    max-width:calc((100vh - 220px) * 16 / 9);
+    margin-inline:auto;
+  }
+  .camwall--grid{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .cam__fault-actions{ flex-direction:row; }
+  .cam__fault-actions > *{ width:auto;flex:1; }
+}
+
+
+/* ============================================================================
+   9 · PTZ CLUSTER (.ptz)
+   Touch and pointer are deliberately different surfaces. The d-pad is width
+   capped so it stays inside a one-handed arc instead of spanning the screen.
+   ========================================================================= */
+.ptz{
+  display:flex;flex-direction:column;gap:var(--s-4);
+  padding:var(--s-4);
+  background:var(--c-surface-inset);border-radius:var(--r-md);
+}
+.ptz__pad{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  grid-template-rows:repeat(3,var(--tap));
+  gap:2px;padding:2px;
+  width:100%;max-width:216px;margin-inline:auto;
+  background:var(--c-surface);border-radius:var(--r-md);
+  box-shadow:var(--ring-control),var(--e-1);
+  touch-action:none;                   /* a jog must never scroll the page */
+  -webkit-touch-callout:none;
+}
+.ptz__jog{
+  min-width:var(--tap);min-height:var(--tap);
+  display:grid;place-items:center;
+  border:0;background:transparent;color:var(--c-text-2);
+  border-radius:var(--r-xs);cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+  transition:background var(--dur-fast) var(--ease-out),
+             color var(--dur-fast) var(--ease-out),
+             transform var(--dur-instant) var(--ease-out);
+}
+@media (hover:hover){
+  .ptz__jog:hover{ background:var(--c-accent-wash);color:var(--c-accent-text); }
+}
+.ptz__jog:active,
+.ptz__jog.is-jogging{
+  background:var(--c-accent);color:var(--c-on-accent);transform:scale(.94);
+}
+.ptz__jog:focus-visible{ outline:2px solid var(--c-focus);outline-offset:-2px; }
+.ptz__home{ color:var(--c-text-3); }
+/* At-limit: dimmed AND announced. aria-disabled, not disabled, so the reason
+   stays reachable by assistive tech. */
+.ptz__jog[aria-disabled="true"]{
+  opacity:.4;pointer-events:none;
+}
+
+.ptz__zoomrow{ display:flex;align-items:center;gap:var(--s-3); }
+.ptz__zoomrow .ptz__zoombtn{
+  flex:none;width:var(--tap);height:var(--tap);
+  display:grid;place-items:center;
+  border:1px solid var(--c-line-control);border-radius:var(--r-pill);
+  background:var(--c-surface);color:var(--c-text-2);cursor:pointer;
+}
+.ptz__zoomrow .slider{ flex:1;min-width:0; }
+.ptz__zoomrow output{
+  flex:none;min-width:4ch;text-align:right;
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-xs);color:var(--c-text-2);
+}
+
+.ptz__presets{
+  display:flex;gap:var(--s-2);
+  overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin;
+  margin-inline:calc(-1 * var(--s-4));
+  padding-inline:calc(var(--s-4) + var(--inset-left)) calc(var(--s-4) + var(--inset-right));
+  padding-bottom:var(--s-1);
+}
+.ptz__presets > *{ flex:none; }
+
+.ptz__switches{ display:flex;flex-direction:column;gap:var(--s-1); }
+
+.ptz__readout{
+  display:flex;align-items:center;gap:var(--s-3);flex-wrap:wrap;
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-xs);color:var(--c-text-2);
+  padding-top:var(--s-2);border-top:1px solid var(--c-line-soft);
+}
+.ptz__readout b{ color:var(--c-text);font-weight:var(--w-semi); }
+
+/* Auto-track engaged: the jog is advisory and the banner says so. */
+.ptz__banner{
+  display:flex;align-items:center;gap:var(--s-2);
+  padding:var(--s-2) var(--s-3);border-radius:var(--r-sm);
+  background:var(--c-info-wash);color:var(--c-info-text);
+  font-size:var(--t-xs);
+}
+.ptz--unavailable{ opacity:.5;pointer-events:none; }
+
+/* --- DESKTOP PTZ SURFACE ------------------------------------------------
+   Click-to-centre, drag-to-frame, keyboard jog. The frame itself is the
+   control; the d-pad becomes the secondary affordance. */
+.ptzstage{
+  position:relative;
+  cursor:crosshair;
+  touch-action:none;-webkit-touch-callout:none;
+}
+.ptzstage__layer{
+  position:absolute;inset:0;z-index:7;pointer-events:none;
+}
+/* Click-to-centre confirmation crosshair. --x/--y are percentages set by JS
+   from the pointer position mapped into the frame's own coordinate space. */
+.ptzstage__cross{
+  position:absolute;left:var(--x,50%);top:var(--y,50%);
+  width:36px;height:36px;margin:-18px 0 0 -18px;
+  border-radius:var(--r-pill);
+  border:1px solid var(--c-on-media-line);
+  animation:ptz-cross var(--dur-slow) var(--ease-out) both;
+}
+.ptzstage__cross::before,
+.ptzstage__cross::after{
+  content:"";position:absolute;background:var(--c-on-media-accent);
+}
+.ptzstage__cross::before{ left:50%;top:6px;bottom:6px;width:1px;margin-left:-.5px; }
+.ptzstage__cross::after { top:50%;left:6px;right:6px;height:1px;margin-top:-.5px; }
+@keyframes ptz-cross{
+  from{ opacity:1;transform:scale(.6); }
+  to  { opacity:0;transform:scale(1.25); }
+}
+
+/* Drag-to-frame target rectangle. */
+.ptzstage__marquee{
+  position:absolute;
+  left:var(--x,0);top:var(--y,0);width:var(--w,0);height:var(--h,0);
+  border:1px solid var(--c-on-media-accent);
+  background:var(--c-media-scrim);
+  border-radius:var(--r-xs);
+}
+.ptzstage__marquee::after{
+  content:"";position:absolute;inset:3px;
+  border:1px dashed var(--c-on-media-line);border-radius:2px;
+}
+
+/* Active-detection reticle: "this frame is under machine control". */
+.ptzstage__reticle{
+  position:absolute;
+  left:var(--x,50%);top:var(--y,50%);width:var(--w,20%);height:var(--h,20%);
+  border:1px solid var(--c-on-media-accent);border-radius:var(--r-xs);
+}
+.ptzstage__reticle-label{
+  position:absolute;left:0;top:-20px;
+  padding:1px var(--s-2);border-radius:2px;
+  background:var(--c-media-scrim-strong);color:var(--c-on-media);
+  font-family:var(--font-mono);font-size:var(--t-micro);white-space:nowrap;
+}
+
+/* Keyboard jog legend — a fine-pointer affordance, hidden on touch. */
+.ptzstage__keys{ display:none; }
+@media (pointer:fine){
+  .ptzstage__keys{
+    position:absolute;z-index:8;right:var(--s-3);bottom:var(--s-3);
+    display:flex;gap:var(--s-2);flex-wrap:wrap;justify-content:flex-end;
+    max-width:60%;
+    opacity:0;transition:opacity var(--dur-fast) var(--ease-out);
+  }
+  .ptzstage:hover .ptzstage__keys,
+  .ptzstage:focus-within .ptzstage__keys{ opacity:1; }
+  .ptzstage__keys kbd{
+    padding:1px 5px;border-radius:3px;
+    background:var(--c-media-scrim-strong);color:var(--c-on-media-2);
+    border:1px solid var(--c-on-media-line);
+    font-family:var(--font-mono);font-size:var(--t-micro);
+  }
+}
+.ptzstage:focus-visible{ outline:2px solid var(--c-focus);outline-offset:2px; }
+
+@media (min-width:1024px){
+  .ptz{ gap:var(--s-5); }
+  .ptz__pad{ max-width:180px;margin-inline:0; }
+  .ptz--desktop{ background:transparent;padding:0; }
+}
+
+
+/* ============================================================================
+   10 · VIDEO PLAYER (.player) + SCRUBBER WITH PER-TRACK PRESENCE LANES
+   The lanes answer "did the doe and the fawn overlap" before you press play.
+   ========================================================================= */
+.player{
+  position:relative;overflow:hidden;
+  border-radius:var(--r-lg);box-shadow:var(--e-3);
+  background:var(--c-surface-sunken);
+}
+.player--flush{ border-radius:0; }
+.player .frame{ border-radius:inherit; }
+.player__video{
+  position:absolute;inset:0;z-index:1;width:100%;height:100%;
+  object-fit:contain;display:block;background:var(--c-surface-sunken);
+}
+.player__play{
+  position:absolute;inset:0;z-index:6;
+  display:grid;place-items:center;
+  border:0;background:transparent;cursor:pointer;
+}
+.player__play-glyph{
+  display:grid;place-items:center;
+  width:72px;height:72px;border-radius:var(--r-pill);
+  background:var(--c-media-scrim);
+  border:1px solid var(--c-on-media-line);
+  color:var(--c-on-media);
+  transition:transform var(--dur) var(--ease-out),
+             background var(--dur) var(--ease-out);
+}
+@media (hover:hover){
+  .player__play:hover .player__play-glyph{
+    transform:scale(1.06);background:var(--c-media-scrim-strong);
+  }
+}
+.player--playing .player__play{ opacity:0;pointer-events:none; }
+.player__play:focus-visible .player__play-glyph{
+  outline:2px solid var(--c-focus);outline-offset:3px;
+}
+
+.player__bar{
+  position:absolute;z-index:7;left:0;right:0;bottom:0;
+  display:flex;flex-direction:column;gap:var(--s-2);
+  padding:var(--s-7) var(--s-4) var(--s-3);
+  padding-left:calc(var(--s-4) + var(--inset-left));
+  padding-right:calc(var(--s-4) + var(--inset-right));
+  background:var(--c-media-gradient);
+}
+.player__row{
+  display:flex;align-items:center;gap:var(--s-2);
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);color:var(--c-on-media-2);
+}
+.player__row b{ color:var(--c-on-media);font-weight:var(--w-semi); }
+.player__spacer{ flex:1; }
+
+/* Error / buffering states never leave the frame blank and wordless. */
+.player__notice{
+  position:absolute;z-index:8;inset:auto var(--s-4) 50% var(--s-4);
+  transform:translateY(50%);
+  padding:var(--s-3) var(--s-4);border-radius:var(--r-md);
+  background:var(--c-media-scrim-strong);color:var(--c-on-media);
+  font-size:var(--t-sm);text-align:center;
+}
+
+/* --- SCRUBBER ---------------------------------------------------------- */
+.scrub{
+  position:relative;
+  /* A transparent ::before expands the pointer target to 44px without
+     changing the 5px visual rail. */
+  height:5px;border-radius:var(--r-pill);
+  background:var(--c-on-media-line);
+  cursor:pointer;touch-action:none;
+  margin-top:calc(var(--s-2) + 12px);   /* room for the lanes above the bed */
+}
+.scrub::before{
+  content:"";position:absolute;left:0;right:0;
+  top:calc(50% - var(--tap) / 2);height:var(--tap);
+}
+.scrub__played{
+  position:absolute;inset:0 auto 0 0;width:var(--played,0%);
+  border-radius:inherit;background:var(--c-on-media-accent);
+}
+.scrub__buffered{
+  position:absolute;inset:0 auto 0 0;width:var(--buffered,0%);
+  border-radius:inherit;background:var(--c-on-media-2);opacity:.35;
+}
+.scrub__knob{
+  position:absolute;left:var(--played,0%);top:50%;
+  width:14px;height:14px;margin:-7px 0 0 -7px;
+  border-radius:var(--r-pill);background:var(--c-on-media);
+  pointer-events:none;
+}
+.scrub:focus-visible{ outline:2px solid var(--c-focus);outline-offset:6px; }
+
+/* Detection key frames as 3px ticks on the bed. */
+.scrub__marks{ position:absolute;inset:-3px 0;pointer-events:none; }
+.scrub__mark{
+  position:absolute;top:0;bottom:0;left:var(--at,0%);
+  width:3px;margin-left:-1.5px;border-radius:var(--r-pill);
+  background:var(--species-dot,var(--sp-unknown-dot));
+}
+
+/* Per-track presence lanes, stacked directly above the bed. Each lane is one
+   absolutely-positioned span; --at and --len are percentages of duration,
+   --row is its stacking index, --species-dot its species colour. */
+.scrub__lanes{
+  position:absolute;left:0;right:0;bottom:calc(100% + 3px);
+  height:12px;pointer-events:none;
+}
+.scrub__lane{
+  position:absolute;
+  left:var(--at,0%);width:var(--len,0%);
+  top:calc(var(--row,0) * 5px);height:3px;
+  border-radius:var(--r-pill);
+  background:var(--species-dot,var(--sp-unknown-dot));
+}
+.scrub__lane--muted{ opacity:.35; }
+
+.player__times{
+  display:flex;justify-content:space-between;
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);color:var(--c-on-media-2);
+}
+
+@media (min-width:1024px){
+  /* Never let the player exceed the viewport and push the key frames off. */
+  .player--capped{
+    max-width:min(100%, calc((100vh - 260px) * 16 / 9));
+    margin-inline:auto;
+  }
+}
+
+
+/* ============================================================================
+   11 · KEY-FRAME STRIP (.keystrip) + TRACK CHIP (.trackchip)
+   ========================================================================= */
+.keystrip{
+  display:flex;gap:var(--s-3);
+  overflow-x:auto;overscroll-behavior-x:contain;
+  -webkit-overflow-scrolling:touch;scrollbar-width:thin;
+  scroll-snap-type:x mandatory;
+  padding-bottom:var(--s-2);
+  margin-inline:calc(-1 * var(--s-4));
+  padding-inline:calc(var(--s-4) + var(--inset-left)) calc(var(--s-4) + var(--inset-right));
+}
+.keystrip__frame{
+  flex:none;width:132px;
+  display:flex;flex-direction:column;gap:var(--s-2);
+  border:0;background:transparent;padding:0;cursor:pointer;
+  border-radius:var(--r-sm);
+  scroll-snap-align:start;
+  /* so a snapped frame never comes to rest under the sticky toolbar */
+  scroll-margin-inline-start:var(--s-4);
+}
+.keystrip__frame .frame{
+  border-radius:var(--r-sm);
+  box-shadow:0 0 0 1px var(--c-line);
+  transition:box-shadow var(--dur) var(--ease-out);
+}
+@media (hover:hover){
+  .keystrip__frame:hover .frame{ box-shadow:0 0 0 2px var(--c-line-strong); }
+}
+.keystrip__frame[aria-current="true"] .frame{
+  box-shadow:0 0 0 2px var(--c-accent),var(--e-2);
+}
+.keystrip__t{
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);color:var(--c-text-3);text-align:left;
+}
+.keystrip__frame[aria-current="true"] .keystrip__t{ color:var(--c-accent-text); }
+.keystrip__frame:focus-visible{ outline:2px solid var(--c-focus);outline-offset:2px; }
+
+.trackchips{ display:flex;flex-wrap:wrap;gap:var(--s-2); }
+.trackchip{
+  position:relative;
+  display:inline-flex;align-items:center;gap:var(--s-3);
+  min-height:var(--tap);
+  padding:var(--s-2) var(--s-3) var(--s-2) var(--s-4);
+  border:1px solid var(--c-line-control);border-radius:var(--r-sm);
+  background:var(--c-surface);color:var(--c-text-2);cursor:pointer;
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-xs);text-align:left;
+  transition:border-color var(--dur-fast) var(--ease-out),
+             background var(--dur-fast) var(--ease-out),
+             color var(--dur-fast) var(--ease-out);
+}
+/* The 4px bar carries the track's species colour. */
+.trackchip::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:4px;
+  border-radius:var(--r-sm) 0 0 var(--r-sm);
+  background:var(--species-dot,var(--sp-unknown-dot));
+}
+.trackchip__id{ font-weight:var(--w-semi);color:var(--c-text); }
+.trackchip__sp{ font-family:var(--font-sans);color:var(--c-text);overflow-wrap:anywhere; }
+.trackchip__t{ color:var(--c-text-3); }
+@media (hover:hover){
+  .trackchip:hover{ border-color:var(--c-accent);color:var(--c-text); }
+}
+.trackchip[aria-pressed="true"]{
+  background:var(--c-accent-wash);border-color:var(--c-accent);color:var(--c-accent-text);
+}
+.trackchip__note{
+  display:block;width:100%;
+  font-family:var(--font-sans);font-size:var(--t-micro);color:var(--c-text-3);
+}
+.trackchip:focus-visible{ outline:2px solid var(--c-focus);outline-offset:2px; }
+
+
+/* ============================================================================
+   12 · LOG VIEWER (.logview)
+   Base is the mobile two-line stack; the 88/64/1fr grid arrives at 640px.
+   ========================================================================= */
+.logview{
+  display:flex;flex-direction:column;min-height:0;
+  border:1px solid var(--c-line);border-radius:var(--r-md);
+  background:var(--c-surface);overflow:hidden;
+}
+.logview__head{
+  display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap;
+  padding:var(--s-3);
+  border-bottom:1px solid var(--c-line);
+  background:var(--c-surface);
+}
+.logview__body{
+  position:relative;
+  flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+  background:var(--c-surface-sunken);
+}
+/* Virtualisation spacers keep the scrollbar honest above 500 rows. */
+.logview__spacer{ display:block;width:100%; }
+
+.logrow{
+  display:grid;grid-template-columns:auto minmax(0,1fr);
+  gap:2px var(--s-2);align-items:start;
+  padding:var(--s-2) var(--s-3);
+  border-bottom:1px solid var(--c-line-soft);
+}
+.logrow__ts{
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  font-size:var(--t-micro);color:var(--c-text-3);white-space:nowrap;
+}
+.logrow__lvl{
+  justify-self:start;
+  padding:0 var(--s-2);border-radius:var(--r-xs);
+  font-size:var(--t-micro);font-weight:var(--w-semi);
+  text-transform:uppercase;letter-spacing:var(--ls-caps);
+  background:var(--c-surface-2);color:var(--c-text-2);
+}
+.logrow__msg{
+  grid-column:1 / -1;
+  font-family:var(--font-mono);font-size:var(--t-xs);
+  color:var(--c-text);overflow-wrap:anywhere;
+  white-space:pre-wrap;
+}
+.logrow__copy{
+  grid-column:2;justify-self:end;
+  width:var(--tap);height:var(--tap);
+  display:grid;place-items:center;
+  border:0;background:transparent;color:var(--c-text-3);
+  border-radius:var(--r-xs);cursor:pointer;
+}
+.logrow--debug .logrow__lvl{ background:var(--c-surface-2);color:var(--c-text-3); }
+.logrow--info  .logrow__lvl{ background:var(--c-info-wash);color:var(--c-info-text); }
+.logrow--warn  .logrow__lvl{ background:var(--c-stale-wash);color:var(--c-stale-text); }
+.logrow--error .logrow__lvl{ background:var(--c-danger-wash);color:var(--c-danger-text); }
+.logrow--error .logrow__msg{ color:var(--c-danger-text); }
+.logrow--expanded{ background:var(--c-surface); }
+@media (hover:hover){
+  .logrow:hover{ background:var(--c-surface); }
+}
+
+/* "Jump to latest · 42 new" — floats clear of the tab bar via the token. */
+.logview__jump{
+  position:sticky;z-index:var(--z-raised);
+  bottom:var(--s-3);
+  display:flex;align-items:center;gap:var(--s-2);
+  margin:var(--s-3) auto;width:max-content;max-width:calc(100% - var(--s-6));
+  min-height:var(--tap);padding:0 var(--s-4);
+  border-radius:var(--r-pill);border:1px solid var(--c-line);
+  background:var(--c-surface);color:var(--c-text);box-shadow:var(--e-3);
+  font-size:var(--t-sm);cursor:pointer;
+}
+.logview__jump-count{
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  color:var(--c-text-3);
+}
+
+@media (min-width:640px){
+  .logrow{
+    grid-template-columns:88px 64px minmax(0,1fr) var(--tap);
+    align-items:center;gap:var(--s-3);
+  }
+  .logrow__msg{ grid-column:auto; }
+  .logrow__copy{ grid-column:auto;justify-self:center; }
+}
+@media (pointer:fine) and (min-width:640px){
+  /* Dense desktop rows are permitted a 32px icon button. */
+  .logrow{ grid-template-columns:88px 64px minmax(0,1fr) 32px; }
+  .logrow__copy{ width:32px;height:32px; }
+}
+
+
+/* ============================================================================
+   13 · DATA TABLE (.table)
+   Base (phone) is a stack of definition-list cards — a data table is never
+   horizontally scrolled on a phone. Every <td> carries data-label.
+   ========================================================================= */
+.tablewrap{ min-height:0;overflow:auto;overscroll-behavior:contain; }
+.table{
+  width:100%;border-collapse:collapse;
+  font-size:var(--t-sm);
+}
+.table caption{
+  text-align:left;padding:var(--s-2) 0;
+  font-size:var(--t-xs);color:var(--c-text-3);
+}
+.table thead{ display:none; }
+.table tbody tr{
+  display:block;
+  padding:var(--s-3);margin-bottom:var(--s-3);
+  border:1px solid var(--c-line);border-radius:var(--r-md);
+  background:var(--c-surface);
+}
+.table td{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--s-3);
+  padding:var(--s-1) 0;min-height:var(--s-6);
+  border:0;
+}
+.table td::before{
+  content:attr(data-label);
+  flex:none;
+  font-size:var(--t-micro);text-transform:uppercase;letter-spacing:var(--ls-caps);
+  color:var(--c-text-3);font-weight:var(--w-semi);
+}
+.table__num{
+  font-family:var(--font-mono);font-variant-numeric:tabular-nums;
+  text-align:right;
+}
+.table__empty,
+.table__error{
+  padding:var(--s-8) var(--s-4);text-align:center;color:var(--c-text-3);
+}
+.table__skel{ height:12px;border-radius:var(--r-pill);background:var(--c-skeleton); }
+
+@media (min-width:640px){
+  .table thead{ display:table-header-group; }
+  .table tbody tr{
+    display:table-row;
+    padding:0;margin:0;border:0;border-radius:0;
+    background:transparent;
+    border-bottom:1px solid var(--c-line-soft);
+  }
+  .table td{
+    display:table-cell;
+    padding:var(--s-2) var(--s-3);
+    vertical-align:middle;
+  }
+  .table td::before{ content:none; }
+  .table th{
+    position:sticky;top:0;z-index:var(--z-sticky);
+    padding:0;text-align:left;
+    background:var(--c-surface);
+    border-bottom:1px solid var(--c-line);
+  }
+  .table__sort{
+    display:flex;align-items:center;gap:var(--s-2);
+    width:100%;min-height:var(--control-h);
+    padding:0 var(--s-3);
+    border:0;background:transparent;color:var(--c-text-2);cursor:pointer;
+    font-size:var(--t-micro);font-weight:var(--w-semi);
+    text-transform:uppercase;letter-spacing:var(--ls-caps);
+    text-align:left;
+  }
+  .table__sort:focus-visible{ outline:2px solid var(--c-focus);outline-offset:-2px; }
+  .table th[aria-sort="ascending"] .table__sort,
+  .table th[aria-sort="descending"] .table__sort{ color:var(--c-accent-text); }
+  .table th[aria-sort="ascending"],
+  .table th[aria-sort="descending"]{ box-shadow:inset 0 -2px 0 var(--c-accent); }
+  .table tbody tr:nth-child(even){ background:var(--c-surface-sunken); }
+  .table tbody tr[aria-selected="true"]{ background:var(--c-accent-wash); }
+}
+@media (hover:hover) and (min-width:640px){
+  .table tbody tr:hover{ background:var(--c-surface-2); }
+}
+@media (min-width:1024px){
+  /* Below the desktop app bar, not under it. */
+  .table th{ top:var(--appbar-h); }
+}
+
+
+/* ============================================================================
+   14 · GAUGE (.gauge)
+   A .readout, a tall .meter, and a 60-sample sparkline. A crossed threshold
+   changes the meter variant AND appends the word, so state is never hue only.
+   ========================================================================= */
+.gauge{
+  display:flex;flex-direction:column;gap:var(--s-3);
+  padding:var(--s-4);
+  background:var(--c-surface);
+  border:1px solid var(--c-line);border-radius:var(--r-md);
+  box-shadow:var(--e-1);
+}
+.gauge__head{ display:flex;align-items:flex-start;gap:var(--s-3); }
+.gauge__head .readout{ flex:1;min-width:0; }
+.gauge__state{
+  font-size:var(--t-micro);font-weight:var(--w-semi);
+  text-transform:uppercase;letter-spacing:var(--ls-caps);
+  color:var(--c-text-3);white-space:nowrap;
+}
+.gauge__meter{ width:100%; }
+/* The meter is width-driven, so stretch it across the card instead of the
+   intrinsic segment width. */
+.gauge__meter.meter{ width:100%;display:block; }
+.gauge__meter.meter::after{ width:calc(var(--n) / var(--of) * 100%); }
+
+.gauge__spark{
+  display:block;width:100%;height:34px;
+  color:var(--c-text-3);
+  overflow:visible;
+}
+.gauge__spark polyline,
+.gauge__spark path{
+  fill:none;stroke:currentColor;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;
+  vector-effect:non-scaling-stroke;
+}
+.gauge--nominal  .gauge__spark{ color:var(--c-text-3); }
+.gauge--warn     .gauge__state{ color:var(--c-stale-text); }
+.gauge--warn     .gauge__spark{ color:var(--c-stale); }
+.gauge--critical .gauge__state{ color:var(--c-danger-text); }
+.gauge--critical .gauge__spark{ color:var(--c-danger); }
+.gauge--critical{ border-color:var(--c-danger); }
+.gauge--unavailable{ opacity:.6; }
+.gauge--unavailable .gauge__spark{ display:none; }
+
+@media (min-width:640px){
+  .gaugerow{
+    display:grid;gap:var(--s-4);
+    grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+  }
+}

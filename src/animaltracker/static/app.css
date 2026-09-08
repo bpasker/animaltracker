@@ -723,7 +723,17 @@ code,.code{
 /* Theme switch is a .seg of three; on a narrow bar it drops to glyphs, and
    the aria-label (which names the resolved theme) carries the meaning. */
 .themeswitch{ flex:none }
-@media (max-width: 640px){
+/* The 640px arm is for the mobile top bar. The 1024-1279 arm matters because
+   the desktop appbar only EXISTS at >=1024px, so a max-width:640px rule could
+   never collapse it -- and brand + four tabs + search + Actions + three
+   labelled theme buttons overflow the bar in that range. */
+@media (min-width: 1024px) and (max-width: 1279px){
+  /* The bar still does not fit once the theme labels are gone: the wordmark is
+     decoration and the search field had been squeezed to ~26px, which is
+     useless. Drop the wordmark, keep the mark, and search stays usable. */
+  .brand__name{ display:none }
+}
+@media (max-width: 640px), (min-width: 1024px) and (max-width: 1279px){
   .themeswitch .seg__btn{ padding-inline:var(--s-3) }
   .themeswitch .seg__btn .btn__label{ display:none }
 }
@@ -4056,7 +4066,12 @@ body.is-locked{
      operator column below the fold. */
   .cam--primary .cam__stage{
     max-width:calc((100vh - 220px) * 16 / 9);
-    margin-inline:auto;
+    /* Centre with align-self, NOT auto margins: an auto cross-axis margin
+       suppresses `stretch` on a flex item, and the frame's only child is
+       absolutely positioned, so there is no in-flow content to give the stage a
+       width. It would collapse to 0 and take the video with it. */
+    width:100%;
+    align-self:center;
   }
   .camwall--grid{ grid-template-columns:repeat(2,minmax(0,1fr)); }
   .cam__fault-actions{ flex-direction:row; }

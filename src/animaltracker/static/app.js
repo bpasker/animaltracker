@@ -367,6 +367,11 @@ function renderRailCameras(shell) {
     return;
   }
 
+  /* The empty/error paragraph is not a keyed row, so keyedList would leave it
+     sitting above the cameras once they arrive. Drop it before reconciling. */
+  var stale = list.querySelector('.savedviews__empty');
+  if (stale) list.removeChild(stale);
+
   keyedList(list, cams, {
     key: function (c) { return c.id; },
     create: function (c) {

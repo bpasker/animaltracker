@@ -246,6 +246,7 @@ h4,h5,h6,.t-h4{
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
+  min-width:0;
 }
 
 kbd,.kbd{
@@ -1582,7 +1583,12 @@ code,.code{
    Small, boring, and used by every screen. Nothing here paints.
    ========================================================================= */
 
+/* A grid item defaults to min-width:auto, so it refuses to shrink below its
+   min-content width and the auto-sized track grows to fit it — which pushes the
+   whole column past a narrow viewport. min-width:0 on the CHILDREN is what lets
+   the track track its container instead of its contents. */
 .stack   { display:grid; gap:var(--s-4); min-width:0 }
+.stack > * { min-width:0 }
 .stack--tight{ gap:var(--s-2) }
 .stack--loose{ gap:var(--s-6) }
 

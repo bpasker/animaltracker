@@ -1119,7 +1119,7 @@ function buildFilterFields(mode) {
   var whenSection = h('div.rail__section',
     h('div.rail__label', 'When'),
     rangeRow,
-    h('div.row',
+    h('div.row.row--dates',
       h('label.field', h('span.field__label', 'From'), fromInput),
       h('label.field', h('span.field__label', 'To'), toInput)));
   wrap.appendChild(whenSection);

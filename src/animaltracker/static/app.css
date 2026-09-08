@@ -1620,6 +1620,10 @@ code,.code{
 .row--dates{ flex-wrap:wrap }
 .row--dates > .field{ flex:1 1 150px; min-width:0 }
 .rail .row--dates{ flex-direction:column; align-items:stretch }
+/* Stacked, the flex basis above becomes a HEIGHT and flex-grow stretches each
+   field to 150px tall, which inflates the input to ~85px. Height is content
+   here; only the side-by-side case shares space. */
+.rail .row--dates > .field{ flex:0 0 auto }
 
 /* Species names can be long ("Bovid (Cattle/Goat/Sheep)"). A chip is flex:none
    so it never shrinks; in the fixed-width rail cap it and let the label
@@ -4396,7 +4400,12 @@ body.is-locked{
   /* Never let the player exceed the viewport and push the key frames off. */
   .player--capped{
     max-width:min(100%, calc((100vh - 260px) * 16 / 9));
-    margin-inline:auto;
+    /* Centre with justify-self, NOT auto margins. An auto inline margin removes
+       a grid item's stretch, and .player__video is absolutely positioned, so
+       there is no in-flow content to size against -- the player collapses to 0.
+       Same failure as .cam--primary .cam__stage on Live. */
+    width:100%;
+    justify-self:center;
   }
 }
 

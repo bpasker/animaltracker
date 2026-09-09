@@ -3898,6 +3898,16 @@ body.is-locked{
     width:420px;flex:none;
     border-left:1px solid var(--c-line);
   }
+  /* The drawer is as tall as its clips and scrolls with the page, so its
+     body must not be a scroll container here. As one it never overflowed,
+     and an overflow:auto box with overscroll-behavior:contain swallows every
+     wheel tick over it while scrolling nothing: the page could be scrolled
+     from over the calendar but not from over the clips. */
+  .daypanel__body{ overflow:visible; }
+  /* The head sticks under the app bar (not at 0, where the bar would hide
+     it), so the day and its close button stay in reach as a long day
+     scrolls past. */
+  .daypanel__head{ top:calc(var(--chrome-top) + var(--toolbar-h)); }
 }
 
 

@@ -3949,18 +3949,19 @@ body.is-locked{
 
 .cam__body{ padding:var(--s-4);display:flex;flex-direction:column;gap:var(--s-4); }
 
-/* Telemetry strip: horizontally scrollable on a phone, edge-bled so the last
-   readout does not read as clipped. */
+/* Telemetry: a grid of readouts that takes as many rows as the width needs,
+   so nothing is clipped or parked behind a horizontal scroll (the desktop
+   operator column is about 350px wide and five readouts need about 400), and
+   the labels line up along the top of each row whether or not a readout
+   carries a meter. Every value is a short mono token, so 88px columns hold
+   the widest of them. */
 .cam__telemetry{
-  display:flex;gap:var(--s-5);
-  min-height:var(--tap);align-items:center;
-  overflow-x:auto;overscroll-behavior-x:contain;
-  -webkit-overflow-scrolling:touch;
-  scrollbar-width:thin;
-  margin-inline:calc(-1 * var(--s-4));
-  padding-inline:calc(var(--s-4) + var(--inset-left)) calc(var(--s-4) + var(--inset-right));
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(88px,1fr));
+  gap:var(--s-3) var(--s-5);
+  align-items:start;
+  min-height:var(--tap);
 }
-.cam__telemetry .readout{ flex:none; }
 
 /* --- DEGRADED / STALE ---------------------------------------------------
    Four simultaneous signals, none of them hue alone: desaturation, a 135deg

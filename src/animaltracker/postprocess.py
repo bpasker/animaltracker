@@ -519,10 +519,20 @@ class ClipPostProcessor:
         
         log_path = clip_path.with_suffix('.log.json')
         
-        # Calculate summary statistics from processing log
-        blank_frames = sum(1 for e in processing_log if e.event == "detector_filtered" and e.reason == "no_animal_detected")
-        detection_frames = sum(1 for e in processing_log if e.event in ("tracked", "detection"))
-        filtered_frames = sum(1 for e in processing_log if e.event == "detector_filtered" and e.reason != "no_animal_detected")
+        # Calculate summary statistics from processing log. A frame can carry
+        # several entries (one per box SpeciesNet judged, one per track), so
+        # count frames, not entries.
+        blank_frames = len({
+            e.frame_idx for e in processing_log
+            if e.event == "detector_filtered" and e.reason == "no_animal_detected"
+        })
+        detection_frames = len({
+            e.frame_idx for e in processing_log if e.event in ("tracked", "detection")
+        })
+        filtered_frames = len({
+            e.frame_idx for e in processing_log
+            if e.event == "detector_filtered" and e.reason != "no_animal_detected"
+        })
         non_animal_frames = len({
             e.frame_idx for e in processing_log
             if e.event == "detector_filtered" and (e.reason or "").startswith(NON_ANIMAL_REASON_PREFIX)

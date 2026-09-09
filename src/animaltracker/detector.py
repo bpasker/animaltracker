@@ -520,11 +520,24 @@ def _tokenize_species(text: str) -> str:
 class SpeciesNetDetector(BaseDetector):
     """Google SpeciesNet detection backend for wildlife camera traps.
     
-    SpeciesNet is an ensemble of MegaDetector (object detection) and a 
-    species classifier trained on 65M+ camera trap images, supporting 
+    SpeciesNet is an ensemble of MegaDetector (object detection) and a
+    species classifier trained on 65M+ camera trap images, supporting
     2000+ species with geographic filtering.
     """
-    
+
+    # A MegaDetector box gets its own verdict (see _predict_per_box) when its
+    # confidence reaches this. It is the ensemble's own "mid-confidence" gate:
+    # combine_predictions_for_single_item never lets a box below 0.2 decide
+    # anything, so weaker boxes are left to the whole-frame path.
+    PER_BOX_MIN_CONF = 0.2
+    # Above this a human/vehicle box is what the detector says it is. The
+    # ensemble's rule for such a box (#1a/#2b) returns the detector label
+    # without consulting the classifier, so we do the same and skip the crop.
+    NON_ANIMAL_DETECTOR_CONF = 0.7
+    # Cap on classifier crops per frame, so a crowded frame stays near the
+    # cost of a plain one (a crop is ~90 ms on a GTX 1080, ~55 ms batched).
+    PER_BOX_MAX_BOXES = 8
+
     def __init__(
         self,
         model_version: str = "v4.0.3a",
@@ -565,6 +578,7 @@ class SpeciesNetDetector(BaseDetector):
             # captured, which measurably shifts its scores.
             # MegaDetectorBackend above already takes the in-memory route for the
             # detector alone; this does the same for the full ensemble.
+            from speciesnet.constants import Classification  # type: ignore
             from speciesnet.geolocation import find_admin1_region  # type: ignore
             from speciesnet.utils import BBox  # type: ignore
             import PIL.Image as _PILImage  # type: ignore
@@ -575,6 +589,10 @@ class SpeciesNetDetector(BaseDetector):
 
         self._PILImage = _PILImage
         self._BBox = BBox
+        # The labels the ensemble itself returns for a confident human/vehicle
+        # box; _predict_per_box hands them out for such boxes without a crop.
+        self._label_human = Classification.HUMAN.value
+        self._label_vehicle = Classification.VEHICLE.value
 
         self.country = country
         self.admin1_region = admin1_region
@@ -653,8 +671,11 @@ class SpeciesNetDetector(BaseDetector):
         
         Runs the detector -> classifier -> ensemble chain on an in-memory frame
         instead of round-tripping it through a JPEG tempfile (see __init__: the
-        win is fidelity more than speed). Inference dominates the per-frame cost,
-        so the larger remaining win for whole-clip work would be feeding
+        win is fidelity more than speed), and runs the classifier + ensemble
+        once per MegaDetector box rather than once per frame, so an animal is
+        judged on its own crop even when a person or a parked bike outscores
+        it (see _predict_per_box). Inference dominates the per-frame cost, so
+        the larger remaining win for whole-clip work would be feeding
         SpeciesNet every sampled frame as one batch instead of one call per frame.
 
         Note: detection_threshold is not applied here. The library's
@@ -684,23 +705,10 @@ class SpeciesNetDetector(BaseDetector):
         detector_result = self._sn_detector.predict(
             key, self._sn_detector.preprocess(pil_img)
         )
-
-        # The crop classifier needs the detector's boxes to know what to crop to.
         raw_dets = detector_result.get("detections") or []
-        bboxes = [self._BBox(*det["bbox"]) for det in raw_dets]
-        classifier_result = self._sn_classifier.predict(
-            key, self._sn_classifier.preprocess(pil_img, bboxes=bboxes)
-        )
 
-        # combine() returns the prediction list directly, where predict() wrapped
-        # it in {"predictions": [...]}.
-        predictions_list = self._sn_ensemble.combine(
-            filepaths=[key],
-            classifier_results={key: classifier_result},
-            detector_results={key: detector_result},
-            geolocation_results={key: self._geolocation},
-            partial_predictions={},
-        )
+        # One ensemble verdict per box the detector found, not one per frame.
+        predictions_list = self._predict_per_box(key, pil_img, detector_result, raw_dets)
 
         detections: List[Detection] = []
 
@@ -856,7 +864,107 @@ class SpeciesNetDetector(BaseDetector):
         if return_filtered:
             return detections, filtered_detections
         return detections
-    
+
+    def _predict_per_box(
+        self, key: str, pil_img, detector_result: dict, raw_dets: list
+    ) -> List[dict]:
+        """Ensemble verdicts for one frame, one per MegaDetector box.
+
+        The library's ensemble gives one label per image, decided by the
+        highest-confidence box: the crop classifier is fed that box alone and
+        ``combine_predictions_for_single_item`` reads only ``detections[0]``.
+        On a camera whose view holds a permanent person or vehicle that
+        outscores the wildlife -- cam1's porch bike is a 0.94 "vehicle" in
+        every frame -- the whole frame comes back "vehicle" and the animal
+        beside it is never looked at. The 2026-09-07 dog clip had a dog box in
+        141 sampled frames and kept 8 of them, the ones where the dog happened
+        to outscore the bike.
+
+        So every box worth considering gets its own classifier crop and its
+        own combine() call with ``detections=[box]``: exactly what the
+        ensemble would have decided had that box been alone in the picture.
+        Crops are classified as one batch. Boxes below ``PER_BOX_MIN_CONF``
+        never decide anything for their own class in the ensemble, so they
+        are left to the whole-frame path, which also produces the "blank"
+        verdict for an empty frame. A human/vehicle box above
+        ``NON_ANIMAL_DETECTOR_CONF`` is returned as the detector's label
+        straight away -- the ensemble's rule for it does not consult the
+        classifier either -- so the bike costs nothing per frame; the caller
+        still gets its box for the person-shadow filter. A mid-confidence
+        human/vehicle box is still shown to the classifier, keeping the
+        ensemble's ability to overrule the detector (a deer the detector
+        called "human 0.4" can still come back a deer).
+        """
+        candidates = [
+            det for det in raw_dets
+            if det.get("conf", 0.0) >= self.PER_BOX_MIN_CONF and det.get("bbox")
+        ][: self.PER_BOX_MAX_BOXES]
+
+        if not candidates:
+            # Whole-frame path, as SpeciesNet.predict() does it: the
+            # classifier crops to the top box if there is one and combine()
+            # sees every box. combine() returns the prediction list directly,
+            # where predict() wrapped it in {"predictions": [...]}.
+            bboxes = [self._BBox(*det["bbox"]) for det in raw_dets]
+            classifier_result = self._sn_classifier.predict(
+                key, self._sn_classifier.preprocess(pil_img, bboxes=bboxes)
+            )
+            return self._sn_ensemble.combine(
+                filepaths=[key],
+                classifier_results={key: classifier_result},
+                detector_results={key: detector_result},
+                geolocation_results={key: self._geolocation},
+                partial_predictions={},
+            )
+
+        predictions: List[Optional[dict]] = [None] * len(candidates)
+        to_classify: List[Tuple[int, str, dict]] = []
+        for idx, det in enumerate(candidates):
+            kind = self._box_kind(det)
+            if kind != "animal" and det["conf"] > self.NON_ANIMAL_DETECTOR_CONF:
+                predictions[idx] = {
+                    "prediction": self._label_human if kind == "human" else self._label_vehicle,
+                    "prediction_score": det["conf"],
+                    "prediction_source": "detector",
+                    "detections": [det],
+                }
+                continue
+            to_classify.append((idx, f"{key}:{idx}", det))
+
+        if to_classify:
+            keys = [box_key for _, box_key, _ in to_classify]
+            crops = [
+                self._sn_classifier.preprocess(pil_img, bboxes=[self._BBox(*det["bbox"])])
+                for _, _, det in to_classify
+            ]
+            classifier_results = self._sn_classifier.batch_predict(keys, crops)
+            combined = self._sn_ensemble.combine(
+                filepaths=keys,
+                classifier_results=dict(zip(keys, classifier_results)),
+                detector_results={box_key: {"detections": [det]} for _, box_key, det in to_classify},
+                geolocation_results={box_key: self._geolocation for box_key in keys},
+                partial_predictions={},
+            )
+            for (idx, _, _), pred in zip(to_classify, combined):
+                predictions[idx] = pred
+
+        return [pred for pred in predictions if pred is not None]
+
+    @staticmethod
+    def _box_kind(det: dict) -> str:
+        """"animal", "human" or "vehicle" for a MegaDetector box dict.
+
+        The library attaches a ``Detection`` str-enum as ``label`` and the
+        MegaDetector category ("1"/"2"/"3") as ``category``; either will do.
+        """
+        label = det.get("label")
+        label = str(getattr(label, "value", label) or "").lower()
+        if label in ("animal", "human", "vehicle"):
+            return label
+        return {"1": "animal", "2": "human", "3": "vehicle"}.get(
+            str(det.get("category", "")), "animal"
+        )
+
     @staticmethod
     def _non_animal_label(display_name: str) -> Optional[str]:
         """Canonical non-animal label ("person" or "vehicle") for a SpeciesNet

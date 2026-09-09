@@ -11,6 +11,7 @@ from __future__ import annotations
 from animaltracker.detector import NON_ANIMAL_REASON_PREFIX, SpeciesNetDetector
 from animaltracker.postprocess import (
     ClipPostProcessor,
+    NonAnimalBoxes,
     ProcessingLogEntry,
     ProcessingSettings,
     SpeciesResult,
@@ -52,7 +53,10 @@ def _track(track_id: int, votes) -> TrackInfo:
 
 
 def _person_boxes(frames, box=PERSON_BOX):
-    return {f: [box] for f in frames}
+    boxes = NonAnimalBoxes()
+    for f in frames:
+        boxes.add(f, box)
+    return boxes
 
 
 # --- detector -----------------------------------------------------------------
@@ -128,15 +132,45 @@ def test_only_the_shadow_track_goes_when_both_are_present():
     assert set(tracker.tracks) == {4}
 
 
-def test_a_person_seen_only_far_away_in_time_does_not_count():
-    # The person left at frame 100; an animal on the same spot at frame 400 is real.
+def test_the_whole_clip_counts_by_default():
+    # The long 8:05 clip: the detector called the same box "person" and then
+    # "bird" for ten seconds at a stretch. Frames 402 and 1612 are far from
+    # the nearest person frame but it is the same object, so it is a shadow.
+    person = _person_boxes(range(2100, 2200, 2))
+    stretch = _track(107, [(402, "bird_passeriformes_corvidae", PERSON_BOX),
+                           (1612, "bird_passeriformes_corvidae", PERSON_BOX_SHIFTED)])
+    tracker = _tracker(stretch)
+
+    removed, log = _processor()._drop_person_shadow_tracks(tracker, person)
+
+    assert removed == 1
+    assert "anywhere in the clip" in log[0].reason
+
+
+def test_a_window_restricts_the_match_in_time_when_configured():
     person = _person_boxes(range(0, 100, 2))
     later = _track(2, [(400, "mammalia_carnivora_felidae", PERSON_BOX)])
     tracker = _tracker(later)
 
-    removed, _ = _processor()._drop_person_shadow_tracks(tracker, person)
+    removed, _ = _processor(person_shadow_window=45)._drop_person_shadow_tracks(tracker, person)
 
     assert removed == 0
+    tracker = _tracker(_track(2, [(400, "mammalia_carnivora_felidae", PERSON_BOX)]))
+    removed, log = _processor(person_shadow_window=400)._drop_person_shadow_tracks(tracker, person)
+    assert removed == 1
+    assert "within 400 frames" in log[0].reason
+
+
+def test_dedup_keeps_a_match_the_folded_box_would_have_made():
+    boxes = NonAnimalBoxes()
+    for f in range(0, 200, 2):
+        boxes.add(f, PERSON_BOX)
+        boxes.add(f, PERSON_BOX_SHIFTED)   # IoU ~0.93 with PERSON_BOX: kept separately
+    assert boxes.count == 200
+    assert len(boxes.unique) == 2
+    assert boxes.overlaps(PERSON_BOX_SHIFTED, 5000, 0.6, 0)
+    assert not boxes.overlaps(DOG_BOX, 100, 0.6, 0)
+    assert not NonAnimalBoxes()
 
 
 def test_min_fraction_is_honoured():
@@ -205,6 +239,7 @@ def test_settings_defaults_survive_an_old_dict():
     again = ProcessingSettings.from_dict({"sample_rate": 2})
     assert again.person_shadow_enabled is True
     assert again.person_shadow_iou == 0.6
+    assert again.person_shadow_window == 0   # the whole clip
 
 
 def test_bbox_iou():

@@ -40,6 +40,44 @@ def _bbox_iou(a: Optional[List[float]], b: Optional[List[float]]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+class NonAnimalBoxes:
+    """Person/vehicle boxes the detector reported, indexed for the shadow test.
+
+    A person who sits still yields hundreds of near-identical boxes, so the
+    whole-clip test runs against a deduplicated list (boxes within IoU 0.95 of
+    one already kept are folded into it); the windowed test uses the per-frame
+    index.
+    """
+
+    DEDUP_IOU = 0.95
+
+    def __init__(self) -> None:
+        self.by_frame: Dict[int, List[List[float]]] = {}
+        self.unique: List[List[float]] = []
+        self.count = 0
+
+    def add(self, frame_idx: int, bbox) -> None:
+        box = list(bbox)
+        self.by_frame.setdefault(frame_idx, []).append(box)
+        self.count += 1
+        if not any(_bbox_iou(box, kept) >= self.DEDUP_IOU for kept in self.unique):
+            self.unique.append(box)
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+    def overlaps(self, bbox, frame_idx: int, iou_threshold: float, window: int) -> bool:
+        """Does ``bbox`` sit on a person/vehicle box? ``window`` <= 0 means
+        anywhere in the clip; otherwise only within that many raw frames."""
+        if window <= 0:
+            return any(_bbox_iou(bbox, other) >= iou_threshold for other in self.unique)
+        for f in range(frame_idx - window, frame_idx + window + 1):
+            for other in self.by_frame.get(f, ()):
+                if _bbox_iou(bbox, other) >= iou_threshold:
+                    return True
+        return False
+
+
 def _verified_write(path: "Path", write_fn, *, min_bytes: int = 1, label: str = "file") -> bool:
     """Run ``write_fn()`` then verify ``path`` exists with at least ``min_bytes``.
 
@@ -136,15 +174,18 @@ class ProcessingSettings:
     single_animal_mode: bool = False  # Aggressive merge: assume only 1 animal in video
 
     # Person-shadow filter. SpeciesNet sometimes labels a person "bird" or
-    # "rodent" for a frame or two, and those boxes sit exactly where it saw a
-    # person in the neighbouring frames. A detection is a "shadow" when its box
-    # overlaps a person/vehicle box from within ``person_shadow_window`` raw
-    # frames by at least ``person_shadow_iou``; a track that is mostly shadows
-    # is dropped before the species vote, and so is a per-frame species whose
-    # every detection was one.
+    # "rodent" — for a frame or two, or for ten seconds at a stretch — and
+    # those boxes sit exactly where it called the same object a person at
+    # another moment of the clip. A detection is a "shadow" when its box
+    # overlaps a person/vehicle box from the clip by at least
+    # ``person_shadow_iou``; ``person_shadow_window`` = 0 looks at the whole
+    # clip (a person and an animal never trade the exact same box within one
+    # event), > 0 restricts the match to that many raw frames either side. A
+    # track that is mostly shadows is dropped before the species vote, and so
+    # is a per-frame species whose every detection was one.
     person_shadow_enabled: bool = True
     person_shadow_iou: float = 0.6
-    person_shadow_window: int = 45
+    person_shadow_window: int = 0
     person_shadow_min_fraction: float = 0.5
     
     # Output settings
@@ -198,7 +239,7 @@ class ProcessingSettings:
             single_animal_mode=data.get("single_animal_mode", False),
             person_shadow_enabled=data.get("person_shadow_enabled", True),
             person_shadow_iou=data.get("person_shadow_iou", 0.6),
-            person_shadow_window=data.get("person_shadow_window", 45),
+            person_shadow_window=data.get("person_shadow_window", 0),
             person_shadow_min_fraction=data.get("person_shadow_min_fraction", 0.5),
             max_thumbnails=data.get("max_thumbnails", MAX_KEY_FRAMES_PER_SPECIES),
             thumbnail_cropped=data.get("thumbnail_cropped", True),
@@ -583,7 +624,7 @@ class ClipPostProcessor:
         filtered_count = 0
         all_frames_data: List[Tuple[int, any, List[Detection]]] = []  # For tracking
         processing_log: List[ProcessingLogEntry] = []
-        non_animal_boxes: Dict[int, List[List[float]]] = {}  # frame_idx -> person/vehicle boxes
+        non_animal_boxes = NonAnimalBoxes()  # person/vehicle boxes, for the shadow test
         
         while True:
             ret, frame = cap.read()
@@ -622,7 +663,7 @@ class ClipPostProcessor:
                         ))
                         filtered_count += 1
                         if reason.startswith(NON_ANIMAL_REASON_PREFIX) and det.bbox:
-                            non_animal_boxes.setdefault(frame_idx, []).append(list(det.bbox))
+                            non_animal_boxes.add(frame_idx, det.bbox)
                     
                     if tracker:
                         # ALWAYS update tracker, even with empty detections.
@@ -984,27 +1025,26 @@ class ClipPostProcessor:
         self,
         bbox: Optional[List[float]],
         frame_idx: Optional[int],
-        non_animal_boxes: Dict[int, List[List[float]]],
+        non_animal_boxes: NonAnimalBoxes,
     ) -> bool:
-        """True when an animal box overlaps a person/vehicle box that was seen
-        within ``person_shadow_window`` raw frames on either side."""
+        """True when an animal box overlaps a person/vehicle box from the clip
+        (the whole clip, or ``person_shadow_window`` raw frames either side)."""
         if not bbox or frame_idx is None or frame_idx < 0 or not non_animal_boxes:
             return False
+        return non_animal_boxes.overlaps(
+            bbox, frame_idx,
+            float(self.settings.person_shadow_iou),
+            int(self.settings.person_shadow_window),
+        )
+
+    def _shadow_scope(self) -> str:
         window = int(self.settings.person_shadow_window)
-        threshold = float(self.settings.person_shadow_iou)
-        for f in range(frame_idx - window, frame_idx + window + 1):
-            boxes = non_animal_boxes.get(f)
-            if not boxes:
-                continue
-            for other in boxes:
-                if _bbox_iou(bbox, other) >= threshold:
-                    return True
-        return False
+        return "anywhere in the clip" if window <= 0 else f"within {window} frames"
 
     def _drop_person_shadow_tracks(
         self,
         tracker: ObjectTracker,
-        non_animal_boxes: Dict[int, List[List[float]]],
+        non_animal_boxes: NonAnimalBoxes,
     ) -> Tuple[int, List[ProcessingLogEntry]]:
         """Remove tracks that are mostly a person's (or a vehicle's) shadow.
 
@@ -1028,7 +1068,7 @@ class ClipPostProcessor:
             species, confidence, _ = info.get_best_species()
             reason = (
                 f"person shadow: {shadows}/{total} detections sit on a person/vehicle box "
-                f"(IoU>={self.settings.person_shadow_iou}, within {self.settings.person_shadow_window} frames)"
+                f"(IoU>={self.settings.person_shadow_iou}, {self._shadow_scope()})"
             )
             LOGGER.info("Dropping track %d (%s): %s", track_id, species, reason)
             log_entries.append(ProcessingLogEntry(
@@ -1043,7 +1083,7 @@ class ClipPostProcessor:
         self,
         species_results: Dict[str, SpeciesResult],
         processing_log: List[ProcessingLogEntry],
-        non_animal_boxes: Dict[int, List[List[float]]],
+        non_animal_boxes: NonAnimalBoxes,
     ) -> List[str]:
         """Recount the per-frame (non-tracked) species votes without shadows.
 

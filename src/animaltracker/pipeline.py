@@ -1629,9 +1629,11 @@ class StreamWorker:
                             if delete_if_no_animal and no_animal_found:
                                 LOGGER.info(
                                     "FALSE POSITIVE CLEANUP: Post-processing found no real animal in clip for %s "
-                                    "(species_results=%d, tracks=%d, species=%s, detection_frames=%d/%d, min_required=%d, reptile_min_required=%d, raw_detections=%d) - deleting clip and skipping notification",
+                                    "(species_results=%d, tracks=%d, person_shadow_tracks=%d, species=%s, detection_frames=%d/%d, min_required=%d, reptile_min_required=%d, raw_detections=%d) - deleting clip and skipping notification",
                                     camera_id, len(result.species_results) if result.species_results else 0,
-                                    result.tracks_detected, selected_species_norm or "unknown",
+                                    result.tracks_detected,
+                                    (result.tracking_summary or {}).get("person_shadow_tracks", 0),
+                                    selected_species_norm or "unknown",
                                     detection_frame_count, result.frames_analyzed,
                                     min_detection_frames, min_reptile_detection_frames, result.raw_detections
                                 )

@@ -126,6 +126,7 @@ export function createStore(initial) {
      cameras      [] from /api/cameras
      timezone     server timezone label
      camerasError Error | null — the rail renders a diagnostic row from it
+     camerasLoaded true once /api/cameras has answered (or failed) at least once
      connected    false once a fetch has failed; the app bar says so
      route        { path, params }
      chrome       see above
@@ -139,6 +140,7 @@ export var store = createStore({
   cameras: [],
   timezone: '',
   camerasError: null,
+  camerasLoaded: false,
   connected: true,
   route: null,
   visible: true,

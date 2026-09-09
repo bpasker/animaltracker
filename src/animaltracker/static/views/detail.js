@@ -265,10 +265,17 @@ function buildTracks(clip, logData) {
   return out;
 }
 
+/* The post-processor records `total_frames`; `frames` is the older name. */
+function videoFrames(video) {
+  if (!video) return undefined;
+  if (video.frames !== undefined && video.frames !== null) return num(video.frames, 0);
+  if (video.total_frames !== undefined && video.total_frames !== null) return num(video.total_frames, 0);
+  return undefined;
+}
+
 function fallbackDuration(tracks, logData, fps) {
-  if (logData && logData.video && logData.video.frames && fps) {
-    return num(logData.video.frames, 0) / fps;
-  }
+  var frames = logData ? videoFrames(logData.video) : undefined;
+  if (frames && fps) return frames / fps;
   var max = 0;
   for (var i = 0; i < tracks.length; i++) {
     var e = tracks[i].end === null ? tracks[i].start : tracks[i].end;
@@ -1156,11 +1163,11 @@ function paintMetadata() {
     ['Started', (day ? longDate(day) + ' · ' : '') + clockTime(clip.time, { seconds: true }) +
       (t && t.offset ? ' ' + t.offset : '')],
     ['Age', timeAgo(clip.time)],
-    ['Duration', duration() ? durationClock(duration()) : (video && video.frames
-      ? durationClock(num(video.frames, 0) / (S.fps || 15)) : 'unknown')],
+    ['Duration', duration() ? durationClock(duration()) : (videoFrames(video)
+      ? durationClock(videoFrames(video) / (S.fps || 15)) : 'unknown')],
     ['Frame rate', (S.fps || 15) + ' fps'],
     ['Resolution', video && video.width ? video.width + ' × ' + video.height : 'unknown'],
-    ['Frames', video && video.frames !== undefined ? String(video.frames) : 'unknown'],
+    ['Frames', videoFrames(video) !== undefined ? String(videoFrames(video)) : 'unknown'],
     ['File size', fileSize(clip.size)],
     ['Tracks', String(S.tracks.length)],
     ['Path', clip.path]
@@ -1527,7 +1534,7 @@ function logRows() {
         msg: joinMeta(
           data.video.width && data.video.height ? data.video.width + '×' + data.video.height : null,
           data.video.fps !== undefined ? data.video.fps + ' fps' : null,
-          data.video.frames !== undefined ? plural(data.video.frames, 'frame') : null) });
+          videoFrames(data.video) !== undefined ? plural(videoFrames(data.video), 'frame') : null) });
     }
     if (data.settings) {
       var parts = [];

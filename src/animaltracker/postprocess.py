@@ -18,10 +18,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
-from .detector import BaseDetector, Detection, create_detector, cleanup_gpu_memory
+from .detector import BaseDetector, Detection, create_detector, cleanup_gpu_memory, NON_ANIMAL_REASON_PREFIX
 from .tracker import ObjectTracker, create_tracker
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _bbox_iou(a: Optional[List[float]], b: Optional[List[float]]) -> float:
+    """Intersection over union of two [x1, y1, x2, y2] boxes (0.0 when unusable)."""
+    try:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+    except (TypeError, ValueError):
+        return 0.0
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
 
 
 def _verified_write(path: "Path", write_fn, *, min_bytes: int = 1, label: str = "file") -> bool:
@@ -118,6 +134,18 @@ class ProcessingSettings:
     hierarchical_merge_gap: int = 120  # Max frame gap for hierarchical merge
     min_specific_detections: int = 2  # Min detections for specific track to absorb generic
     single_animal_mode: bool = False  # Aggressive merge: assume only 1 animal in video
+
+    # Person-shadow filter. SpeciesNet sometimes labels a person "bird" or
+    # "rodent" for a frame or two, and those boxes sit exactly where it saw a
+    # person in the neighbouring frames. A detection is a "shadow" when its box
+    # overlaps a person/vehicle box from within ``person_shadow_window`` raw
+    # frames by at least ``person_shadow_iou``; a track that is mostly shadows
+    # is dropped before the species vote, and so is a per-frame species whose
+    # every detection was one.
+    person_shadow_enabled: bool = True
+    person_shadow_iou: float = 0.6
+    person_shadow_window: int = 45
+    person_shadow_min_fraction: float = 0.5
     
     # Output settings
     max_thumbnails: int = MAX_KEY_FRAMES_PER_SPECIES
@@ -141,6 +169,10 @@ class ProcessingSettings:
             "hierarchical_merge_gap": self.hierarchical_merge_gap,
             "min_specific_detections": self.min_specific_detections,
             "single_animal_mode": self.single_animal_mode,
+            "person_shadow_enabled": self.person_shadow_enabled,
+            "person_shadow_iou": self.person_shadow_iou,
+            "person_shadow_window": self.person_shadow_window,
+            "person_shadow_min_fraction": self.person_shadow_min_fraction,
             "max_thumbnails": self.max_thumbnails,
             "thumbnail_cropped": self.thumbnail_cropped,
             "save_processing_log": self.save_processing_log,
@@ -164,6 +196,10 @@ class ProcessingSettings:
             hierarchical_merge_gap=data.get("hierarchical_merge_gap", 120),
             min_specific_detections=data.get("min_specific_detections", 2),
             single_animal_mode=data.get("single_animal_mode", False),
+            person_shadow_enabled=data.get("person_shadow_enabled", True),
+            person_shadow_iou=data.get("person_shadow_iou", 0.6),
+            person_shadow_window=data.get("person_shadow_window", 45),
+            person_shadow_min_fraction=data.get("person_shadow_min_fraction", 0.5),
             max_thumbnails=data.get("max_thumbnails", MAX_KEY_FRAMES_PER_SPECIES),
             thumbnail_cropped=data.get("thumbnail_cropped", True),
             save_processing_log=data.get("save_processing_log", True),
@@ -398,7 +434,12 @@ class ClipPostProcessor:
         self._save_processing_log(working_path, processing_log, tracking_summary, video_metadata)
         
         # Count unique tracks (animals) detected
-        tracks_detected = tracking_summary.get("total_tracks", 0) if tracking_summary else len(species_results)
+        # Tracks that resolved to an animal. (A person's shadow track is gone by
+        # now; anything else non-animal is counted in total_tracks only.)
+        if tracking_summary:
+            tracks_detected = tracking_summary.get("animal_tracks", tracking_summary.get("total_tracks", 0))
+        else:
+            tracks_detected = len(species_results)
         
         LOGGER.info(
             "Post-processing complete: %s -> %s (%.1f%% confidence, %d tracks, %d species found)",
@@ -441,6 +482,10 @@ class ClipPostProcessor:
         blank_frames = sum(1 for e in processing_log if e.event == "detector_filtered" and e.reason == "no_animal_detected")
         detection_frames = sum(1 for e in processing_log if e.event in ("tracked", "detection"))
         filtered_frames = sum(1 for e in processing_log if e.event == "detector_filtered" and e.reason != "no_animal_detected")
+        non_animal_frames = len({
+            e.frame_idx for e in processing_log
+            if e.event == "detector_filtered" and (e.reason or "").startswith(NON_ANIMAL_REASON_PREFIX)
+        })
         
         try:
             log_data = {
@@ -454,6 +499,7 @@ class ClipPostProcessor:
                     "frames_with_detections": detection_frames,
                     "frames_with_no_animal": blank_frames,
                     "frames_filtered_other": filtered_frames,
+                    "frames_with_non_animal": non_animal_frames,
                     "detection_rate_pct": round(100 * detection_frames / max(1, video_metadata.get("frames_to_analyze", 1)), 1) if video_metadata else 0,
                 },
                 "tracking_summary": tracking_summary,
@@ -510,6 +556,8 @@ class ClipPostProcessor:
         video_metadata = {
             "fps": fps,
             "total_frames": total_frames,
+            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0),
+            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0),
             "actual_sample_rate": actual_sample_rate,
             "effective_fps": effective_fps,
             "duration_seconds": total_frames / fps if fps > 0 else 0,
@@ -535,6 +583,7 @@ class ClipPostProcessor:
         filtered_count = 0
         all_frames_data: List[Tuple[int, any, List[Detection]]] = []  # For tracking
         processing_log: List[ProcessingLogEntry] = []
+        non_animal_boxes: Dict[int, List[List[float]]] = {}  # frame_idx -> person/vehicle boxes
         
         while True:
             ret, frame = cap.read()
@@ -572,6 +621,8 @@ class ClipPostProcessor:
                             bbox=det.bbox,
                         ))
                         filtered_count += 1
+                        if reason.startswith(NON_ANIMAL_REASON_PREFIX) and det.bbox:
+                            non_animal_boxes.setdefault(frame_idx, []).append(list(det.bbox))
                     
                     if tracker:
                         # ALWAYS update tracker, even with empty detections.
@@ -615,7 +666,23 @@ class ClipPostProcessor:
         
         # Build tracking summary
         tracking_summary = None
-        
+
+        # Person-shadow filter first, so no merge below can fold a shadow
+        # fragment into a real animal's track.
+        shadow_tracks = 0
+        if self.settings.person_shadow_enabled and non_animal_boxes:
+            if tracker and tracker.active_track_count > 0:
+                shadow_tracks, shadow_log = self._drop_person_shadow_tracks(tracker, non_animal_boxes)
+                processing_log.extend(shadow_log)
+            dropped_species = self._drop_person_shadow_species(species_results, processing_log, non_animal_boxes)
+            if dropped_species:
+                processing_log.append(ProcessingLogEntry(
+                    frame_idx=-1, event="person_shadow", species=", ".join(dropped_species),
+                    confidence=0.0,
+                    reason=(f"Dropped {len(dropped_species)} per-frame species whose every "
+                            f"detection sat on a person/vehicle box"),
+                ))
+
         # If tracking was used and we have tracked objects, build results from tracks
         if tracker and tracker.active_track_count > 0:
             # FIRST pass: Spatial merge - most reliable!
@@ -712,11 +779,23 @@ class ClipPostProcessor:
             )
             processing_log.extend(track_log)
             
+            tracking_summary["person_shadow_tracks"] = shadow_tracks
+
             if tracked_results:
                 LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
                            raw_detection_count, len(tracked_results))
                 return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker
-        
+            # Every track resolved to a non-animal. The tracker has explained
+            # each detection, so the per-frame votes below must not resurrect
+            # them as a species.
+            LOGGER.info("Tracking found %d object(s) but none is an animal", tracker.active_track_count)
+            return {}, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
+
+        if shadow_tracks:
+            # Every track was a person's shadow; leave that on record.
+            tracking_summary = {"total_tracks": 0, "animal_tracks": 0, "tracks": [],
+                                "person_shadow_tracks": shadow_tracks}
+
         # Fallback to non-tracked results
         return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
     
@@ -840,12 +919,15 @@ class ClipPostProcessor:
                 )
         
         # Get key frames and build track details
+        animal_tracks = 0
         for track_id, track_info in tracker.tracks.items():
             best_species_data = track_info.get_best_species()
             if not best_species_data or not best_species_data[0]:
                 continue
             
             best_species, best_conf, taxonomy = best_species_data
+            if best_species in species_results:
+                animal_tracks += 1
             
             # Collect all classifications for this track
             all_classifications = {}
@@ -891,8 +973,99 @@ class ClipPostProcessor:
                     frame, conf, bbox = best_frame_data
                     self._update_key_frames(result, frame, conf, bbox)
         
+        tracking_summary["animal_tracks"] = animal_tracks
         return species_results, log_entries, tracking_summary
     
+    # ------------------------------------------------------------------
+    # Person-shadow filter
+    # ------------------------------------------------------------------
+
+    def _is_person_shadow(
+        self,
+        bbox: Optional[List[float]],
+        frame_idx: Optional[int],
+        non_animal_boxes: Dict[int, List[List[float]]],
+    ) -> bool:
+        """True when an animal box overlaps a person/vehicle box that was seen
+        within ``person_shadow_window`` raw frames on either side."""
+        if not bbox or frame_idx is None or frame_idx < 0 or not non_animal_boxes:
+            return False
+        window = int(self.settings.person_shadow_window)
+        threshold = float(self.settings.person_shadow_iou)
+        for f in range(frame_idx - window, frame_idx + window + 1):
+            boxes = non_animal_boxes.get(f)
+            if not boxes:
+                continue
+            for other in boxes:
+                if _bbox_iou(bbox, other) >= threshold:
+                    return True
+        return False
+
+    def _drop_person_shadow_tracks(
+        self,
+        tracker: ObjectTracker,
+        non_animal_boxes: Dict[int, List[List[float]]],
+    ) -> Tuple[int, List[ProcessingLogEntry]]:
+        """Remove tracks that are mostly a person's (or a vehicle's) shadow.
+
+        Returns (tracks_removed, log_entries).
+        """
+        removed = 0
+        log_entries: List[ProcessingLogEntry] = []
+        min_fraction = float(self.settings.person_shadow_min_fraction)
+        for track_id in list(tracker.tracks.keys()):
+            info = tracker.tracks[track_id]
+            total = 0
+            shadows = 0
+            for c in info.classifications:
+                if not c.bbox:
+                    continue
+                total += 1
+                if self._is_person_shadow(c.bbox, c.frame_idx, non_animal_boxes):
+                    shadows += 1
+            if not total or shadows / total < min_fraction:
+                continue
+            species, confidence, _ = info.get_best_species()
+            reason = (
+                f"person shadow: {shadows}/{total} detections sit on a person/vehicle box "
+                f"(IoU>={self.settings.person_shadow_iou}, within {self.settings.person_shadow_window} frames)"
+            )
+            LOGGER.info("Dropping track %d (%s): %s", track_id, species, reason)
+            log_entries.append(ProcessingLogEntry(
+                frame_idx=-1, event="track_filtered", species=species,
+                confidence=confidence, track_id=track_id, reason=reason,
+            ))
+            del tracker.tracks[track_id]
+            removed += 1
+        return removed, log_entries
+
+    def _drop_person_shadow_species(
+        self,
+        species_results: Dict[str, SpeciesResult],
+        processing_log: List[ProcessingLogEntry],
+        non_animal_boxes: Dict[int, List[List[float]]],
+    ) -> List[str]:
+        """Recount the per-frame (non-tracked) species votes without shadows.
+
+        Returns the species that had no detection left and were removed.
+        """
+        kept: Dict[str, int] = {}
+        for entry in processing_log:
+            if entry.event != "accepted" or entry.frame_idx < 0 or not entry.bbox:
+                continue
+            if self._is_person_shadow(entry.bbox, entry.frame_idx, non_animal_boxes):
+                continue
+            kept[entry.species] = kept.get(entry.species, 0) + 1
+        dropped: List[str] = []
+        for species in list(species_results.keys()):
+            count = kept.get(species, 0)
+            if count == 0:
+                del species_results[species]
+                dropped.append(species)
+            else:
+                species_results[species].count = count
+        return dropped
+
     def _process_detections_with_log(
         self,
         detections: List[Detection],

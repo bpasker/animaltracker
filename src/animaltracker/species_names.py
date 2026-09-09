@@ -7,6 +7,12 @@ The mapping is hierarchical - it checks for full matches first, then partial mat
 from typing import Optional
 import re
 
+# Labels SpeciesNet emits for things that are not wildlife. They are never a
+# clip's species, but they are real observations: the post-processor keeps
+# their boxes so that an animal label sitting exactly where a person was seen
+# a moment earlier can be recognised as that person (see postprocess.py).
+NON_ANIMAL_LABELS = frozenset({"person", "human", "vehicle"})
+
 # Mapping from technical names to common names
 # Format: lowercase key -> display name
 # Keys can be full species names or partial matches (family/genus level)

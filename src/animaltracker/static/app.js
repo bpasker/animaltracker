@@ -362,8 +362,13 @@ function renderRailCameras(shell) {
   label.textContent = cams.length ? String(cams.length) : '';
 
   if (!cams.length) {
-    clear(list).appendChild(h('p.savedviews__empty',
-      { text: 'No cameras are configured. Add one in Settings.' }));
+    /* Until /api/cameras has answered once, an empty list means "not loaded
+       yet", not "none configured" — a background tab never polls at all. */
+    clear(list).appendChild(h('p.savedviews__empty', {
+      text: store.get('camerasLoaded')
+        ? 'No cameras are configured. Add one in Settings.'
+        : 'Checking camera health…'
+    }));
     return;
   }
 
@@ -562,8 +567,9 @@ function openCameraSheet() {
   var cams = store.get('cameras') || [];
   var body = h('div.stack');
   if (!cams.length) {
-    body.appendChild(h('p.t-sm.t-3',
-      'No cameras are configured, so nothing can produce clips. Add one in Settings.'));
+    body.appendChild(h('p.t-sm.t-3', store.get('camerasLoaded')
+      ? 'No cameras are configured, so nothing can produce clips. Add one in Settings.'
+      : 'Checking camera health…'));
   }
   cams.forEach(function (c) {
     var w = cameraWords(c);
@@ -773,7 +779,7 @@ function boot() {
   }
   store.select(['chrome', 'railCollapsed'], renderChrome);
 
-  store.select(['cameras', 'camerasError'], function () { renderRailCameras(shell); });
+  store.select(['cameras', 'camerasError', 'camerasLoaded'], function () { renderRailCameras(shell); });
   store.select(['system'], function () { renderRailFoot(shell); });
   store.select(['savedViews'], function () { renderSavedViews(shell); });
 
@@ -851,11 +857,12 @@ function boot() {
       store.set({
         cameras: res.cameras || [],
         timezone: res.timezone || '',
-        camerasError: null
+        camerasError: null,
+        camerasLoaded: true
       });
     }, function (err) {
       if (api.isAbort(err)) return;
-      store.set({ camerasError: err });
+      store.set({ camerasError: err, camerasLoaded: true });
     });
   }, CAMERA_POLL_MS);
 

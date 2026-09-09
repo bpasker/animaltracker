@@ -4452,7 +4452,9 @@ body.is-locked{
 .trackchips{ display:flex;flex-wrap:wrap;gap:var(--s-2); }
 .trackchip{
   position:relative;
-  display:inline-flex;align-items:center;gap:var(--s-3);
+  /* Wrap rather than shrink: in a narrow column the species name would
+     otherwise be squeezed to one character per line. */
+  display:inline-flex;flex-wrap:wrap;align-items:center;gap:var(--s-1) var(--s-3);
   min-height:var(--tap);
   padding:var(--s-2) var(--s-3) var(--s-2) var(--s-4);
   border:1px solid var(--c-line-control);border-radius:var(--r-sm);

@@ -112,9 +112,17 @@ function clipLabel(clip) {
   return joinMeta(clip.species || 'Unclassified', clockTime(clip.time), clip.camera);
 }
 
+/** The frame that shows what the card says: the server's pick, else the first
+    thumbnail whose track was classified as the clip's species, else the first. */
 function thumbUrl(clip) {
   if (clip.thumbnail) return clip.thumbnail;
-  var t = clip.thumbnails && clip.thumbnails[0];
+  var list = clip.thumbnails || [];
+  var t = null;
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i];
+    if (c && c.species === clip.species && (c.url || c.path)) { t = c; break; }
+  }
+  if (!t) t = list[0];
   if (t && t.url) return t.url;
   if (t && t.path) return api.thumbUrl(t.path);
   return null;
@@ -133,7 +141,7 @@ function normaliseDayClip(raw, date) {
     size_mb: raw.size_mb,
     confidence: raw.confidence,
     thumbnails: raw.thumbnails || [],
-    thumbnail: (raw.thumbnails && raw.thumbnails[0] && raw.thumbnails[0].url) || null
+    thumbnail: raw.thumbnail || null
   };
 }
 

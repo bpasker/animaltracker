@@ -483,6 +483,9 @@ def test_get_clips_for_date_single_clip_full_shape(server):
         "size_mb": 3.0,
         "filename": "1712775909_deer.mp4",
         "thumbnails": [{"url": "/clips/cam2/a_thumb_deer.jpg", "species": "Deer"}],
+        # No track was classified as the clip's own species, so the card
+        # falls back to the first track's frame.
+        "thumbnail": "/clips/cam2/a_thumb_deer.jpg",
     }
     # 'date' and 'size' from the scan record are not carried through.
     assert "date" not in got and "size" not in got

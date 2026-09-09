@@ -184,10 +184,11 @@ def test_clip_species_with_apostrophe_and_unicode_survives(server, clips_dir):
 
 
 # --------------------------------------------------------------------------
-# time / date come from st_mtime
+# time / date come from the filename epoch (the event's first detection);
+# st_mtime is the fallback for files without one
 # --------------------------------------------------------------------------
 
-def test_clip_time_comes_from_st_mtime(server, clips_dir):
+def test_clip_time_is_timezone_aware(server, clips_dir):
     clip = write_file(clips_dir / "cam1" / "2024" / "05" / "17" / "1715900000_deer.mp4")
     set_mtime(clip, T_2024_05_17)
 
@@ -198,24 +199,36 @@ def test_clip_time_comes_from_st_mtime(server, clips_dir):
     assert result["time"].tzinfo is web_mod.CENTRAL_TZ
 
 
-def test_changing_mtime_changes_reported_time_and_date(server, clips_dir):
+def test_clip_time_is_the_event_start_not_the_transcode_end(server, clips_dir):
+    # The epoch prefix is the first detection. st_mtime is when the transcode
+    # finished — minutes later for a long event — and used to be shown as the
+    # clip's time, so a 3-minute visit appeared to start when it ended.
+    clip = write_file(clips_dir / "cam1" / "2024" / "05" / "17" / "1715900000_deer.mp4")
+    set_mtime(clip, T_2024_05_17 + 187)
+
+    (result,) = server._scan_recordings()
+
+    assert result["time"].timestamp() == pytest.approx(T_2024_05_17)
+    assert result["date"] == result["time"].strftime("%Y-%m-%d")
+
+
+def test_a_later_mtime_does_not_move_a_clip_that_carries_an_epoch(server, clips_dir):
+    # A re-encode, a copy or a reanalysis touches the file; the event did not move.
     clip = write_file(clips_dir / "cam1" / "2024" / "05" / "17" / "1715900000_deer.mp4")
 
     set_mtime(clip, T_2024_05_17)
     first = server._scan_recordings()[0]
 
-    set_mtime(clip, T_OLDER)
+    set_mtime(clip, T_2024_05_17 + 30 * 86400)
     second = server._scan_recordings()[0]
 
-    assert first["time"] != second["time"]
-    assert second["time"].timestamp() == pytest.approx(T_OLDER)
-    assert second["date"] == second["time"].strftime("%Y-%m-%d")
+    assert first["time"] == second["time"]
+    assert second["time"].timestamp() == pytest.approx(T_2024_05_17)
 
 
 def test_date_ignores_year_month_day_directories(server, clips_dir):
-    # QUIRK: the y/m/d directory layout is decorative — 'date' is derived from
-    # st_mtime, not from the path. A clip filed under 1999/01/01 but touched
-    # today reports today. Asserted as-is to detect rewrite drift.
+    # The y/m/d directory layout is decorative — 'date' is derived from the
+    # clip's own timestamp, not from the path.
     clip = write_file(clips_dir / "cam1" / "1999" / "01" / "01" / "1715900000_deer.mp4")
     set_mtime(clip, T_2024_05_17)
 
@@ -228,9 +241,27 @@ def test_date_ignores_year_month_day_directories(server, clips_dir):
     assert not result["date"].startswith("1999")
 
 
-def test_date_ignores_timestamp_embedded_in_filename(server, clips_dir):
-    # QUIRK: the leading epoch in the filename is never parsed for the date.
+def test_time_comes_from_the_filename_epoch_even_when_mtime_differs(server, clips_dir):
     clip = write_file(clips_dir / "cam1" / "1600000000_deer.mp4")
+    set_mtime(clip, T_2024_05_17)
+
+    (result,) = server._scan_recordings()
+
+    assert result["time"].timestamp() == pytest.approx(T_OLDER)
+
+
+def test_mtime_is_the_fallback_when_the_filename_has_no_epoch(server, clips_dir):
+    clip = write_file(clips_dir / "cam1" / "2024" / "05" / "17" / "imported_deer.mp4")
+    set_mtime(clip, T_OLDER)
+
+    (result,) = server._scan_recordings()
+
+    assert result["time"].timestamp() == pytest.approx(T_OLDER)
+
+
+def test_mtime_is_the_fallback_for_an_epoch_later_than_the_file(server, clips_dir):
+    # A prefix later than the file's own mtime cannot be an event start.
+    clip = write_file(clips_dir / "cam1" / "2024" / "05" / "17" / "4102444800_deer.mp4")
     set_mtime(clip, T_2024_05_17)
 
     (result,) = server._scan_recordings()

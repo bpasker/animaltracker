@@ -175,9 +175,8 @@ def test_path_filename_camera_and_size_fields(server):
     assert detail["camera"] == "cam1"
     assert detail["size"] == 2048
     assert detail["size_mb"] == 2048 / (1024 * 1024)
-    assert detail["time"] == datetime.fromtimestamp(
-        clip.stat().st_mtime, tz=web_mod.CENTRAL_TZ
-    )
+    # The time is the event start carried in the filename, not the mtime.
+    assert detail["time"] == datetime.fromtimestamp(1766587074, tz=web_mod.CENTRAL_TZ)
 
 
 def test_camera_is_unknown_for_clip_at_clips_root(server):

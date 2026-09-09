@@ -11,6 +11,8 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from .species_names import NON_ANIMAL_LABELS
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -44,6 +46,13 @@ class Detection:
     bbox: List[float]  # [x1, y1, x2, y2] pixel coordinates
     taxonomy: Optional[str] = None  # For SpeciesNet: full taxonomy path
     track_id: Optional[int] = None  # Persistent ID assigned by ObjectTracker (None until tracked)
+
+
+# Reason prefix the SpeciesNet backend uses when it reports a person or a
+# vehicle in its ``return_filtered`` list: "non_animal:person", "non_animal:vehicle".
+# They are not detections (nothing tracks them) but the post-processor reads
+# their boxes to recognise an animal label that is really that person.
+NON_ANIMAL_REASON_PREFIX = "non_animal:"
 
 
 def _is_edge_anchored_elongated_bbox(bbox: List[float], frame_shape) -> bool:
@@ -761,16 +770,17 @@ class SpeciesNetDetector(BaseDetector):
                                 species_clean, score, required_conf)
                 continue
             
-            # Skip vehicle detections (already handled blank/unknown above)
-            if species_clean == "vehicle":
-                continue
+            # Map common SpeciesNet labels to simpler names
+            display_species = self._simplify_species_name(species)
             
             # Extract bounding box from detections if available
             bbox = [0.0, 0.0, 1.0, 1.0]  # Default to full frame
             raw_detections = pred.get("detections", [])
             if raw_detections:
-                # Use the highest confidence detection bbox
-                top_det = max(raw_detections, key=lambda d: d.get("conf", 0))
+                # Prefer the MegaDetector box whose class matches the frame's
+                # label, so a "canidae" frame carries the dog's box even when
+                # the person walking it scored higher.
+                top_det = self._pick_detection_box(raw_detections, display_species)
                 # SpeciesNet bbox format: [xmin, ymin, width, height] normalized
                 if "bbox" in top_det:
                     bx, by, bw, bh = top_det["bbox"]
@@ -782,9 +792,6 @@ class SpeciesNetDetector(BaseDetector):
                         (bx + bw) * w,
                         (by + bh) * h
                     ]
-            
-            # Map common SpeciesNet labels to simpler names
-            display_species = self._simplify_species_name(species)
             
             # Double-check: skip blank/unknown/generic after simplification too
             skip_display = ("blank", "unknown", "empty", "no cv result", "no_cv_result")
@@ -804,6 +811,20 @@ class SpeciesNetDetector(BaseDetector):
                     ), "UUID-like identifier"))
                 continue
             
+            # People and vehicles are not wildlife, but they are not noise
+            # either: the post-processor needs their boxes to recognise an
+            # animal label that is really a person (SpeciesNet occasionally
+            # calls a seated person a bird or a rodent for a frame or two).
+            # This has to run BEFORE the regional blocklist, which lists
+            # primates and would otherwise discard every human as "exotic".
+            non_animal = self._non_animal_label(display_species) or self._non_animal_label(species_clean)
+            if non_animal:
+                if return_filtered:
+                    filtered_detections.append((Detection(
+                        species=non_animal, confidence=score, bbox=bbox, taxonomy=species
+                    ), f"{NON_ANIMAL_REASON_PREFIX}{non_animal}"))
+                continue
+
             # Geographic filter: reject species impossible for configured region
             if self._is_exotic_species(display_species, species):
                 LOGGER.debug("Filtering exotic species '%s' (impossible in %s)", 
@@ -836,6 +857,42 @@ class SpeciesNetDetector(BaseDetector):
             return detections, filtered_detections
         return detections
     
+    @staticmethod
+    def _non_animal_label(display_name: str) -> Optional[str]:
+        """Canonical non-animal label ("person" or "vehicle") for a SpeciesNet
+        display name, or None when the name is an animal."""
+        normalized = str(display_name or "").lower().strip().replace(" ", "_").replace("-", "_")
+        if normalized in ("person", "human", "homo_sapiens", "people"):
+            return "person"
+        if normalized in NON_ANIMAL_LABELS:
+            return normalized
+        return None
+
+    @staticmethod
+    def _pick_detection_box(raw_detections: list, display_species: str) -> dict:
+        """Choose the MegaDetector detection a frame-level label refers to.
+
+        SpeciesNet gives one label per frame but several boxes. The label is
+        about the animal when it names one and about the person when it says
+        human, so the box comes from the matching MegaDetector class
+        ("1" animal, "2" human, "3" vehicle). The most confident box of any
+        class is the fallback when no box has the wanted class.
+        """
+        non_animal = SpeciesNetDetector._non_animal_label(display_species)
+        if non_animal == "person":
+            wanted = {"2", "human", "person"}
+        elif non_animal == "vehicle":
+            wanted = {"3", "vehicle"}
+        else:
+            wanted = {"1", "animal"}
+        matching = [
+            d for d in raw_detections
+            if str(d.get("category", "")).lower() in wanted
+            or str(d.get("label", "")).lower() in wanted
+        ]
+        pool = matching or raw_detections
+        return max(pool, key=lambda d: d.get("conf", 0))
+
     def _is_exotic_species(self, display_name: str, taxonomy: str) -> bool:
         """Check if a species is impossible for the configured region.
         

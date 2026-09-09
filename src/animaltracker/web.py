@@ -16,6 +16,43 @@ from .species_names import get_common_name, format_species_display, get_species_
 # Server's timezone (configurable or auto-detected)
 import time as _time
 
+# Automated clips are named "<epoch>_<species>.mp4"; the epoch is the event's
+# first detection.
+_CLIP_EPOCH_RE = re.compile(r'^(\d{9,10})_')
+
+
+def clip_start_time(clip_file: Path, stat) -> datetime:
+    """When a clip's event began, as an aware datetime in the display zone.
+
+    The filename epoch is the first detection. st_mtime is when the transcode
+    finished — the END of the event plus encoding time, minutes later for a
+    long event — so it is only the fallback for files without an epoch prefix
+    (manual clips, imports).
+    """
+    match = _CLIP_EPOCH_RE.match(clip_file.name)
+    if match:
+        epoch = int(match.group(1))
+        # Reject garbage prefixes: before 2001, or later than the file itself
+        # (allowing a day of clock skew between the camera host and storage).
+        if 1_000_000_000 <= epoch <= stat.st_mtime + 86400:
+            return datetime.fromtimestamp(epoch, tz=CENTRAL_TZ)
+    return datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ)
+
+
+def primary_thumbnail(clip: dict):
+    """URL of the thumbnail that shows what the card says.
+
+    Thumbnails are one per track, in track order, and the first track is often
+    a generic "Animal" fragment or a different visitor. Prefer the first track
+    that was classified as the clip's own species; fall back to the first.
+    """
+    thumbs = clip.get('thumbnails') or []
+    species = clip.get('species')
+    for thumb in thumbs:
+        if thumb.get('species') == species and thumb.get('url'):
+            return thumb['url']
+    return thumbs[0].get('url') if thumbs else None
+
 def _get_timezone(configured_tz: str = None):
     """Get timezone - use configured value if provided, otherwise auto-detect.
 
@@ -1925,12 +1962,13 @@ class WebServer:
                 # Find associated thumbnails
                 thumbnails = self._get_thumbnails_for_clip(clip_file)
                 
+                when = clip_start_time(clip_file, stat)
                 clips.append({
                     'path': str(rel_path),
                     'camera': cam_dir.name,
-                    'date': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ).strftime('%Y-%m-%d'),
+                    'date': when.strftime('%Y-%m-%d'),
                     'filename': clip_file.name,
-                    'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
+                    'time': when,
                     'size': stat.st_size,
                     'species': species_display,
                     'raw_species': raw_species,
@@ -2173,6 +2211,10 @@ class WebServer:
             
             # Build clip response object
             clip_hour = clip['time'].hour
+            day_thumbs = [
+                {'url': f"/clips/{t['path']}", 'species': t['species']}
+                for t in clip.get('thumbnails', [])
+            ]
             clip_data = {
                 'path': clip['path'],
                 'camera': clip['camera'],
@@ -2184,10 +2226,8 @@ class WebServer:
                 'species_icon': get_species_icon(clip.get('raw_species', 'unknown')),
                 'size_mb': round(clip['size'] / (1024 * 1024), 2),
                 'filename': clip['filename'],
-                'thumbnails': [
-                    {'url': f"/clips/{t['path']}", 'species': t['species']}
-                    for t in clip.get('thumbnails', [])
-                ]
+                'thumbnails': day_thumbs,
+                'thumbnail': primary_thumbnail({'species': clip_species, 'thumbnails': day_thumbs}),
             }
             filtered.append(clip_data)
             
@@ -2236,7 +2276,7 @@ class WebServer:
             'size': clip['size'],
             'size_mb': round(clip['size'] / (1024 * 1024), 2),
             'thumbnails': clip.get('thumbnails', []),
-            'thumbnail': (clip.get('thumbnails') or [{}])[0].get('url'),
+            'thumbnail': primary_thumbnail(clip),
         }
 
     def _filter_clips(self, clips: list, query: dict) -> list:
@@ -7401,7 +7441,7 @@ class WebServer:
             'camera': camera,
             'species': species_display,
             'raw_species': raw_species,
-            'time': datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ),
+            'time': clip_start_time(clip_path, stat),
             'size': stat.st_size,
             'size_mb': stat.st_size / (1024 * 1024),
             'thumbnails': thumbnails,

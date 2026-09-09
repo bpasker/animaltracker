@@ -201,6 +201,27 @@ _HTTP_EXCLUDE_PATTERNS = [
 ]
 _HTTP_EXCLUDE_RE = [re.compile(p, re.IGNORECASE) for p in _HTTP_EXCLUDE_PATTERNS]
 
+# Level and logger prefix the app puts on every line: the current
+# 'LEVEL name: message' form and the older 'LEVEL:name:message' form (journal
+# entries written before the app tagged stderr lines with a syslog priority
+# carry the old form and are all priority 6). Type filters run on the message
+# *body* only: the logger name 'animaltracker.*' would otherwise satisfy the
+# 'track' pattern on every single line.
+_APP_LINE_RE = re.compile(
+    r'^(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)'
+    r'(?::(?P<logger_old>[A-Za-z_][\w.]*):|\s(?P<logger>[A-Za-z_][\w.]*):\s?)'
+)
+# The same prefix as a PCRE fragment for `journalctl --grep`. Possessive (?+):
+# once the prefix is consumed the body search cannot backtrack into it, so
+# 'track' cannot match inside 'animaltracker'.
+_JOURNAL_PREFIX_PCRE = r'^(?:(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)(?::[\w.]+:| [\w.]+: ?))?+'
+# Timestamped app-log file line: '[2026-09-09 06:19:31,477] LEVEL name: message'.
+_FILE_LINE_RE = re.compile(r'^\[[^\]]*\]\s+(?=(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s)')
+_LEVEL_NAME_TO_KEY = {
+    'DEBUG': 'debug', 'INFO': 'info', 'WARNING': 'warning',
+    'ERROR': 'error', 'CRITICAL': 'error',
+}
+
 _LOG_TYPE_FILTERS_RAW = {
     'all': None,
     'no-http': {'exclude': _HTTP_EXCLUDE_PATTERNS},
@@ -210,14 +231,22 @@ _LOG_TYPE_FILTERS_RAW = {
     },
     'detection': {
         'include': [r'detect', r'species', r'confidence', r'infer', r'YOLO', r'SpeciesNet', r'\[REALTIME\]'],
+        'loggers': ['animaltracker.detector'],
         'exclude': _HTTP_EXCLUDE_PATTERNS,
     },
     'tracking': {
-        'include': [r'track', r'ByteTrack', r'lost_buffer', r'merge'],
+        # Word-bounded so 'track' cannot match inside a path such as
+        # /opt/speciesnet/animaltracker/storage/... in the body.
+        'include': [r'\btrack(?:s|ed|er|ers|ing)?\b', r'ByteTrack', r'lost_buffer',
+                    r'\bmerg(?:e|ed|es|ing)\b'],
+        'loggers': ['animaltracker.tracker'],
         'exclude': _HTTP_EXCLUDE_PATTERNS,
     },
     'ptz': {
-        'include': [r'ptz', r'PTZ', r'\[MOVE', r'\[MODE_CHANGE', r'\[TRACKING', r'\[COORD', r'\[OFFSET', r'patrol', r'preset'],
+        'include': [r'ptz', r'\[MOVE', r'\[MODE_CHANGE', r'\[TRACKING', r'\[COORD', r'\[OFFSET',
+                    r'patrol', r'preset'],
+        'loggers': ['ptz.decisions', 'animaltracker.ptz_tracker', 'animaltracker.onvif_client',
+                    'animaltracker.ptz_calibration', 'animaltracker.ptz_visual_calibration'],
         'exclude': _HTTP_EXCLUDE_PATTERNS,
     },
     'events': {
@@ -226,9 +255,13 @@ _LOG_TYPE_FILTERS_RAW = {
     },
     'clips': {
         'include': [r'clip', r'recording', r'write_clip', r'storage', r'\.mp4'],
+        'loggers': ['animaltracker.storage', 'animaltracker.clip_buffer'],
         'exclude': _HTTP_EXCLUDE_PATTERNS,
     },
     'errors': {
+        # By level first (an ERROR line's body rarely says "error"), then the
+        # words, which also catch FFmpeg/OpenCV lines that carry no level.
+        'levels': ['error', 'warning'],
         'include': [r'error', r'warning', r'failed', r'exception', r'traceback'],
         'exclude': _HTTP_EXCLUDE_PATTERNS,
     },
@@ -242,19 +275,68 @@ for _name, _cfg in _LOG_TYPE_FILTERS_RAW.items():
     _LOG_TYPE_FILTERS_COMPILED[_name] = {
         'include': [re.compile(p, re.IGNORECASE) for p in _cfg.get('include', [])] or None,
         'exclude': [re.compile(p, re.IGNORECASE) for p in _cfg.get('exclude', [])] or None,
+        'loggers': frozenset(_cfg.get('loggers', [])),
+        'levels': frozenset(_cfg.get('levels', [])),
     }
+
+# journalctl --grep for the level filter. Not -p: entries from before the
+# app tagged stderr lines with a priority are all priority 6, so the level
+# has to come from the prefix. systemd's own failure notices carry no prefix.
+_SYSTEMD_FAILURE_PCRE = r'Main process exited|Failed with result'
+_LEVEL_GREP = {
+    'error': r'^(?:ERROR|CRITICAL)[: ]|' + _SYSTEMD_FAILURE_PCRE,
+    'warning': r'^(?:WARNING|ERROR|CRITICAL)[: ]|' + _SYSTEMD_FAILURE_PCRE,
+}
 
 # Timestamp parsers used by file-log fallback.
 _TS_FULL_RE = re.compile(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})')
 _TS_TIME_RE = re.compile(r'(\d{2}:\d{2}:\d{2})')
-# Level name at the start of an app line, in the current 'LEVEL name: ' form
-# or the older 'LEVEL:name:' form (journal entries written before the app
-# tagged stderr lines with a syslog priority are all priority 6).
-_LEGACY_LEVEL_RE = re.compile(r'^(ERROR|CRITICAL|WARNING)[: ]')
 
 
-def _matches_log_filter(message: str, filter_type: str) -> bool:
-    """Apply pre-compiled include/exclude filter patterns to a single log message."""
+def _classify_log_line(text, priority=None):
+    """Split one log line into ``(level, logger, body)``.
+
+    ``level`` is debug/info/warning/error. It comes from the app's own prefix
+    when the line has one -- the truth for journal entries whose priority
+    predates the prefix -- and otherwise from the journal ``priority``
+    (systemd's own notices, FFmpeg/OpenCV lines written straight to stderr).
+    For file lines without a prefix the old keyword heuristic applies.
+    ``logger`` is '' for lines without a prefix; ``body`` has the prefix (and
+    a file line's timestamp) removed.
+    """
+    if text.startswith('['):
+        m = _FILE_LINE_RE.match(text)
+        if m:
+            text = text[m.end():]
+    m = _APP_LINE_RE.match(text)
+    if m:
+        return (
+            _LEVEL_NAME_TO_KEY[m.group('level')],
+            m.group('logger') or m.group('logger_old') or '',
+            text[m.end():],
+        )
+    if priority is not None:
+        if priority <= 3:
+            level = 'error'
+        elif priority <= 4:
+            level = 'warning'
+        elif priority >= 7:
+            level = 'debug'
+        else:
+            level = 'info'
+    else:
+        lower = text.lower()
+        level = 'error' if 'error' in lower else ('warning' if 'warning' in lower else 'info')
+    return level, '', text
+
+
+def _matches_log_filter(message, filter_type, logger='', level='info'):
+    """Apply the type filter to one line.
+
+    ``message`` is the body without the app's level/logger prefix, ``logger``
+    the prefix's logger name ('' when there was none) and ``level`` the
+    debug/info/warning/error key from :func:`_classify_log_line`.
+    """
     cfg = _LOG_TYPE_FILTERS_COMPILED.get(filter_type)
     if cfg is None:
         return True
@@ -264,13 +346,47 @@ def _matches_log_filter(message: str, filter_type: str) -> bool:
             if pat.search(message):
                 return False
     includes = cfg.get('include')
-    if includes is None:
-        # Only excludes defined → pass everything not excluded.
+    if includes is None and not cfg['loggers'] and not cfg['levels']:
+        # Only excludes defined -> pass everything not excluded.
         return True
-    for pat in includes:
+    if logger and logger in cfg['loggers']:
+        return True
+    if level in cfg['levels']:
+        return True
+    for pat in includes or ():
         if pat.search(message):
             return True
     return False
+
+
+def _journal_grep_pattern(log_type, level):
+    """PCRE for ``journalctl --grep`` admitting every entry the Python filters
+    could accept (a superset), so the journal does the bulk of the filtering
+    and ``-n`` counts matching entries rather than the noise around them.
+
+    A sparse type (tracking lines from one event a day) used to be crowded
+    out: ``-n 8000`` fetched the newest 8000 lines of the window *before*
+    filtering, and on a busy day that was a few hours of [PERF] lines. When
+    both a type and a level are set only the type is pushed down; the level
+    is enforced in Python. Returns None when nothing useful can be pushed.
+    """
+    cfg = _LOG_TYPE_FILTERS_RAW.get(log_type)
+    if cfg and (cfg.get('include') or cfg.get('loggers') or cfg.get('levels')):
+        parts = []
+        loggers = cfg.get('loggers') or []
+        if loggers:
+            alt = '|'.join(re.escape(name) for name in loggers)
+            parts.append(r'^(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)[: ](?:%s)[: ]' % alt)
+        levels = cfg.get('levels') or ()
+        if levels:
+            names = [n for n, k in _LEVEL_NAME_TO_KEY.items() if k in levels]
+            parts.append(r'^(?:%s)[: ]' % '|'.join(names))
+            parts.append(_SYSTEMD_FAILURE_PCRE)
+        includes = cfg.get('include') or []
+        if includes:
+            parts.append(_JOURNAL_PREFIX_PCRE + r'.*?(?:%s)' % '|'.join('(?:%s)' % p for p in includes))
+        return '|'.join(parts)
+    return _LEVEL_GREP.get(level)
 
 
 class WebServer:
@@ -7648,16 +7764,14 @@ class WebServer:
             ]
 
             # Add time range - either custom or relative
+            relative_window = False
             if time_range_start and time_range_end:
                 # For custom time range, fetch ALL logs in the range (no -n limit)
                 # We'll apply the limit after filtering
                 cmd.extend(['--since', time_range_start.strftime('%Y-%m-%d %H:%M:%S')])
                 cmd.extend(['--until', time_range_end.strftime('%Y-%m-%d %H:%M:%S')])
             else:
-                # For relative time (last N minutes), use -n to limit fetch size
-                # Fetch more logs when filtering to ensure we get enough matches
-                fetch_limit = max(limit * 2, 500) if log_type == 'all' else max(limit * 4, 2000)
-                cmd.extend(['-n', str(fetch_limit)])
+                relative_window = True
                 cmd.extend(['--since', f'{minutes} minutes ago'])
 
             # Single unified service runs the whole pipeline. Per-camera
@@ -7665,34 +7779,52 @@ class WebServer:
             # cameras log to the same systemd unit.
             cmd.extend(['-u', 'animaltracker.service'])
 
-            # Add priority filter
-            if level == 'error':
-                cmd.extend(['-p', 'err'])
-            elif level == 'warning':
-                cmd.extend(['-p', 'warning'])
+            # Push the type/level filter down into journalctl (a superset of
+            # what the Python filters accept), so that with a relative window
+            # -n counts matching entries and a sparse type is not crowded out
+            # by the periodic lines around it.
+            grep = _journal_grep_pattern(log_type, level)
+            plain_cmd = list(cmd)
+            if grep:
+                cmd.extend(['--grep', grep, '--case-sensitive=false'])
+            if relative_window:
+                if grep:
+                    fetch_limit = max(limit * 2, 1000)
+                elif log_type == 'all':
+                    fetch_limit = max(limit * 2, 500)
+                else:
+                    fetch_limit = max(limit * 4, 2000)
+                cmd.extend(['-n', str(fetch_limit)])
+                plain_cmd.extend(['-n', str(max(limit * 4, 2000))])
 
-            LOGGER.debug("Running journalctl: %s", ' '.join(cmd))
-            # Run journalctl asynchronously so we don't block the event loop
-            # while it executes (can take seconds on busy systems).
-            try:
+            async def _run_journalctl(argv):
+                LOGGER.debug("Running journalctl: %s", ' '.join(argv))
+                # Run journalctl asynchronously so we don't block the event loop
+                # while it executes (can take seconds on busy systems).
                 proc = await asyncio.create_subprocess_exec(
-                    *cmd,
+                    *argv,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-            except FileNotFoundError:
-                raise
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=10)
-            except asyncio.TimeoutError:
                 try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                raise
-            stdout = stdout_b.decode('utf-8', errors='replace')
-            stderr = stderr_b.decode('utf-8', errors='replace')
-            returncode = proc.returncode if proc.returncode is not None else -1
+                    out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=10)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    raise
+                code = proc.returncode if proc.returncode is not None else -1
+                return (code, out_b.decode('utf-8', errors='replace'),
+                        err_b.decode('utf-8', errors='replace'))
+
+            returncode, stdout, stderr = await _run_journalctl(cmd)
+            if returncode != 0 and grep:
+                # A journalctl built without pattern-matching support rejects
+                # --grep: fetch more and let the Python filters do the work.
+                LOGGER.debug("journalctl --grep failed (%s); retrying without it",
+                             stderr.strip()[:200])
+                returncode, stdout, stderr = await _run_journalctl(plain_cmd)
 
             LOGGER.debug("journalctl returned: code=%d, stdout_len=%d, stderr=%s",
                         returncode, len(stdout), stderr[:200] if stderr else '')
@@ -7714,20 +7846,24 @@ class WebServer:
                                 time_str = '--:--:--'
 
                             message = entry.get('MESSAGE', '')
-                            priority = int(entry.get('PRIORITY', 6))
-                            unit = entry.get('_SYSTEMD_UNIT', '')
+                            if isinstance(message, list):
+                                # journalctl emits non-UTF-8 payloads as byte arrays.
+                                message = bytes(message).decode('utf-8', errors='replace')
+                            try:
+                                priority = int(entry.get('PRIORITY', 6))
+                            except (TypeError, ValueError):
+                                priority = 6
 
-                            # Map priority to level; older entries carry
-                            # no priority, so fall back to the level name.
-                            if priority <= 3:
-                                log_level = 'error'
-                            elif priority <= 4:
-                                log_level = 'warning'
-                            else:
-                                log_level = 'info'
-                                legacy = _LEGACY_LEVEL_RE.match(message)
-                                if legacy:
-                                    log_level = 'warning' if legacy.group(1) == 'WARNING' else 'error'
+                            log_level, logger_name, body = _classify_log_line(message, priority)
+
+                            # Level filter, from the prefix rather than -p:
+                            # pre-prefix entries are all priority 6.
+                            if level == 'error' and log_level != 'error':
+                                skipped_count += 1
+                                continue
+                            if level == 'warning' and log_level not in ('error', 'warning'):
+                                skipped_count += 1
+                                continue
 
                             # Extract camera ID from the message body. The
                             # whole pipeline now runs in one systemd unit, so
@@ -7738,7 +7874,7 @@ class WebServer:
                                 for cid in known_camera_ids:
                                     if _camera_token_re_cache.setdefault(
                                         cid, re.compile(rf'\b{re.escape(cid)}\b')
-                                    ).search(message):
+                                    ).search(body):
                                         cam = cid
                                         break
 
@@ -7749,13 +7885,14 @@ class WebServer:
                                 continue
 
                             # Apply server-side type filter (uses pre-compiled patterns)
-                            if _matches_log_filter(message, log_type):
+                            if _matches_log_filter(body, log_type, logger_name, log_level):
                                 logs.append({
                                     'time': time_str,
                                     'timestamp': ts,  # Unix epoch for client-side timezone conversion
                                     'level': log_level,
+                                    'logger': logger_name,
                                     'camera': cam,
-                                    'message': message,
+                                    'message': body,
                                 })
                             else:
                                 skipped_count += 1
@@ -7836,12 +7973,7 @@ class WebServer:
                             if not line:
                                 continue
 
-                            # Parse common log formats
-                            log_level = 'info'
-                            if 'ERROR' in line or 'error' in line.lower():
-                                log_level = 'error'
-                            elif 'WARNING' in line or 'warning' in line.lower():
-                                log_level = 'warning'
+                            log_level, logger_name, body = _classify_log_line(line)
 
                             # Filter by level
                             if level == 'error' and log_level != 'error':
@@ -7865,7 +7997,7 @@ class WebServer:
                                 for cid in known_camera_ids:
                                     if _camera_token_re_cache.setdefault(
                                         cid, re.compile(rf'\b{re.escape(cid)}\b')
-                                    ).search(line):
+                                    ).search(body):
                                         cam = cid
                                         break
 
@@ -7874,13 +8006,14 @@ class WebServer:
                                 continue
 
                             # Apply server-side type filter
-                            if _matches_log_filter(line, log_type):
+                            if _matches_log_filter(body, log_type, logger_name, log_level):
                                 logs.append({
                                     'time': time_str,
                                     'timestamp': unix_ts,  # Unix epoch for client-side timezone conversion
                                     'level': log_level,
+                                    'logger': logger_name,
                                     'camera': cam,
-                                    'message': line[:500],  # Truncate long lines
+                                    'message': body[:500],  # Truncate long lines
                                 })
                             else:
                                 skipped_count += 1

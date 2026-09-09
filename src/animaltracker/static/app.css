@@ -4545,6 +4545,9 @@ body.is-locked{
   color:var(--c-text);overflow-wrap:anywhere;
   white-space:pre-wrap;
 }
+/* Logger name the server parsed off the line ('pipeline', 'ptz.decisions'). */
+.logrow__src{ color:var(--c-text-3);margin-right:var(--s-2); }
+.logrow--error .logrow__src{ color:var(--c-danger-text);opacity:.75; }
 .logrow__copy{
   grid-column:2;justify-self:end;
   width:var(--tap);height:var(--tap);

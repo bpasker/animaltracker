@@ -116,6 +116,13 @@ function fmtGb(v) {
   return n === null ? '--' : (n >= 100 ? Math.round(n) : Math.round(n * 10) / 10) + '';
 }
 
+/** 'animaltracker.pipeline' -> 'pipeline'; 'ptz.decisions' stays as is. The
+    server strips this prefix off the message and ships it as entry.logger. */
+function shortLogger(name) {
+  var s = String(name || '');
+  return s.indexOf('animaltracker.') === 0 ? s.slice('animaltracker.'.length) : s;
+}
+
 function levelKey(level) {
   var l = String(level || '').toLowerCase();
   if (l.indexOf('err') === 0 || l === 'critical' || l === 'fatal') return 'error';
@@ -906,7 +913,8 @@ export const view = {
       var needle = filters.text.trim().toLowerCase();
       if (!needle) return logRows;
       return logRows.filter(function (e) {
-        return String(e.message || '').toLowerCase().indexOf(needle) >= 0;
+        return String(e.message || '').toLowerCase().indexOf(needle) >= 0 ||
+          String(e.logger || '').toLowerCase().indexOf(needle) >= 0;
       });
     }
 
@@ -944,12 +952,14 @@ export const view = {
         create: function () {
           var ts = h('span.logrow__ts', { text: '' });
           var lvl = h('span.logrow__lvl', { text: '' });
-          var msg = h('span.logrow__msg', { text: '' });
+          var src = h('span.logrow__src', { text: '' });
+          var txt = h('span', { text: '' });
+          var msg = h('span.logrow__msg', src, txt);
           var copy = h('button.logrow__copy', {
             type: 'button', 'data-logcopy': ''
           }, icon('layers', { size: 'sm' }));
           var row = h('div.logrow', ts, lvl, msg, copy);
-          row._parts = { ts: ts, lvl: lvl, msg: msg, copy: copy };
+          row._parts = { ts: ts, lvl: lvl, src: src, txt: txt, copy: copy };
           return row;
         },
 
@@ -959,10 +969,14 @@ export const view = {
           row.className = 'logrow logrow--' + lk;
           p.ts.textContent = logClock(entry, filters.tz);
           p.lvl.textContent = lk;
-          p.msg.textContent = String(entry.message || '');
+          var src = shortLogger(entry.logger);
+          p.src.textContent = src;
+          p.src.hidden = !src;
+          p.txt.textContent = String(entry.message || '');
           p.copy.setAttribute('aria-label',
             'Copy the log line from ' + p.ts.textContent);
-          row._text = p.ts.textContent + '  ' + lk.toUpperCase() + '  ' + p.msg.textContent;
+          row._text = p.ts.textContent + '  ' + lk.toUpperCase() + '  ' +
+            (src ? src + '  ' : '') + p.txt.textContent;
         }
       });
 

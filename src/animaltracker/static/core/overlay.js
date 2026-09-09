@@ -53,6 +53,9 @@ var openCount = 0;
 var scrollY = 0;
 var stack = [];
 
+/* The width at which app.css hides .sheet-host--mobile-only. Keep in step. */
+var DESKTOP = '(min-width: 1024px)';
+
 function focusables(root) {
   var out = [];
   var nodes = root.querySelectorAll(FOCUSABLE);
@@ -318,6 +321,7 @@ export function sheet(opts) {
   el.appendChild(body);
 
   function finish(value) {
+    unwatchViewport();
     entry.close(function () {
       if (o.onClose) o.onClose(value);
       resolveResult(value === undefined ? null : value);
@@ -368,6 +372,27 @@ export function sheet(opts) {
     initial: o.initialFocus || null,
     exit: 160
   });
+
+  /* The stylesheet hides a mobile-only sheet once the viewport reaches
+     1024px, but hiding is not closing: the scrim, the scroll lock and the
+     inert shell would all outlive it and leave a page that cannot scroll or
+     be clicked, with nothing visible to dismiss. An iPad rotating, a window
+     being widened, or a document laid out before its window has a size all
+     cross that line, so the sheet closes itself the moment they do. */
+  var viewport = null;
+  var onViewport = null;
+  function unwatchViewport() {
+    if (!viewport) return;
+    if (viewport.removeEventListener) viewport.removeEventListener('change', onViewport);
+    else if (viewport.removeListener) viewport.removeListener(onViewport);
+    viewport = null;
+  }
+  if (o.mobileOnly !== false && window.matchMedia) {
+    viewport = window.matchMedia(DESKTOP);
+    onViewport = function (ev) { if (ev.matches) finish(null); };
+    if (viewport.addEventListener) viewport.addEventListener('change', onViewport);
+    else if (viewport.addListener) viewport.addListener(onViewport);
+  }
 
   /* Drag-to-dismiss on the grab handle. touch-action:none is already on the
      handle in CSS; will-change is added only for the life of the gesture. */

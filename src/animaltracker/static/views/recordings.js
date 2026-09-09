@@ -1749,12 +1749,14 @@ function renderDayPanelInto(panel) {
 function renderDayPanel() {
   if (!S.day.date) {
     if (S.els.dayPanel && S.els.dayPanel.parentNode) S.els.dayPanel.parentNode.removeChild(S.els.dayPanel);
-    if (S.daySheet) { var sh = S.daySheet; S.daySheet = null; sh.close(null); }
+    if (S.daySheet) { var sh = S.daySheet; S.daySheet = null; S.sheetPanel = null; sh.close(null); }
     return;
   }
 
   if (isDesktop()) {
-    if (S.daySheet) { var sh2 = S.daySheet; S.daySheet = null; sh2.close(null); }
+    /* The viewport grew past the breakpoint with the sheet open: retire the
+       sheet and carry the same day over to the drawer. */
+    if (S.daySheet) { var sh2 = S.daySheet; S.daySheet = null; S.sheetPanel = null; sh2.close(null); }
     if (!S.els.dayPanel) S.els.dayPanel = buildDayPanel();
     if (S.els.dayPanel.parentNode !== S.els.monthRow) S.els.monthRow.appendChild(S.els.dayPanel);
     renderDayPanelInto(S.els.dayPanel);
@@ -1772,6 +1774,14 @@ function renderDayPanel() {
       snap: 'half',
       content: function (body) { body.appendChild(panel); },
       onClose: function () {
+        if (!S || S.unmounting) return;
+        var i = S.sheets.indexOf(handle);
+        if (i >= 0) S.sheets.splice(i, 1);
+        /* Only a dismissal by the user (swipe, scrim, Escape) closes the day.
+           When the view retired this sheet itself — the day moved to the
+           desktop drawer — S.daySheet no longer points here, and the route
+           must be left alone or the drawer would close on arrival. */
+        if (S.daySheet !== handle) return;
         S.daySheet = null;
         S.sheetPanel = null;
         if (S.day.date) closeDay();
@@ -2302,6 +2312,23 @@ export const view = {
     installObserver();
     installVisibility();
     startRefresh();
+
+    /* The day panel is a right-hand drawer above 1024px and a bottom sheet
+       below it, chosen when it renders. A viewport that crosses the line with
+       a day open (an iPad rotating, a window widened, a pane sized after the
+       page loaded) must render again, or the old surface lingers: a hidden
+       sheet would keep its scrim and scroll lock and freeze the page. */
+    if (window.matchMedia) {
+      var mq = window.matchMedia(DESKTOP);
+      var onMq = function () { if (S && !S.unmounting && S.day.date) renderDayPanel(); };
+      if (mq.addEventListener) {
+        mq.addEventListener('change', onMq);
+        track(function () { mq.removeEventListener('change', onMq); });
+      } else if (mq.addListener) {
+        mq.addListener(onMq);
+        track(function () { mq.removeListener(onMq); });
+      }
+    }
 
     applyCtx(ctx, true);
   },

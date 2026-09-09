@@ -150,3 +150,22 @@ detector:
   country: USA
   admin1_region: MN
 ```
+
+## Logging
+
+- Configured by `logging_setup.configure_logging()`, called from `cli.py`
+  **after** the pipeline imports: `onvif-zeep` calls `logging.basicConfig`
+  at import time, so the call uses `force=True` or it would be a no-op.
+- Under systemd (`JOURNAL_STREAM` set) lines go only to the journal as
+  `LEVEL name: message` with a `<N>` syslog prefix, so app levels become
+  journal priorities: `journalctl -u animaltracker -p err` works and the
+  web UI Logs page level filter depends on it. Set
+  `ANIMALTRACKER_LOG_JOURNAL=0/1` to override the detection.
+- Elsewhere: timestamped stderr plus a rotating `logs/animaltracker.log`
+  (attached by `cmd_run` once the config is loaded); `logs/web_access.log`
+  is the aiohttp access log, rotated in-process at 50 MB.
+- Volume controls: `[PERF]` per-camera lines are DEBUG every 10 s with an
+  INFO roll-up every 60 s; `[REALTIME]` raw detections are INFO for the
+  first frame after a 10 s quiet gap and DEBUG after; RTSP open failures
+  log ERROR once, then a WARNING roll-up per minute, then INFO on reconnect.
+  `run --debug` turns everything to DEBUG.

@@ -171,7 +171,9 @@ def journal_perf_summary(path: Path | None) -> list[str]:
 _JOURNAL_TS = re.compile(
     r"^(?P<mon>[A-Z][a-z]{2}) +(?P<day>\d{1,2}) (?P<h>\d{2}):(?P<m>\d{2}):(?P<s>\d{2}) "
 )
-_JOURNAL_PREFIX = re.compile(r"^\S+ \S+\[\d+\]: (?:[A-Z]+:[\w.]+:)?")
+# Strips 'host ident[pid]: ' and the app's level/logger prefix, in either the
+# current 'LEVEL name: ' form or the older 'LEVEL:name:' form.
+_JOURNAL_PREFIX = re.compile(r"^\S+ \S+\[\d+\]: (?:[A-Z]+(?::[\w.]+:|\s[\w.]+:\s?))?")
 
 
 def journal_stall_summary(path: Path | None, min_gap_s: int = 2) -> list[str]:

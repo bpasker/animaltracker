@@ -528,8 +528,9 @@ sudo systemctl enable --now animaltracker
 # 4. Check status
 sudo systemctl status animaltracker
 
-# 5. View logs
+# 5. View logs (app log levels are mapped to journal priorities)
 journalctl -u animaltracker -f
+journalctl -u animaltracker -p warning --since "1 hour ago"   # warnings and errors only
 
 # 6. Enable automatic cleanup (optional)
 sudo systemctl enable --now ssd-cleaner.timer
@@ -702,7 +703,7 @@ animaltracker/
 ├── models/                # YOLO model files (only needed for YOLO backend)
 ├── storage/               # Recorded clips and thumbnails
 │   └── clips/
-├── logs/                  # Application logs
+├── logs/                  # web_access.log + startup snapshots (app log: journald, or animaltracker.log off systemd)
 ├── src/animaltracker/     # Python source code
 ├── systemd/               # Linux service files
 ├── scripts/               # Helper scripts
@@ -719,6 +720,9 @@ MIT License - See LICENSE file for details.
 - Check if the camera URL is correct (use VLC to verify).
 - Ensure `transport: tcp` is set in `cameras.yml`.
 - Try using the sub-stream (lower resolution, H.264) which is more stable on Jetson.
+- While the stream is down the log shows one ERROR, then one WARNING per minute
+  with the attempt count, and an INFO line with the outage length on reconnect.
+  Run with `--debug` to see every attempt.
 
 ### "PPS changed between slices" (FFmpeg/OpenCV)
 This usually happens with H.265 streams on software decoding. Switch to the H.264 sub-stream in your camera config.

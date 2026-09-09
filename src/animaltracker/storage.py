@@ -311,7 +311,7 @@ class StorageManager:
                     LOGGER.info("Saved detection thumbnail: %s", thumb_path)
                     
                 except Exception as e:
-                    LOGGER.error("Failed to save thumbnail for %s #%d: %s", species, idx, e)
+                    LOGGER.error("Failed to save thumbnail for %s #%d: %s", species, idx, e, exc_info=True)
                 
         return saved_paths
 

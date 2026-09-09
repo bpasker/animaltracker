@@ -1437,5 +1437,5 @@ def create_tracker(
         LOGGER.info("Object tracking enabled (ByteTrack, lost_buffer=%d)", lost_track_buffer)
         return tracker
     except Exception as e:
-        LOGGER.error("Failed to create tracker: %s", e)
+        LOGGER.error("Failed to create tracker: %s", e, exc_info=True)
         return None

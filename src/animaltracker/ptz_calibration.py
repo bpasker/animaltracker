@@ -236,7 +236,7 @@ class PTZAutoCalibrator:
             time.sleep(1.0)
             
         except Exception as e:
-            LOGGER.error("PTZ test failed: %s", e)
+            LOGGER.error("PTZ test failed: %s", e, exc_info=True)
             return CalibrationResult(
                 pan_scale=0.8, tilt_scale=0.6,
                 pan_center_x=0.5, tilt_center_y=0.5,
@@ -389,7 +389,7 @@ class PTZAutoCalibrator:
             )
             
         except Exception as e:
-            LOGGER.error("Calibration computation failed: %s", e)
+            LOGGER.error("Calibration computation failed: %s", e, exc_info=True)
             return CalibrationResult(
                 pan_scale=0.8,
                 tilt_scale=0.6,

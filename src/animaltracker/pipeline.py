@@ -28,6 +28,18 @@ from .web import WebServer
 LOGGER = logging.getLogger(__name__)
 
 
+def _format_duration(seconds: float) -> str:
+    """Compact duration for log lines: '45s', '3m 05s', '2h 14m'."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
 # Serializes setting OPENCV_FFMPEG_CAPTURE_OPTIONS (process-wide env var) and
 # the immediately-following cv2.VideoCapture() call so concurrent worker
 # starts with different transport/hwaccel options can't race each other.
@@ -407,6 +419,7 @@ class StreamWorker:
         self._perf_log_interval: float = 10.0    # seconds
         # Last published per-window snapshot (for /api/cameras).
         self.perf_last_snapshot: Dict[str, float] = {}
+        self._init_log_state()
 
         # Initialize ONVIF client if configured (with timeout to prevent blocking)
         self.onvif_client: Optional[OnvifClient] = None
@@ -612,17 +625,17 @@ class StreamWorker:
                     use_hwaccel = False
                     cap = await loop.run_in_executor(None, _open_capture, rtsp_uri, False)
                     if not cap.isOpened():
-                        LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                        self._log_rtsp_open_failure()
                         self.stream_connected = False
                         await asyncio.sleep(5)
                         continue
                 else:
-                    LOGGER.error("Unable to open RTSP stream for %s; retrying in 5s", self.camera.id)
+                    self._log_rtsp_open_failure()
                     self.stream_connected = False
                     await asyncio.sleep(5)
                     continue
 
-            LOGGER.info("Connected to stream for %s", self.camera.id)
+            self._log_rtsp_connected()
             self.stream_connected = True
             try:
                 while not stop_event.is_set():
@@ -718,7 +731,11 @@ class StreamWorker:
                                         self.camera.id,
                                     )
                                 except Exception as e:
-                                    LOGGER.error("Inference error for %s: %s", self.camera.id, e)
+                                    self._inference_failures += 1
+                                    LOGGER.error(
+                                        "Inference error for %s: %s", self.camera.id, e,
+                                        exc_info=self._inference_failures == 1,
+                                    )
                                 inference_task = None
                             else:
                                 # Still running - drop this frame for inference (but it's still buffered)
@@ -788,7 +805,6 @@ class StreamWorker:
         # the optional pop_perf_stats() hook (added on MegaDetectorBackend
         # so we can see whether wall-clock per call is dominated by CPU
         # preprocess, GPU forward, or our own bbox post-processing).
-        stage_str = ""
         try:
             stage_stats = self.detector.pop_perf_stats()  # type: ignore[attr-defined]
         except AttributeError:
@@ -802,24 +818,18 @@ class StreamWorker:
                 'stage_post_avg_ms': round(stage_stats['post_avg_ms'], 1),
                 'stage_post_max_ms': round(stage_stats['post_max_ms'], 1),
             })
-            stage_str = (
-                " | stages avg(max) ms: prep=%.0f(%.0f) infer=%.0f(%.0f) post=%.0f(%.0f)"
-                % (
-                    stage_stats['prep_avg_ms'], stage_stats['prep_max_ms'],
-                    stage_stats['infer_avg_ms'], stage_stats['infer_max_ms'],
-                    stage_stats['post_avg_ms'], stage_stats['post_max_ms'],
-                )
-            )
-        # Always log so it shows up alongside detection logs; level INFO
-        # because users explicitly want to know if processing is keeping up.
-        LOGGER.info(
-            "[PERF] %s: capture=%.1ffps infer=%.1ffps drop=%d (%.1f%%) "
-            "frame_age avg=%.0fms max=%.0fms%s",
-            self.camera.id,
-            capture_fps, infer_fps, dropped, drop_pct,
-            frame_age_avg * 1000.0, self.perf_frame_age_max * 1000.0,
-            stage_str,
-        )
+        # The 10 s window is DEBUG; the same numbers rolled up over 60 s go
+        # out at INFO (see _log_perf_summary). The 10 s INFO line alone was
+        # 80% of the production journal and buried everything else.
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("%s", self._format_perf_line(
+                capture_fps, infer_fps, dropped, drop_pct,
+                frame_age_avg, self.perf_frame_age_max, stage_stats, elapsed,
+            ))
+        self._accumulate_perf_summary(infer_count, capture_count, dropped, stage_stats)
+        summary_elapsed = now - self._perf_summary_start
+        if summary_elapsed >= self._perf_summary_interval:
+            self._log_perf_summary(now, summary_elapsed)
         # Reset window
         self._perf_window_start = now
         self.perf_infer_count = 0
@@ -833,6 +843,180 @@ class StreamWorker:
     def get_perf_stats(self) -> Dict[str, float]:
         """Return the most recent perf snapshot (empty dict before first window)."""
         return dict(self.perf_last_snapshot)
+
+    # ------------------------------------------------------------------
+    # Log-volume controls.  The journal used to be ~90% periodic [PERF] and
+    # per-frame [REALTIME] lines, and an RTSP outage logged an ERROR every
+    # 5 s; these keep the signal at INFO and the firehose at DEBUG.
+    # ------------------------------------------------------------------
+
+    def _init_log_state(self) -> None:
+        """Reset the counters behind the log throttles (also used by tests)."""
+        now = time.time()
+        # 60 s roll-up of the 10 s perf windows.
+        self._perf_summary_interval: float = 60.0
+        self._perf_summary_start: float = now
+        self._perf_summary_infer_count: int = 0
+        self._perf_summary_frames_read: int = 0
+        self._perf_summary_dropped: int = 0
+        self._perf_summary_frame_age_total: float = 0.0
+        self._perf_summary_frame_age_max: float = 0.0
+        self._perf_summary_stage_count: int = 0
+        self._perf_summary_stage_totals: Dict[str, float] = {}  # sum(avg_ms * count)
+        self._perf_summary_stage_max: Dict[str, float] = {}
+        # Raw-detection burst: INFO for the first detection frame after a
+        # quiet gap, DEBUG for the rest of the burst.
+        self._raw_detection_last_ts: float = 0.0
+        self._raw_detection_burst_gap: float = 10.0
+        # RTSP open failures: ERROR once, WARNING roll-up per minute.
+        self._rtsp_fail_count: int = 0
+        self._rtsp_fail_start: float = 0.0
+        self._rtsp_fail_last_log: float = 0.0
+        self._rtsp_fail_log_interval: float = 60.0
+        # Per-frame failures that would flood at WARNING/with tracebacks.
+        self._tracker_update_failures: int = 0
+        self._inference_failures: int = 0
+
+    def _format_perf_line(self, capture_fps: float, infer_fps: float, dropped: int,
+                          drop_pct: float, frame_age_avg: float, frame_age_max: float,
+                          stage_stats: Optional[Dict[str, float]], window_s: float) -> str:
+        stage_str = ""
+        if stage_stats:
+            stage_str = (
+                " | stages avg(max) ms: prep=%.0f(%.0f) infer=%.0f(%.0f) post=%.0f(%.0f)"
+                % (
+                    stage_stats['prep_avg_ms'], stage_stats['prep_max_ms'],
+                    stage_stats['infer_avg_ms'], stage_stats['infer_max_ms'],
+                    stage_stats['post_avg_ms'], stage_stats['post_max_ms'],
+                )
+            )
+        return (
+            "[PERF] %s: capture=%.1ffps infer=%.1ffps drop=%d (%.1f%%) "
+            "frame_age avg=%.0fms max=%.0fms%s | window=%.0fs"
+            % (
+                self.camera.id, capture_fps, infer_fps, dropped, drop_pct,
+                frame_age_avg * 1000.0, frame_age_max * 1000.0, stage_str, window_s,
+            )
+        )
+
+    def _accumulate_perf_summary(self, infer_count: int, capture_count: int, dropped: int,
+                                 stage_stats: Optional[Dict[str, float]]) -> None:
+        """Fold one 10 s window into the 60 s roll-up (call before the window reset)."""
+        self._perf_summary_infer_count += infer_count
+        self._perf_summary_frames_read += capture_count
+        self._perf_summary_dropped += dropped
+        self._perf_summary_frame_age_total += self.perf_frame_age_total
+        self._perf_summary_frame_age_max = max(
+            self._perf_summary_frame_age_max, self.perf_frame_age_max
+        )
+        if stage_stats:
+            n = int(stage_stats.get('count', infer_count) or 0)
+            self._perf_summary_stage_count += n
+            for stage in ('prep', 'infer', 'post'):
+                self._perf_summary_stage_totals[stage] = (
+                    self._perf_summary_stage_totals.get(stage, 0.0)
+                    + stage_stats[f'{stage}_avg_ms'] * n
+                )
+                self._perf_summary_stage_max[stage] = max(
+                    self._perf_summary_stage_max.get(stage, 0.0), stage_stats[f'{stage}_max_ms']
+                )
+
+    def _log_perf_summary(self, now: float, elapsed: float) -> None:
+        infer_count = self._perf_summary_infer_count
+        dropped = self._perf_summary_dropped
+        eligible = infer_count + dropped
+        stage_stats: Optional[Dict[str, float]] = None
+        if self._perf_summary_stage_count:
+            n = self._perf_summary_stage_count
+            stage_stats = {}
+            for stage in ('prep', 'infer', 'post'):
+                stage_stats[f'{stage}_avg_ms'] = self._perf_summary_stage_totals.get(stage, 0.0) / n
+                stage_stats[f'{stage}_max_ms'] = self._perf_summary_stage_max.get(stage, 0.0)
+        LOGGER.info("%s", self._format_perf_line(
+            self._perf_summary_frames_read / elapsed if elapsed > 0 else 0.0,
+            infer_count / elapsed if elapsed > 0 else 0.0,
+            dropped,
+            (dropped / eligible * 100.0) if eligible > 0 else 0.0,
+            self._perf_summary_frame_age_total / infer_count if infer_count > 0 else 0.0,
+            self._perf_summary_frame_age_max,
+            stage_stats, elapsed,
+        ))
+        self._perf_summary_start = now
+        self._perf_summary_infer_count = 0
+        self._perf_summary_frames_read = 0
+        self._perf_summary_dropped = 0
+        self._perf_summary_frame_age_total = 0.0
+        self._perf_summary_frame_age_max = 0.0
+        self._perf_summary_stage_count = 0
+        self._perf_summary_stage_totals = {}
+        self._perf_summary_stage_max = {}
+
+    def _raw_detection_log_level(self, now: Optional[float] = None) -> int:
+        """INFO for the first detection frame after a quiet gap, else DEBUG."""
+        now = time.time() if now is None else now
+        new_burst = (now - self._raw_detection_last_ts) > self._raw_detection_burst_gap
+        self._raw_detection_last_ts = now
+        return logging.INFO if new_burst else logging.DEBUG
+
+    def _log_rtsp_open_failure(self) -> None:
+        """Log an RTSP open failure without flooding the journal.
+
+        The fixed 5 s retry used to emit an ERROR line per attempt, so a
+        day-long outage was ~17k lines.  Now: ERROR on the first failure, a
+        WARNING roll-up once a minute while it persists, DEBUG per attempt.
+        """
+        now = time.time()
+        self._rtsp_fail_count += 1
+        if self._rtsp_fail_count == 1:
+            self._rtsp_fail_start = now
+            self._rtsp_fail_last_log = now
+            LOGGER.error(
+                "Unable to open RTSP stream for %s; retrying every 5s "
+                "(further attempts logged at DEBUG, a roll-up at WARNING each minute)",
+                self.camera.id,
+            )
+        elif now - self._rtsp_fail_last_log >= self._rtsp_fail_log_interval:
+            self._rtsp_fail_last_log = now
+            LOGGER.warning(
+                "Still unable to open RTSP stream for %s: %d attempts over %s",
+                self.camera.id, self._rtsp_fail_count,
+                _format_duration(now - self._rtsp_fail_start),
+            )
+        else:
+            LOGGER.debug(
+                "Unable to open RTSP stream for %s (attempt %d)",
+                self.camera.id, self._rtsp_fail_count,
+            )
+
+    def _log_rtsp_connected(self) -> None:
+        if self._rtsp_fail_count:
+            LOGGER.info(
+                "Connected to stream for %s after %d failed attempts over %s",
+                self.camera.id, self._rtsp_fail_count,
+                _format_duration(time.time() - self._rtsp_fail_start),
+            )
+            self._rtsp_fail_count = 0
+        else:
+            LOGGER.info("Connected to stream for %s", self.camera.id)
+
+    def _note_tracker_update_failure(self, exc: BaseException) -> None:
+        """Log a failed tracker.update() once at WARNING (with traceback), then DEBUG.
+
+        The call runs once per frame, so a persistent fault would flood the
+        journal at WARNING; but swallowing it silently, as before, hid a
+        broken tracker entirely.
+        """
+        self._tracker_update_failures += 1
+        if self._tracker_update_failures == 1:
+            LOGGER.warning(
+                "tracker.update failed for %s (further failures logged at DEBUG): %s",
+                self.camera.id, exc, exc_info=exc,
+            )
+        else:
+            LOGGER.debug(
+                "tracker.update failed for %s (#%d): %s",
+                self.camera.id, self._tracker_update_failures, exc,
+            )
 
     @staticmethod
     def _compute_blur_score(frame: np.ndarray) -> float:
@@ -869,8 +1053,8 @@ class StreamWorker:
                         await loop.run_in_executor(
                             None, self.tracker.update, [], frame, frame_idx,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._note_tracker_update_failure(e)
                 await self._maybe_close_event(ts)
                 return
 
@@ -907,8 +1091,8 @@ class StreamWorker:
                         await loop.run_in_executor(
                             None, self.tracker.update, [], frame, frame_idx,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._note_tracker_update_failure(e)
                 await self._maybe_close_event(ts)
                 return
 
@@ -970,12 +1154,16 @@ class StreamWorker:
         if frame_age > self.perf_frame_age_max:
             self.perf_frame_age_max = frame_age
 
-        # Log raw detections from MegaDetector (before species filtering)
+        # Log raw detections from MegaDetector (before species filtering).
+        # The first frame with detections after a quiet gap is INFO so the
+        # journal shows that the detector fired; the per-frame stream that
+        # follows is DEBUG (it was 10% of all journal lines).
         if detections:
             det_summary = ', '.join(f"{d.species}:{d.confidence:.0%}" for d in detections[:3])
             if len(detections) > 3:
                 det_summary += f" (+{len(detections)-3} more)"
-            LOGGER.info(
+            LOGGER.log(
+                self._raw_detection_log_level(),
                 "[REALTIME] %s: %d raw detections: %s",
                 self.camera.id, len(detections), det_summary
             )
@@ -1692,7 +1880,7 @@ class StreamWorker:
                                     )
                                 return  # Skip notification - no animal detected
                     except Exception as e:
-                        LOGGER.error("Unified post-processing failed: %s", e)
+                        LOGGER.error("Unified post-processing failed: %s", e, exc_info=True)
                     finally:
                         # Periodically clear GPU memory to prevent VRAM accumulation
                         cleanup_gpu_memory()

@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import load_runtime_config
 from .onvif_client import OnvifClient
 from .pipeline import PipelineOrchestrator
+from .logging_setup import attach_file_log, configure_logging
 from .storage import StorageManager
 
 try:
@@ -17,8 +18,11 @@ try:
 except ImportError:
     load_dotenv = None
 
-logging.basicConfig(level=logging.INFO,
-                    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+# Must run *after* the imports above: onvif-zeep calls logging.basicConfig()
+# when it is imported (via .pipeline -> .onvif_client), and a second plain
+# basicConfig is silently ignored. configure_logging() forces its way in and
+# picks the journald or timestamped style for this process.
+configure_logging()
 LOGGER = logging.getLogger(__name__)
 
 
@@ -53,6 +57,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         LOGGER.info("PTZ decision logging enabled (ptz.decisions)")
     
     runtime = load_runtime_config(args.config)
+    app_log = attach_file_log(Path(runtime.general.logs_root))
+    if app_log is not None:
+        LOGGER.info("Also logging to %s (stderr is not the systemd journal)", app_log)
     orchestrator = PipelineOrchestrator(
         runtime=runtime,
         model_path=args.model,
@@ -157,7 +164,7 @@ def cmd_ptz_test(args: argparse.Namespace) -> None:
             else:
                 LOGGER.warning("No working PTZ profile found")
         except Exception as e:
-            LOGGER.error("Error finding working profile: %s", e)
+            LOGGER.error("Error finding working profile: %s", e, exc_info=True)
     
     # Get current position for all profiles
     LOGGER.info("\nCurrent PTZ positions by profile:")

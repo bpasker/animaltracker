@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import logging.handlers
 import cv2
 import json
 import re
@@ -246,6 +247,10 @@ for _name, _cfg in _LOG_TYPE_FILTERS_RAW.items():
 # Timestamp parsers used by file-log fallback.
 _TS_FULL_RE = re.compile(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})')
 _TS_TIME_RE = re.compile(r'(\d{2}:\d{2}:\d{2})')
+# Level name at the start of an app line, in the current 'LEVEL name: ' form
+# or the older 'LEVEL:name:' form (journal entries written before the app
+# tagged stderr lines with a syslog priority are all priority 6).
+_LEGACY_LEVEL_RE = re.compile(r'^(ERROR|CRITICAL|WARNING)[: ]')
 
 
 def _matches_log_filter(message: str, filter_type: str) -> bool:
@@ -1373,7 +1378,7 @@ class WebServer:
                     camera_id, PTZ_DEADMAN_SECONDS,
                 )
             except Exception as e:
-                LOGGER.error("PTZ dead-man stop failed for %s: %s", camera_id, e)
+                LOGGER.error("PTZ dead-man stop failed for %s: %s", camera_id, e, exc_info=True)
             finally:
                 self._ptz_deadman.pop(camera_id, None)
 
@@ -1416,7 +1421,7 @@ class WebServer:
                 
             return web.Response(text="OK")
         except Exception as e:
-            LOGGER.error(f"PTZ error: {e}")
+            LOGGER.error(f"PTZ error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_position(self, request):
@@ -1436,7 +1441,7 @@ class WebServer:
             )
             return web.json_response(position)
         except Exception as e:
-            LOGGER.error(f"PTZ position error: {e}")
+            LOGGER.error(f"PTZ position error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_mode(self, request):
@@ -1511,7 +1516,7 @@ class WebServer:
             })
             
         except Exception as e:
-            LOGGER.error(f"PTZ patrol toggle error: {e}")
+            LOGGER.error(f"PTZ patrol toggle error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_track(self, request):
@@ -1544,7 +1549,7 @@ class WebServer:
             })
             
         except Exception as e:
-            LOGGER.error(f"PTZ track toggle error: {e}")
+            LOGGER.error(f"PTZ track toggle error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_return_delay(self, request):
@@ -1579,7 +1584,7 @@ class WebServer:
             })
             
         except Exception as e:
-            LOGGER.error(f"PTZ return delay error: {e}")
+            LOGGER.error(f"PTZ return delay error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_presets(self, request):
@@ -1610,7 +1615,7 @@ class WebServer:
             })
             
         except Exception as e:
-            LOGGER.error(f"PTZ presets error: {e}")
+            LOGGER.error(f"PTZ presets error: {e}", exc_info=True)
             return web.json_response({'presets': [], 'error': str(e)})
 
     async def handle_ptz_set_patrol_presets(self, request):
@@ -1652,7 +1657,7 @@ class WebServer:
             })
             
         except Exception as e:
-            LOGGER.error(f"PTZ set patrol presets error: {e}")
+            LOGGER.error(f"PTZ set patrol presets error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_goto_preset(self, request):
@@ -1683,7 +1688,7 @@ class WebServer:
             return web.json_response({'success': True})
             
         except Exception as e:
-            LOGGER.error(f"PTZ goto preset error: {e}")
+            LOGGER.error(f"PTZ goto preset error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_save_preset(self, request):
@@ -1718,7 +1723,7 @@ class WebServer:
             })
             
         except Exception as e:
-            LOGGER.error(f"PTZ save preset error: {e}")
+            LOGGER.error(f"PTZ save preset error: {e}", exc_info=True)
             return web.Response(status=500, text=str(e))
 
     async def handle_ptz_calibrate(self, request):
@@ -1749,9 +1754,7 @@ class WebServer:
             return web.json_response(result)
             
         except Exception as e:
-            LOGGER.error(f"PTZ calibration error: {e}")
-            import traceback
-            traceback.print_exc()
+            LOGGER.exception("PTZ calibration error: %s", e)
             return web.json_response({'error': str(e)}, status=500)
 
     async def handle_zoom_fov_calibrate(self, request):
@@ -1868,16 +1871,16 @@ class WebServer:
             })
 
         except Exception as e:
-            LOGGER.error(f"Zoom FOV calibration error: {e}")
-            import traceback
-            traceback.print_exc()
+            LOGGER.exception("Zoom FOV calibration error: %s", e)
             return web.json_response({'error': str(e)}, status=500)
 
     async def handle_get_ptz_debug(self, request):
         """Get current PTZ debug logging state."""
         import logging
         ptz_logger = logging.getLogger('ptz.decisions')
-        is_enabled = ptz_logger.level <= logging.DEBUG
+        # A logger's own level is NOTSET (0) until something sets it, and
+        # 0 <= DEBUG, so checking .level reported "enabled" by default.
+        is_enabled = ptz_logger.getEffectiveLevel() <= logging.DEBUG
         return web.json_response({'enabled': is_enabled})
 
     async def handle_set_ptz_debug(self, request):
@@ -1895,12 +1898,14 @@ class WebServer:
                 LOGGER.info("PTZ debug logging ENABLED")
             else:
                 ptz_logger.setLevel(logging.INFO)
-                logging.getLogger('animaltracker.ptz_tracker').setLevel(logging.INFO)
+                # Back to inheriting from 'animaltracker' so a --debug run
+                # keeps DEBUG for this module.
+                logging.getLogger('animaltracker.ptz_tracker').setLevel(logging.NOTSET)
                 LOGGER.info("PTZ debug logging DISABLED")
 
             return web.json_response({'enabled': enabled, 'success': True})
         except Exception as e:
-            LOGGER.error(f"Error setting PTZ debug: {e}")
+            LOGGER.error(f"Error setting PTZ debug: {e}", exc_info=True)
             return web.json_response({'error': str(e)}, status=500)
 
     def _invalidate_scan_cache(self) -> None:
@@ -7712,13 +7717,17 @@ class WebServer:
                             priority = int(entry.get('PRIORITY', 6))
                             unit = entry.get('_SYSTEMD_UNIT', '')
 
-                            # Map priority to level
+                            # Map priority to level; older entries carry
+                            # no priority, so fall back to the level name.
                             if priority <= 3:
                                 log_level = 'error'
                             elif priority <= 4:
                                 log_level = 'warning'
                             else:
                                 log_level = 'info'
+                                legacy = _LEGACY_LEVEL_RE.match(message)
+                                if legacy:
+                                    log_level = 'warning' if legacy.group(1) == 'WARNING' else 'error'
 
                             # Extract camera ID from the message body. The
                             # whole pipeline now runs in one systemd unit, so
@@ -7806,10 +7815,11 @@ class WebServer:
 
                 return None, '--:--:--', None
 
-            # Look for app log files only. The bare '*.log' glob would also match
-            # 'web_access.log' (HTTP access log) which can be huge and is pure
-            # noise — restrict to known app-log prefixes.
-            log_patterns = ['detector*.log', 'animaltracker*.log']
+            # App log file only: animaltracker.log is what cli.attach_file_log()
+            # writes when stderr is not the systemd journal. The bare '*.log'
+            # glob would also match 'web_access.log' (HTTP access log), which
+            # can be huge and is pure noise.
+            log_patterns = ['animaltracker*.log']
             # For custom time range, read more lines to ensure we capture the full range
             max_lines_per_file = 10000 if time_range_start else 500
             for pattern in log_patterns:
@@ -10420,7 +10430,7 @@ class WebServer:
                 await self._save_config_to_file(global_data if updated_global else None)
                 LOGGER.info(f"Settings saved to {self.config_path}")
             except Exception as e:
-                LOGGER.error(f"Failed to save config file: {e}")
+                LOGGER.error(f"Failed to save config file: {e}", exc_info=True)
                 return web.Response(status=500, text=f"Settings applied but failed to save to file: {e}")
         
         return web.json_response({
@@ -10577,7 +10587,7 @@ class WebServer:
                 json.dump(state, f, indent=2)
             LOGGER.debug(f"Saved PTZ state to {self.state_file}")
         except Exception as e:
-            LOGGER.error(f"Failed to save PTZ state: {e}")
+            LOGGER.error(f"Failed to save PTZ state: {e}", exc_info=True)
     
     def _apply_ptz_state(self) -> None:
         """Apply persisted PTZ state to trackers after startup."""
@@ -10640,9 +10650,14 @@ class WebServer:
         self.logs_root.mkdir(parents=True, exist_ok=True)
         log_file = self.logs_root / 'web_access.log'
         
-        handler = logging.FileHandler(log_file)
-        formatter = logging.Formatter('%(asctime)s - %(message)s')
-        handler.setFormatter(formatter)
+        # aiohttp's access line already carries the request time, so no
+        # second timestamp. Rotate in-process so installs without logrotate
+        # (macOS, Windows) don't grow this file forever; same 50 MB x 4
+        # policy as systemd/animaltracker-logrotate.
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=50 * 1024 * 1024, backupCount=4, encoding='utf-8'
+        )
+        handler.setFormatter(logging.Formatter('%(message)s'))
         access_logger.addHandler(handler)
 
         runner = web.AppRunner(self.app, access_log=access_logger)

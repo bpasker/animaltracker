@@ -1077,7 +1077,7 @@ class PTZTracker:
                 LOGGER.warning("No valid presets found, falling back to continuous sweep")
                 
         except Exception as e:
-            LOGGER.error("Failed to resolve presets: %s", e)
+            LOGGER.error("Failed to resolve presets: %s", e, exc_info=True)
             self._preset_tokens = []
     
     def start_tracking(self) -> None:
@@ -3082,7 +3082,7 @@ class PTZTracker:
         try:
             self.onvif_client.ptz_move_absolute(self.profile_token, pan, tilt, zoom)
         except Exception as e:
-            LOGGER.error("center_on_bbox: ptz_move_absolute failed: %s", e)
+            LOGGER.error("center_on_bbox: ptz_move_absolute failed: %s", e, exc_info=True)
 
 
 def create_ptz_tracker(

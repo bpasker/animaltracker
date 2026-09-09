@@ -1402,7 +1402,7 @@ class ClipPostProcessor:
             return new_path
             
         except Exception as e:
-            LOGGER.error("Failed to rename clip %s: %s", clip_path, e)
+            LOGGER.error("Failed to rename clip %s: %s", clip_path, e, exc_info=True)
             return None
     
     def _rename_thumbnails(self, old_clip_path: Path, new_clip_path: Path) -> None:
@@ -1482,7 +1482,7 @@ class ClipPostProcessor:
                         LOGGER.error("Failed to save thumbnail: %s", thumb_path)
                     
                 except Exception as e:
-                    LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e)
+                    LOGGER.error("Failed to save thumbnail %s: %s", thumb_path, e, exc_info=True)
         
         LOGGER.info("Saved %d thumbnails for %s", len(saved), clip_path.name)
         return saved
@@ -1598,7 +1598,7 @@ class ClipPostProcessor:
                 LOGGER.error("Failed to save track thumbnail %s: %s (frame shape: %s, bbox: %s)", 
                             thumb_path, e, 
                             frame.shape if frame is not None else 'None',
-                            bbox)
+                            bbox, exc_info=True)
         
         LOGGER.info("Saved %d track thumbnails for %s", len(saved), clip_path.name)
         return saved
@@ -1690,7 +1690,7 @@ class ClipPostProcessor:
                         LOGGER.error("Failed to save sample thumbnail: %s", thumb_path)
                     
                 except Exception as e:
-                    LOGGER.error("Failed to save sample thumbnail %s: %s", thumb_path, e)
+                    LOGGER.error("Failed to save sample thumbnail %s: %s", thumb_path, e, exc_info=True)
         
         finally:
             cap.release()

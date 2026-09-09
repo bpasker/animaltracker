@@ -1,5 +1,12 @@
+# Rotation for the files the app writes under logs/.
+#
+# On systemd hosts the app itself logs only to the journal (see
+# `journalctl -u animaltracker`); animaltracker.log exists only where stderr
+# is not the journal (launchd, a terminal, Windows). Since 2026-09 the app
+# rotates both files itself (RotatingFileHandler: 50 MB x 4 for the access
+# log, 10 MB x 5 for animaltracker.log), so this rule is belt-and-braces for
+# existing installs and is safe to leave in place or remove.
 /opt/speciesnet/animaltracker/logs/web_access.log
-/opt/speciesnet/animaltracker/logs/detector*.log
 /opt/speciesnet/animaltracker/logs/animaltracker*.log {
     weekly
     rotate 4

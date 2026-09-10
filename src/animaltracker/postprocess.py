@@ -736,95 +736,8 @@ class ClipPostProcessor:
 
         # If tracking was used and we have tracked objects, build results from tracks
         if tracker and tracker.active_track_count > 0:
-            # FIRST pass: Spatial merge - most reliable!
-            # If an object appears in the same location across frames, it's the same object
-            # regardless of species classification changes
-            if self.settings.spatial_merge_enabled:
-                spatial_merged = tracker.merge_spatially_adjacent_tracks(
-                    iou_threshold=self.settings.spatial_merge_iou,
-                    max_frame_gap=self.settings.spatial_merge_gap
-                )
-                if spatial_merged > 0:
-                    processing_log.append(ProcessingLogEntry(
-                        frame_idx=-1,
-                        event="spatial_merge",
-                        species="",
-                        confidence=0.0,
-                        reason=f"Merged {spatial_merged} tracks based on spatial continuity (IoU≥{self.settings.spatial_merge_iou}, gap≤{self.settings.spatial_merge_gap})",
-                    ))
-                
-                # Merge spurious parallel tracks (overlapping in time but same location)
-                # ByteTrack sometimes creates duplicate tracks when briefly losing an object
-                overlap_merged = tracker.merge_overlapping_same_location_tracks(
-                    iou_threshold=self.settings.spatial_merge_iou
-                )
-                if overlap_merged > 0:
-                    processing_log.append(ProcessingLogEntry(
-                        frame_idx=-1,
-                        event="overlap_merge",
-                        species="",
-                        confidence=0.0,
-                        reason=f"Merged {overlap_merged} spurious parallel tracks (same location, overlapping time)",
-                    ))
-                
-                # Merge tracks that fill gaps in larger tracks' detection timelines
-                # If a smaller track exists entirely within a gap of a larger track, merge them
-                gap_merged = tracker.merge_gap_filling_tracks()
-                if gap_merged > 0:
-                    processing_log.append(ProcessingLogEntry(
-                        frame_idx=-1,
-                        event="gap_fill_merge",
-                        species="",
-                        confidence=0.0,
-                        reason=f"Merged {gap_merged} tracks that filled detection gaps in larger tracks",
-                    ))
-            
-            # Second pass: Merge fragmented tracks with the SAME species
-            # This handles cases where ByteTrack loses a track due to movement
-            # but later detections are clearly the same species
-            if self.settings.merge_enabled:
-                merged_count = tracker.merge_similar_tracks(
-                    max_frame_gap=self.settings.same_species_merge_gap
-                )
-                if merged_count > 0:
-                    processing_log.append(ProcessingLogEntry(
-                        frame_idx=-1,
-                        event="tracks_merged",
-                        species="",
-                        confidence=0.0,
-                        reason=f"Merged {merged_count} fragmented tracks with same species (gap≤{self.settings.same_species_merge_gap})",
-                    ))
-            
-                # Third pass: Merge GENERIC tracks into more SPECIFIC tracks
-                # E.g., "animal" track absorbed into "canidae" track if temporally adjacent
-                # This only merges hierarchically compatible species (animal->mammal->canidae)
-                if self.settings.hierarchical_merge_enabled:
-                    hierarchical_merged = tracker.merge_hierarchical_tracks(
-                        max_frame_gap=self.settings.hierarchical_merge_gap,
-                        min_specific_detections=self.settings.min_specific_detections
-                    )
-                    if hierarchical_merged > 0:
-                        processing_log.append(ProcessingLogEntry(
-                            frame_idx=-1,
-                            event="hierarchical_merge",
-                            species="",
-                            confidence=0.0,
-                            reason=f"Absorbed {hierarchical_merged} generic tracks into specific species tracks (gap≤{self.settings.hierarchical_merge_gap})",
-                        ))
-                
-                # Third pass: Single animal mode - aggressively merge ALL non-overlapping tracks
-                # Use this when you're sure there's only one animal in the video
-                if self.settings.single_animal_mode:
-                    non_overlap_merged = tracker.merge_non_overlapping_tracks()
-                    if non_overlap_merged > 0:
-                        processing_log.append(ProcessingLogEntry(
-                            frame_idx=-1,
-                            event="single_animal_merge",
-                            species="",
-                            confidence=0.0,
-                            reason=f"Single-animal mode: merged {non_overlap_merged} non-overlapping tracks into 1",
-                        ))
-            
+            processing_log.extend(self._merge_tracks(tracker))
+
             tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(
                 tracker, all_frames_data
             )
@@ -850,6 +763,114 @@ class ClipPostProcessor:
         # Fallback to non-tracked results
         return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
     
+    def _merge_tracks(self, tracker: ObjectTracker) -> List[ProcessingLogEntry]:
+        """Stitch ByteTrack's fragments back into one track per animal.
+
+        Runs the merge passes in order and returns a log entry for each pass
+        that changed something. The order matters: the spatial passes need
+        no species agreement; the same-species and hierarchical passes build
+        the long tracks; and only once those exist can a one-frame fragment
+        sitting inside one of them (a dog read as "felidae" for a single
+        frame) be seen for what it is, a minority vote and not a second
+        animal. The two closing passes absorb only tracks with fewer than
+        ``min_specific_detections`` classifications, so a real second animal
+        that stayed for a while keeps its own track.
+        """
+        log: List[ProcessingLogEntry] = []
+
+        def note(event: str, reason: str) -> None:
+            log.append(ProcessingLogEntry(
+                frame_idx=-1, event=event, species="", confidence=0.0, reason=reason,
+            ))
+
+        settings = self.settings
+        weak_limit = max(1, int(settings.min_specific_detections))
+
+        if settings.spatial_merge_enabled:
+            # FIRST pass: Spatial merge - most reliable!
+            # If an object appears in the same location across frames, it's the same object
+            # regardless of species classification changes
+            spatial_merged = tracker.merge_spatially_adjacent_tracks(
+                iou_threshold=settings.spatial_merge_iou,
+                max_frame_gap=settings.spatial_merge_gap,
+            )
+            if spatial_merged > 0:
+                note("spatial_merge",
+                     f"Merged {spatial_merged} tracks based on spatial continuity "
+                     f"(IoU≥{settings.spatial_merge_iou}, gap≤{settings.spatial_merge_gap})")
+
+            # Merge spurious parallel tracks (overlapping in time but same location)
+            # ByteTrack sometimes creates duplicate tracks when briefly losing an object
+            overlap_merged = tracker.merge_overlapping_same_location_tracks(
+                iou_threshold=settings.spatial_merge_iou
+            )
+            if overlap_merged > 0:
+                note("overlap_merge",
+                     f"Merged {overlap_merged} spurious parallel tracks (same location, overlapping time)")
+
+            # Merge tracks that fill gaps in larger tracks' detection timelines
+            # If a smaller track exists entirely within a gap of a larger track, merge them
+            gap_merged = tracker.merge_gap_filling_tracks()
+            if gap_merged > 0:
+                note("gap_fill_merge",
+                     f"Merged {gap_merged} tracks that filled detection gaps in larger tracks")
+
+        if settings.merge_enabled:
+            # Second pass: Merge fragmented tracks with the SAME species
+            # This handles cases where ByteTrack loses a track due to movement
+            # but later detections are clearly the same species
+            merged_count = tracker.merge_similar_tracks(
+                max_frame_gap=settings.same_species_merge_gap
+            )
+            if merged_count > 0:
+                note("tracks_merged",
+                     f"Merged {merged_count} fragmented tracks with same species "
+                     f"(gap≤{settings.same_species_merge_gap})")
+
+            # Third pass: Merge GENERIC tracks into more SPECIFIC tracks
+            # E.g., "animal" track absorbed into "canidae" track if temporally adjacent
+            # This only merges hierarchically compatible species (animal->mammal->canidae)
+            if settings.hierarchical_merge_enabled:
+                hierarchical_merged = tracker.merge_hierarchical_tracks(
+                    max_frame_gap=settings.hierarchical_merge_gap,
+                    min_specific_detections=settings.min_specific_detections,
+                )
+                if hierarchical_merged > 0:
+                    note("hierarchical_merge",
+                         f"Absorbed {hierarchical_merged} generic tracks into specific species tracks "
+                         f"(gap≤{settings.hierarchical_merge_gap})")
+
+            # Fourth pass: the gap-fill again, now that the passes above have
+            # built the long tracks. A fragment inside a gap of one of them is
+            # the same animal read differently for that moment. Only fragments
+            # below min_specific_detections are absorbed.
+            if settings.spatial_merge_enabled:
+                late_gap_merged = tracker.merge_gap_filling_tracks(max_detections=weak_limit - 1)
+                if late_gap_merged > 0:
+                    note("gap_fill_merge",
+                         f"Merged {late_gap_merged} tracks with fewer than {weak_limit} detections "
+                         f"that filled gaps in the stitched tracks")
+
+            # Fifth pass: a fragment the gap-fill cannot reach (no gap around
+            # it, or a parallel duplicate) that a longer compatible track spans
+            # in time and overlaps in space becomes a minority vote of that
+            # track instead of a species of its own.
+            weak_merged = tracker.merge_weak_tracks(min_detections=weak_limit)
+            if weak_merged > 0:
+                note("weak_track_merge",
+                     f"Absorbed {weak_merged} tracks with fewer than {weak_limit} detections "
+                     f"into the longer compatible track spanning them")
+
+            # Last: Single animal mode - aggressively merge ALL non-overlapping tracks
+            # Use this when you're sure there's only one animal in the video
+            if settings.single_animal_mode:
+                non_overlap_merged = tracker.merge_non_overlapping_tracks()
+                if non_overlap_merged > 0:
+                    note("single_animal_merge",
+                         f"Single-animal mode: merged {non_overlap_merged} non-overlapping tracks into 1")
+
+        return log
+
     def _build_tracked_species_results(
         self,
         tracker: ObjectTracker,

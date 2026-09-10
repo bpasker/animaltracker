@@ -253,7 +253,7 @@ class ObjectTracker:
         self,
         track_activation_threshold: float = 0.25,
         lost_track_buffer: int = 120,
-        minimum_matching_threshold: float = 0.1,
+        minimum_matching_threshold: float = 0.8,
         frame_rate: int = 15,
     ):
         """Initialize the object tracker.
@@ -263,10 +263,14 @@ class ObjectTracker:
             lost_track_buffer: Frames to keep lost tracks alive. Higher values
                               help maintain identity through detection gaps.
                               Default 120 handles ~8s gaps at 15fps.
-            minimum_matching_threshold: IoU threshold for matching detections to 
-                              existing tracks. Lower = more forgiving of movement.
-                              Default 0.1 is very permissive to handle PTZ camera
-                              movement where the whole frame shifts between captures.
+            minimum_matching_threshold: Highest matching cost ByteTrack accepts
+                              when continuing a track, where the cost is
+                              1 - IoU x detection confidence. Higher is MORE
+                              permissive. 0.8 is the supervision default. The
+                              0.1 used until 2026-09-09 (meant as an IoU floor)
+                              demanded IoU x confidence >= 0.9, so no detection
+                              ever continued a track and every track was a
+                              single frame that the merge passes had to stitch.
             frame_rate: Expected frame rate (for buffer calculations)
         """
         if not SUPERVISION_AVAILABLE:
@@ -1086,7 +1090,7 @@ class ObjectTracker:
         
         return merged_count
 
-    def merge_gap_filling_tracks(self) -> int:
+    def merge_gap_filling_tracks(self, max_detections: Optional[int] = None) -> int:
         """Merge tracks that fill gaps in larger tracks' detection timelines.
         
         If Track A has detections at frames [100-200, 300-400] (with a gap 200-300)
@@ -1096,6 +1100,11 @@ class ObjectTracker:
         
         This is more aggressive than spatial merge - it doesn't require IoU match,
         just that the smaller track is temporally "sandwiched" by the larger track.
+
+        Args:
+            max_detections: When set, only tracks with at most this many
+                detections are absorbed, so a real second animal that stayed
+                for a while keeps its own track.
         
         Returns:
             Number of tracks merged
@@ -1159,6 +1168,9 @@ class ObjectTracker:
                 if smaller['track_id'] in tracks_to_remove:
                     continue
                 
+                if max_detections is not None and smaller['detections'] > max_detections:
+                    continue
+
                 # Check if smaller track is entirely within one of larger's gaps
                 smaller_first = smaller['first_frame']
                 smaller_last = smaller['last_frame']
@@ -1401,6 +1413,125 @@ class ObjectTracker:
         
         return merged_count
     
+    def merge_weak_tracks(self, min_detections: int = 2, iou_threshold: float = 0.1) -> int:
+        """Fold tracks with too few detections into the longer track spanning them.
+
+        A track with fewer than ``min_detections`` classifications is a frame
+        or two of evidence. When another track with at least ``min_detections``
+        classifications was on screen before and after it (its detection
+        frames bracket the weak track's), names a hierarchically compatible
+        species (``_species_compatible``), and has a box near in time that
+        overlaps the weak track's box by at least ``iou_threshold``, the weak
+        track is almost always that same animal read differently for a frame:
+        a dog called "felidae" once, an "animal" between two "canidae" frames.
+        Its classifications join the host as minority votes instead of
+        standing as a separate species with a thumbnail of its own.
+
+        Weak tracks nobody spans, or that sit elsewhere in the frame, are left
+        alone: this pass never invents continuity.
+
+        Args:
+            min_detections: Tracks below this many classifications are weak;
+                tracks at or above it may host them.
+            iou_threshold: Minimum overlap between the weak track's box and the
+                host's nearest-in-time box.
+
+        Returns:
+            Number of tracks merged
+        """
+        if len(self.tracks) <= 1:
+            return 0
+
+        hosts = [(tid, info) for tid, info in self.tracks.items()
+                 if len(info.classifications) >= min_detections]
+        weak = [(tid, info) for tid, info in self.tracks.items()
+                if 0 < len(info.classifications) < min_detections]
+        if not hosts or not weak:
+            return 0
+
+        merged_count = 0
+        tracks_to_remove = set()
+
+        for weak_id, weak_info in weak:
+            weak_species, _, _ = weak_info.get_best_species()
+            weak_frames = sorted({c.frame_idx for c in weak_info.classifications})
+            best_host = None
+            best_iou = 0.0
+
+            for host_id, host_info in hosts:
+                host_frames = sorted({c.frame_idx for c in host_info.classifications})
+                if not (host_frames[0] < weak_frames[0] and weak_frames[-1] < host_frames[-1]):
+                    continue
+                host_species, _, _ = host_info.get_best_species()
+                if not self._species_compatible(host_species, weak_species):
+                    continue
+                iou = self._nearest_box_iou(host_info, weak_info)
+                if iou >= iou_threshold and iou > best_iou:
+                    best_host, best_iou = (host_id, host_info), iou
+
+            if best_host is None:
+                continue
+
+            host_id, host_info = best_host
+            LOGGER.info(
+                "Weak-track merge: Track %d (%s, %d det) <- Track %d (%s, %d det, frames %d-%d), IoU=%.2f",
+                host_id, host_info.get_best_species()[0], len(host_info.classifications),
+                weak_id, weak_species, len(weak_info.classifications),
+                weak_frames[0], weak_frames[-1], best_iou,
+            )
+            self._absorb_track(host_info, weak_info)
+            tracks_to_remove.add(weak_id)
+            merged_count += 1
+
+        for track_id in tracks_to_remove:
+            del self.tracks[track_id]
+
+        if merged_count > 0:
+            LOGGER.info("Weak-track merge: absorbed %d tracks, %d tracks remaining",
+                        merged_count, len(self.tracks))
+
+        return merged_count
+
+    def _nearest_box_iou(self, host: TrackInfo, weak: TrackInfo) -> float:
+        """Best IoU between the weak track's boxes and the host boxes nearest in time."""
+        host_boxes = sorted(((c.frame_idx, c.bbox) for c in host.classifications if c.bbox),
+                            key=lambda fb: fb[0])
+        if not host_boxes:
+            return 0.0
+
+        best = 0.0
+        for c in weak.classifications:
+            if not c.bbox:
+                continue
+            before = [fb for fb in host_boxes if fb[0] <= c.frame_idx]
+            after = [fb for fb in host_boxes if fb[0] >= c.frame_idx]
+            for neighbour in (before[-1] if before else None, after[0] if after else None):
+                if neighbour is not None:
+                    best = max(best, self._calculate_iou(neighbour[1], c.bbox))
+        return best
+
+    @staticmethod
+    def _absorb_track(host: TrackInfo, other: TrackInfo) -> None:
+        """Move every classification and key frame of ``other`` into ``host``."""
+        host.classifications.extend(other.classifications)
+        host.first_seen_frame = min(host.first_seen_frame, other.first_seen_frame)
+        host.last_seen_frame = max(host.last_seen_frame, other.last_seen_frame)
+
+        if other.best_frame is not None:
+            if host.best_frame is None or other.best_confidence > host.best_confidence:
+                host.best_confidence = other.best_confidence
+                host.best_bbox = other.best_bbox
+                host.best_frame = other.best_frame
+
+        # Keep the best frame per species, or copy it if the host has none
+        for sp, frame_data in other.species_best_frames.items():
+            if sp not in host.species_best_frames:
+                host.species_best_frames[sp] = frame_data
+            elif frame_data[0] is not None:  # frame_data = (frame, confidence, bbox)
+                existing = host.species_best_frames[sp]
+                if existing[0] is None or frame_data[1] > existing[1]:
+                    host.species_best_frames[sp] = frame_data
+
     @property
     def active_track_count(self) -> int:
         """Number of tracks being tracked."""

@@ -1,0 +1,808 @@
+{
+ "clip": "1788996074_mammalia_carnivora_canidae.mp4",
+ "timestamp": "1788996074",
+ "note": "The accepted (post-filter) SpeciesNet detections of cam1 clip 1788996074, 2026-09-09 18:21 CDT: a golden retriever on a leash walked past the door twice. SpeciesNet read it as felidae at frames 190, 590 and 594 and as corvidae at 584. The other 717 entries of the original .log.json were detector_filtered person/vehicle/blank boxes and are omitted.",
+ "settings": {
+  "sample_rate": 2,
+  "confidence_threshold": 0.3,
+  "generic_confidence": 0.8,
+  "tracking_enabled": true,
+  "lost_track_buffer": 120,
+  "merge_enabled": true,
+  "same_species_merge_gap": 60,
+  "spatial_merge_enabled": true,
+  "spatial_merge_iou": 0.6,
+  "spatial_merge_gap": 30,
+  "hierarchical_merge_enabled": true,
+  "hierarchical_merge_gap": 60,
+  "min_specific_detections": 2,
+  "single_animal_mode": false,
+  "person_shadow_enabled": true,
+  "person_shadow_iou": 0.6,
+  "person_shadow_window": 0,
+  "person_shadow_min_fraction": 0.5,
+  "max_thumbnails": 3,
+  "thumbnail_cropped": true,
+  "save_processing_log": true
+ },
+ "video": {
+  "fps": 15.0,
+  "total_frames": 833,
+  "width": 1600,
+  "height": 1200,
+  "actual_sample_rate": 2,
+  "effective_fps": 7.5,
+  "duration_seconds": 55.53333333333333,
+  "frames_to_analyze": 417
+ },
+ "log_entries": [
+  {
+   "frame_idx": 176,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.663712739944458,
+   "bbox": [
+    574.9999761581421,
+    687.0000332593918,
+    626.9999742507935,
+    741.000035405159
+   ]
+  },
+  {
+   "frame_idx": 178,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9021220207214355,
+   "bbox": [
+    565.0000095367432,
+    686.9999974966049,
+    619.0000057220459,
+    741.9999986886978
+   ]
+  },
+  {
+   "frame_idx": 188,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8304209113121033,
+   "bbox": [
+    534.9999725818634,
+    695.9999889135361,
+    595.9999740123749,
+    750.999990105629
+   ]
+  },
+  {
+   "frame_idx": 190,
+   "event": "accepted",
+   "species": "mammalia_carnivora_felidae",
+   "confidence": 0.8561443090438843,
+   "bbox": [
+    529.999965429306,
+    706.999982893467,
+    591.9999659061432,
+    751.9999846816063
+   ]
+  },
+  {
+   "frame_idx": 194,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.6744865775108337,
+   "bbox": [
+    518.9999967813492,
+    708.0000512301922,
+    588.9999955892563,
+    757.0000536739826
+   ]
+  },
+  {
+   "frame_idx": 196,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8471996784210205,
+   "bbox": [
+    513.9999806880951,
+    698.0000205338001,
+    579.999977350235,
+    758.0000214278698
+   ]
+  },
+  {
+   "frame_idx": 196,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8573761582374573,
+   "bbox": [
+    514.0000015497208,
+    697.0000214874744,
+    582.0000022649765,
+    757.0000223815441
+   ]
+  },
+  {
+   "frame_idx": 198,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.7548311948776245,
+   "bbox": [
+    502.99998819828033,
+    712.0000474154949,
+    570.9999889135361,
+    761.0000498592854
+   ]
+  },
+  {
+   "frame_idx": 200,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.6666277647018433,
+   "bbox": [
+    498.99998009204865,
+    700.0000163912773,
+    569.9999779462814,
+    762.0000198483467
+   ]
+  },
+  {
+   "frame_idx": 204,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8493879437446594,
+   "bbox": [
+    487.99996972084045,
+    695.0000524520874,
+    554.999965429306,
+    768.000054359436
+   ]
+  },
+  {
+   "frame_idx": 206,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8582220077514648,
+   "bbox": [
+    482.999986410141,
+    697.0000505447388,
+    544.9999868869781,
+    770.0000524520874
+   ]
+  },
+  {
+   "frame_idx": 208,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8813233375549316,
+   "bbox": [
+    475.99998116493225,
+    697.0000147819519,
+    538.9999806880951,
+    773.0000138282776
+   ]
+  },
+  {
+   "frame_idx": 212,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.8790016770362854,
+   "bbox": [
+    472.9999750852585,
+    699.0000084042549,
+    528.9999753236771,
+    777.0000144839287
+   ]
+  },
+  {
+   "frame_idx": 214,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.8365737199783325,
+   "bbox": [
+    471.99999541044235,
+    702.0000413060188,
+    514.9999931454659,
+    781.0000464320183
+   ]
+  },
+  {
+   "frame_idx": 226,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.6768062710762024,
+   "bbox": [
+    448.99998009204865,
+    716.9999912381172,
+    494.99997794628143,
+    800.9999915957451
+   ]
+  },
+  {
+   "frame_idx": 228,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8021620512008667,
+   "bbox": [
+    429.00000512599945,
+    720.0000196695328,
+    488.0000025033951,
+    813.0000203847885
+   ]
+  },
+  {
+   "frame_idx": 232,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.7686561942100525,
+   "bbox": [
+    438.99999111890793,
+    719.0000161528587,
+    480.99998980760574,
+    820.0000181794167
+   ]
+  },
+  {
+   "frame_idx": 236,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8769912421703339,
+   "bbox": [
+    434.99996811151505,
+    722.0000445842743,
+    482.99996703863144,
+    832.0000469684601
+   ]
+  },
+  {
+   "frame_idx": 238,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8448962569236755,
+   "bbox": [
+    420.00000178813934,
+    731.0000360012054,
+    476.0000020265579,
+    841.0000383853912
+   ]
+  },
+  {
+   "frame_idx": 240,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8233374953269958,
+   "bbox": [
+    424.99998807907104,
+    731.9999992847443,
+    477.9999852180481,
+    843.0000007152557
+   ]
+  },
+  {
+   "frame_idx": 242,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.937720537185669,
+   "bbox": [
+    431.0000076889992,
+    724.9999970197678,
+    478.0000075697899,
+    852.0000010728836
+   ]
+  },
+  {
+   "frame_idx": 244,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8606002330780029,
+   "bbox": [
+    433.0000042915344,
+    721.0000321269035,
+    484.0000033378601,
+    859.0000346302986
+   ]
+  },
+  {
+   "frame_idx": 246,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8906798362731934,
+   "bbox": [
+    423.99997413158417,
+    741.0000085830688,
+    481.9999724626541,
+    883.0000162124634
+   ]
+  },
+  {
+   "frame_idx": 248,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.774651050567627,
+   "bbox": [
+    399.9999850988388,
+    750.0000044703484,
+    481.99998438358307,
+    884.0000107884407
+   ]
+  },
+  {
+   "frame_idx": 250,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.686641275882721,
+   "bbox": [
+    405.99997341632843,
+    762.0000243186951,
+    478.9999693632126,
+    911.0000252723694
+   ]
+  },
+  {
+   "frame_idx": 252,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8556779623031616,
+   "bbox": [
+    403.000009059906,
+    771.0000514984131,
+    481.00000619888306,
+    915.000057220459
+   ]
+  },
+  {
+   "frame_idx": 254,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8269498348236084,
+   "bbox": [
+    411.00000739097595,
+    781.999996304512,
+    477.00000405311584,
+    946.9999998807907
+   ]
+  },
+  {
+   "frame_idx": 256,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.937114953994751,
+   "bbox": [
+    397.9999750852585,
+    787.0000272989273,
+    478.99997532367706,
+    951.0000318288803
+   ]
+  },
+  {
+   "frame_idx": 258,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9235308766365051,
+   "bbox": [
+    393.99999380111694,
+    787.0000451803207,
+    517.9999947547913,
+    992.0000463724136
+   ]
+  },
+  {
+   "frame_idx": 260,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.939479410648346,
+   "bbox": [
+    395.99998593330383,
+    796.000000834465,
+    531.9999873638153,
+    994.0000087022781
+   ]
+  },
+  {
+   "frame_idx": 262,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8267673254013062,
+   "bbox": [
+    382.99998342990875,
+    823.0000197887421,
+    481.9999784231186,
+    1006.0000240802765
+   ]
+  },
+  {
+   "frame_idx": 264,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9163714349269867,
+   "bbox": [
+    376.9999861717224,
+    820.0000047683716,
+    508.9999794960022,
+    1031.000018119812
+   ]
+  },
+  {
+   "frame_idx": 266,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.7967287302017212,
+   "bbox": [
+    313.0000054836273,
+    819.000032544136,
+    507.99999833106995,
+    1055.000039935112
+   ]
+  },
+  {
+   "frame_idx": 268,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9249920845031738,
+   "bbox": [
+    400.9999990463257,
+    814.0000373125076,
+    549.0000009536743,
+    1058.000037074089
+   ]
+  },
+  {
+   "frame_idx": 270,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8440121412277222,
+   "bbox": [
+    402.9999852180481,
+    824.0000188350677,
+    557.9999804496765,
+    1155.0000250339508
+   ]
+  },
+  {
+   "frame_idx": 272,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8871890306472778,
+   "bbox": [
+    401.9999861717224,
+    807.0000171661377,
+    550.9999871253967,
+    1174.0000247955322
+   ]
+  },
+  {
+   "frame_idx": 274,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9636542201042175,
+   "bbox": [
+    412.00000643730164,
+    790.0000154972076,
+    583.9999973773956,
+    1195.000022649765
+   ]
+  },
+  {
+   "frame_idx": 276,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9027453660964966,
+   "bbox": [
+    403.9999723434448,
+    825.0,
+    609.9999666213989,
+    1200.0
+   ]
+  },
+  {
+   "frame_idx": 278,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8419927358627319,
+   "bbox": [
+    376.00001096725464,
+    836.9999885559082,
+    654.0000081062317,
+    1200.0
+   ]
+  },
+  {
+   "frame_idx": 284,
+   "event": "accepted",
+   "species": "mammalia_carnivora_carnivorous mammal",
+   "confidence": 0.6652767844498158,
+   "bbox": [
+    443.99996995925903,
+    864.000016450882,
+    690.999972820282,
+    1200.0000178813934
+   ]
+  },
+  {
+   "frame_idx": 288,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.6812834739685059,
+   "bbox": [
+    370.0000047683716,
+    946.0000455379486,
+    795.9999799728394,
+    1200.0000536441803
+   ]
+  },
+  {
+   "frame_idx": 538,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.9061331152915955,
+   "bbox": [
+    930.9999763965607,
+    1083.0000177025795,
+    1099.9999701976776,
+    1200.0000223517418
+   ]
+  },
+  {
+   "frame_idx": 542,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.6981589198112488,
+   "bbox": [
+    859.0000033378601,
+    998.0000227689743,
+    1098.9999890327454,
+    1200.0000268220901
+   ]
+  },
+  {
+   "frame_idx": 544,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9051049947738647,
+   "bbox": [
+    826.9999504089355,
+    976.9999980926514,
+    1084.999942779541,
+    1200.0
+   ]
+  },
+  {
+   "frame_idx": 548,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.7174052596092224,
+   "bbox": [
+    773.0000019073486,
+    935.0000202655792,
+    1069.000005722046,
+    1200.0000178813934
+   ]
+  },
+  {
+   "frame_idx": 552,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8653854727745056,
+   "bbox": [
+    763.0000114440918,
+    946.0000455379486,
+    946.0000038146973,
+    1200.0000536441803
+   ]
+  },
+  {
+   "frame_idx": 556,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8951064348220825,
+   "bbox": [
+    757.0000052452087,
+    963.0000025033951,
+    935.0000023841858,
+    1200.0000089406967
+   ]
+  },
+  {
+   "frame_idx": 558,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.684465266764164,
+   "bbox": [
+    760.9999358654022,
+    955.0000101327896,
+    924.9999344348907,
+    1200.0000089406967
+   ]
+  },
+  {
+   "frame_idx": 560,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.6681136712431908,
+   "bbox": [
+    746.9999849796295,
+    978.0000329017639,
+    917.9999768733978,
+    1200.0000357627869
+   ]
+  },
+  {
+   "frame_idx": 560,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.7669136822223663,
+   "bbox": [
+    746.9999492168427,
+    976.9999980926514,
+    914.9999439716339,
+    1200.0
+   ]
+  },
+  {
+   "frame_idx": 562,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8580145835876465,
+   "bbox": [
+    749.9999642372131,
+    974.0000367164612,
+    996.9999670982361,
+    1200.0000357627869
+   ]
+  },
+  {
+   "frame_idx": 562,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.9439005851745605,
+   "bbox": [
+    749.0000188350677,
+    974.0000367164612,
+    919.0000116825104,
+    1200.0000357627869
+   ]
+  },
+  {
+   "frame_idx": 566,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.737628698348999,
+   "bbox": [
+    717.0000195503235,
+    970.9999948740005,
+    901.0000109672546,
+    1200.0000089406967
+   ]
+  },
+  {
+   "frame_idx": 580,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.9166278839111328,
+   "bbox": [
+    661.9999945163727,
+    917.999991774559,
+    807.999986410141,
+    1199.9999910593033
+   ]
+  },
+  {
+   "frame_idx": 582,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.7297517359256744,
+   "bbox": [
+    649.9999642372131,
+    905.9999942779541,
+    879.9999594688416,
+    1200.0
+   ]
+  },
+  {
+   "frame_idx": 584,
+   "event": "accepted",
+   "species": "bird_passeriformes_corvidae",
+   "confidence": 0.6536945700645447,
+   "bbox": [
+    620.9999799728394,
+    906.9999933242798,
+    855.9999704360962,
+    1199.0000009536743
+   ]
+  },
+  {
+   "frame_idx": 586,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.653435230255127,
+   "bbox": [
+    592.9999947547913,
+    866.0000145435333,
+    797.9999899864197,
+    1131.0000121593475
+   ]
+  },
+  {
+   "frame_idx": 588,
+   "event": "accepted",
+   "species": "mammalia_carnivora_canidae",
+   "confidence": 0.8679837584495544,
+   "bbox": [
+    585.9999716281891,
+    812.0000123977661,
+    756.9999635219574,
+    1110.0000143051147
+   ]
+  },
+  {
+   "frame_idx": 590,
+   "event": "accepted",
+   "species": "mammalia_carnivora_felidae",
+   "confidence": 0.8564997911453247,
+   "bbox": [
+    574.9999761581421,
+    853.000009059906,
+    730.9999704360962,
+    1069.0000176429749
+   ]
+  },
+  {
+   "frame_idx": 594,
+   "event": "accepted",
+   "species": "mammalia_carnivora_felidae",
+   "confidence": 0.7060267329216003,
+   "bbox": [
+    510.9999895095825,
+    863.0000352859497,
+    670.9999799728394,
+    1015.0000333786011
+   ]
+  },
+  {
+   "frame_idx": 596,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.9448655843734741,
+   "bbox": [
+    480.9999704360962,
+    855.0000071525574,
+    611.9999647140503,
+    1000.000011920929
+   ]
+  },
+  {
+   "frame_idx": 608,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.8627376556396484,
+   "bbox": [
+    425.0000149011612,
+    759.9999994039536,
+    497.00001180171967,
+    884.0000063180923
+   ]
+  },
+  {
+   "frame_idx": 612,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.8500045537948608,
+   "bbox": [
+    442.9999679327011,
+    748.0000242590904,
+    499.9999672174454,
+    848.0000272393227
+   ]
+  },
+  {
+   "frame_idx": 618,
+   "event": "accepted",
+   "species": "animal",
+   "confidence": 0.891846239566803,
+   "bbox": [
+    456.9999784231186,
+    727.9999807476997,
+    515.9999758005142,
+    807.9999849200249
+   ]
+  }
+ ]
+}

@@ -339,6 +339,19 @@ Frame 3:  [Bird A at (120,110)]  [Bird B leaves frame]
    - Gap < 120 frames
    - Species are hierarchically compatible (both mammals, both birds, etc.)
    - Specific track has ≥2 detections (reliable identification)
+4. **Late gap-fill** - Once the passes above have stitched the long tracks, a track with fewer
+   than `min_specific_detections` classifications that sits entirely inside a gap of a longer
+   track is absorbed as minority votes (a dog read as "felidae" for one frame). Longer tracks
+   in a gap are a real second visitor and keep their own track.
+5. **Weak-track merge** - A track with fewer than `min_specific_detections` classifications that
+   a longer, hierarchically compatible track spans in time, and whose box overlaps that track's
+   nearest box, joins it as minority votes instead of standing as a species of its own. Nothing
+   spans it, or it sits elsewhere in the frame: it is left alone.
+
+Note: `ObjectTracker` passes `minimum_matching_threshold=0.8` (the supervision default) to
+ByteTrack. The value is the highest matching *cost* (1 − IoU × confidence) accepted when a
+detection continues a track, so lower is stricter. The 0.1 used until 2026-09-09 demanded
+IoU × confidence ≥ 0.9 and fragmented every track into single frames.
 
 ### Output Format
 

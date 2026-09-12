@@ -139,6 +139,33 @@ def _verified_write(path: "Path", write_fn, *, min_bytes: int = 1, label: str = 
     return False
 
 
+def _drop_directory_cache(directory: Path) -> None:
+    """Discard the kernel's cached listing of ``directory``.
+
+    On the production NFS mount a listing fetched between the clip rename and
+    the sidecar writes can stay cached for good: everything lands in one
+    server clock tick, so the directory's change attribute never moves and
+    the client keeps a listing that predates the thumbnails. The files open
+    fine by name, but every glob (the web UI's key frames, the alert photo)
+    misses them. POSIX_FADV_DONTNEED on the directory drops those pages so
+    the next listing is fetched from the server. No-op where unsupported.
+    """
+    fadvise = getattr(os, "posix_fadvise", None)
+    if fadvise is None:
+        return
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError as e:
+        LOGGER.debug("Could not open %s to drop its listing cache: %s", directory, e)
+        return
+    try:
+        fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError as e:
+        LOGGER.debug("Could not drop the listing cache of %s: %s", directory, e)
+    finally:
+        os.close(fd)
+
+
 # Default configuration values
 DEFAULT_SAMPLE_RATE = 3  # Analyze every Nth frame (lower = more accurate tracking)
 DEFAULT_CONFIDENCE_THRESHOLD = 0.3  # Minimum confidence for specific species
@@ -471,8 +498,14 @@ class ClipPostProcessor:
                 LOGGER.info("No valid detections found, extracting sample frames as fallback")
                 thumbnails_saved = self._extract_sample_frames(working_path, num_samples=3)
         
-        # Save processing log as JSON alongside the clip
-        self._save_processing_log(working_path, processing_log, tracking_summary, video_metadata)
+        # Save processing log as JSON alongside the clip. It names the
+        # thumbnails written above so readers can find them without trusting
+        # a directory listing (see _drop_directory_cache).
+        self._save_processing_log(
+            working_path, processing_log, tracking_summary, video_metadata,
+            thumbnails=thumbnails_saved if regenerate_thumbnails else None,
+        )
+        _drop_directory_cache(working_path.parent)
         
         # Count unique tracks (animals) detected
         # Tracks that resolved to an animal. (A person's shadow track is gone by
@@ -512,8 +545,14 @@ class ClipPostProcessor:
         processing_log: List[ProcessingLogEntry],
         tracking_summary: Optional[Dict],
         video_metadata: Optional[Dict] = None,
+        thumbnails: Optional[List[Path]] = None,
     ) -> None:
-        """Save processing log as JSON file alongside clip."""
+        """Save processing log as JSON file alongside clip.
+
+        ``thumbnails`` are the files written for this clip in this run; their
+        names go into the log's ``thumbnails`` list. ``None`` (thumbnails not
+        regenerated) leaves the key out so a stale list is never recorded.
+        """
         import json
         from dataclasses import asdict
         
@@ -554,8 +593,10 @@ class ClipPostProcessor:
                     "detection_rate_pct": round(100 * detection_frames / max(1, video_metadata.get("frames_to_analyze", 1)), 1) if video_metadata else 0,
                 },
                 "tracking_summary": tracking_summary,
-                "log_entries": [asdict(entry) for entry in processing_log],
             }
+            if thumbnails is not None:
+                log_data["thumbnails"] = [{"file": Path(p).name} for p in thumbnails]
+            log_data["log_entries"] = [asdict(entry) for entry in processing_log]
             
             def _do_write():
                 with open(log_path, 'w') as f:

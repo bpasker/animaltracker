@@ -129,6 +129,28 @@ def build_gstreamer_pipeline_nvdec(rtsp_uri: str, transport: str = "tcp", latenc
 MAX_KEY_FRAMES_PER_SPECIES = 3
 
 
+def pick_notification_thumbnail(saved: List[Path], clip_path: Path, species: str) -> Optional[Path]:
+    """Choose the photo attached to the event alert.
+
+    ``saved`` is what the post-processor just wrote, one per track in track
+    order, and each is checked by name: on the NFS archive a directory
+    listing taken right after the clip rename can be stale and hide those
+    files. The listing is only the fallback for clips that were not
+    post-processed. Like the web UI's card thumbnail, the track classified
+    as the notified species wins over an earlier generic fragment.
+    """
+    present = [Path(p) for p in saved if Path(p).is_file()]
+    if not present:
+        present = sorted(clip_path.parent.glob(clip_path.stem + "_thumb_*.jpg"))
+    if not present:
+        return None
+    wanted = "_thumb_" + species.replace(' ', '_').replace('/', '_').lower() + "_t"
+    for candidate in present:
+        if wanted in candidate.name:
+            return candidate
+    return present[0]
+
+
 async def _memory_watchdog(
     stop_event: asyncio.Event,
     interval_seconds: float = 30.0,
@@ -1700,6 +1722,7 @@ class StreamWorker:
                 final_species = ctx_base['species']
                 final_confidence = ctx_base['confidence']
                 tracks_count = 1  # Default assumption
+                saved_thumbnails: List[Path] = []  # written by the post-processor
 
                 # NOTE: legacy in-memory ``_analyze_clip_frames`` path was
                 # removed -- it required holding every event frame in RAM,
@@ -1774,6 +1797,7 @@ class StreamWorker:
                             final_species = result.new_species
                             final_confidence = result.confidence
                             tracks_count = result.tracks_detected
+                            saved_thumbnails = list(result.thumbnails_saved or [])
                             # Update clip_path if file was renamed
                             if result.new_path:
                                 clip_path = result.new_path
@@ -1936,14 +1960,15 @@ class StreamWorker:
                         LOGGER.warning("Failed to clean up excluded clip files: %s", e)
                     return  # Skip notification for excluded species
 
-                # Step 7: Find thumbnail for notification
+                # Step 7: Find thumbnail for notification. The files the
+                # post-processor just wrote are checked by name first; a
+                # directory listing taken right after the rename can be stale
+                # on NFS and hide them (see postprocess._drop_directory_cache).
                 thumbnail_path = None
                 try:
-                    thumb_pattern = clip_path.stem + "_thumb_*.jpg"
-                    thumb_files = list(clip_path.parent.glob(thumb_pattern))
-                    if thumb_files:
-                        # Use the first thumbnail found (usually the main species)
-                        thumbnail_path = str(thumb_files[0])
+                    chosen = pick_notification_thumbnail(saved_thumbnails, clip_path, final_species or "")
+                    if chosen is not None:
+                        thumbnail_path = str(chosen)
                         LOGGER.debug("Found thumbnail for notification: %s", thumbnail_path)
                 except Exception as e:
                     LOGGER.warning("Failed to find thumbnail: %s", e)

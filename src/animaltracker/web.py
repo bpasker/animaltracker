@@ -2100,56 +2100,109 @@ class WebServer:
         clips.sort(key=lambda x: x['time'], reverse=True)
         return clips
 
-    def _get_thumbnails_for_clip(self, clip_path: Path) -> list:
+    def _get_thumbnails_for_clip(self, clip_path: Path, log_data: dict | None = None) -> list:
         """Get all thumbnails associated with a clip file.
-        
-        Returns list of dicts with 'path' (relative to clips dir), 'species', 'url', 
+
+        Returns list of dicts with 'path' (relative to clips dir), 'species', 'url',
         and optionally 'track_index' for per-track thumbnails.
+
+        Two sources are merged: the directory listing, and the ``thumbnails``
+        the post-processor recorded in the clip's ``.log.json``, each checked
+        by name. On the NFS archive a listing fetched between the clip rename
+        and the sidecar writes can stay cached for good and hide files that
+        open fine by path; the sidecar is what keeps those key frames visible.
+        It is read here only when the listing shows nothing, so the archive
+        scan stays cheap; ``_get_clip_detail`` passes the sidecar it loads anyway.
         """
-        clips_dir = self.storage_root / 'clips'
-        clip_stem = clip_path.stem
         clip_dir = clip_path.parent
-        thumbnails = []
-        
-        # Look for thumbnails matching this clip
-        glob_pattern = f"{clip_stem}_thumb_*.jpg"
-        for thumb_file in clip_dir.glob(glob_pattern):
-            # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
-            # or: {timestamp}_{species}_thumb_{specific_species}_t{track_idx}.jpg (new format)
-            parts = thumb_file.stem.split("_thumb_")
-            track_index = None
-            
-            if len(parts) >= 2:
-                raw_species = parts[-1]
-                
-                # Check for track index suffix (e.g., "corvidae_t0" or "corvidae_t1")
-                track_match = re.match(r'^(.+?)_t(\d+)$', raw_species)
-                if track_match:
-                    raw_species = track_match.group(1)
-                    track_index = int(track_match.group(2))
-                else:
-                    # Remove trailing legacy index numbers (e.g., "bird_1" -> "bird")
-                    raw_species = re.sub(r'_\d+$', '', raw_species)
-                    
-                species = get_common_name(raw_species)
-            else:
-                species = "Unknown"
-            
-            rel_path = thumb_file.relative_to(clips_dir)
-            thumb_data = {
-                'path': str(rel_path),
-                'species': species,
-                'url': f"/clips/{rel_path}"
-            }
-            if track_index is not None:
-                thumb_data['track_index'] = track_index
-                
-            thumbnails.append(thumb_data)
-        
+        found: Dict[str, Path] = {}
+        for thumb_file in clip_dir.glob(f"{clip_path.stem}_thumb_*.jpg"):
+            found[thumb_file.name] = thumb_file
+
+        if log_data is None and not found:
+            log_data = self._read_sidecar(clip_path)
+        for name in self._sidecar_thumbnail_names(log_data, clip_path):
+            if name in found:
+                continue
+            candidate = clip_dir / name
+            if candidate.is_file():
+                found[name] = candidate
+
+        thumbnails = [self._thumbnail_entry(path) for path in found.values()]
         # Sort by track_index if present, to maintain consistent order
         thumbnails.sort(key=lambda x: (x.get('track_index', 999), x['path']))
-        
         return thumbnails
+
+    def _read_sidecar(self, clip_path: Path) -> dict:
+        """The clip's ``.log.json`` as a dict; ``{}`` when absent or unreadable."""
+        log_path = clip_path.with_suffix('.log.json')
+        if not log_path.exists():
+            return {}
+        try:
+            with open(log_path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            LOGGER.warning("Failed to load processing log: %s", e)
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _sidecar_thumbnail_names(log_data, clip_path: Path) -> list:
+        """Thumbnail file names the sidecar lists for this clip.
+
+        Entries are ``{"file": name}`` dicts. Only plain names of this clip's
+        own thumbnails count: the sidecar is data read from disk, and after a
+        rename without regeneration it still names the old stem.
+        """
+        if not isinstance(log_data, dict):
+            return []
+        entries = log_data.get('thumbnails')
+        if not isinstance(entries, list):
+            return []
+        prefix = f"{clip_path.stem}_thumb_"
+        names = []
+        for entry in entries:
+            name = entry.get('file') if isinstance(entry, dict) else None
+            if not isinstance(name, str) or not name.startswith(prefix) or not name.endswith('.jpg'):
+                continue
+            if Path(name).name != name:
+                continue
+            names.append(name)
+        return names
+
+    def _thumbnail_entry(self, thumb_file: Path) -> dict:
+        """The API's description of one thumbnail file, parsed from its name."""
+        clips_dir = self.storage_root / 'clips'
+        # Extract species from filename: {timestamp}_{species}_thumb_{specific_species}.jpg
+        # or: {timestamp}_{species}_thumb_{specific_species}_t{track_idx}.jpg (new format)
+        parts = thumb_file.stem.split("_thumb_")
+        track_index = None
+
+        if len(parts) >= 2:
+            raw_species = parts[-1]
+
+            # Check for track index suffix (e.g., "corvidae_t0" or "corvidae_t1")
+            track_match = re.match(r'^(.+?)_t(\d+)$', raw_species)
+            if track_match:
+                raw_species = track_match.group(1)
+                track_index = int(track_match.group(2))
+            else:
+                # Remove trailing legacy index numbers (e.g., "bird_1" -> "bird")
+                raw_species = re.sub(r'_\d+$', '', raw_species)
+
+            species = get_common_name(raw_species)
+        else:
+            species = "Unknown"
+
+        rel_path = thumb_file.relative_to(clips_dir)
+        thumb_data = {
+            'path': str(rel_path),
+            'species': species,
+            'url': f"/clips/{rel_path}"
+        }
+        if track_index is not None:
+            thumb_data['track_index'] = track_index
+        return thumb_data
 
     def _parse_species_from_filename(self, filename: str) -> tuple:
         """Extract clean species name from clip filename.
@@ -7457,20 +7510,18 @@ class WebServer:
         
         stat = clip_path.stat()
         species_display, raw_species = self._parse_species_from_filename(clip_path.name)
-        thumbnails = self._get_thumbnails_for_clip(clip_path)
-        
-        # Try to load processing log for track timing info
-        log_path = clip_path.with_suffix('.log.json')
+        # The sidecar names the thumbnails and carries the track timing, so
+        # it is read once and shared with the thumbnail lookup.
+        log_data = self._read_sidecar(clip_path)
+        thumbnails = self._get_thumbnails_for_clip(clip_path, log_data=log_data)
+
         track_info = {}
         video_fps = 15.0  # Default
         tracks_by_index = {}  # Index -> track data
         tracks_by_species = {}  # Fallback for old-format thumbnails
-        
-        if log_path.exists():
+
+        if log_data:
             try:
-                with open(log_path, 'r') as f:
-                    log_data = json.load(f)
-                
                 # Get video FPS for time calculation
                 if log_data.get('video', {}).get('fps'):
                     video_fps = log_data['video']['fps']

@@ -773,3 +773,25 @@ def test_runtime_present_but_clip_config_none_uses_defaults(make_server):
     assert server._get_clip_detail(CARDINAL_CLIP)["global_settings"] == (
         EXPECTED_DEFAULT_SETTINGS
     )
+
+
+# --------------------------------------------------------------------------
+# thumbnails named by the sidecar (stale NFS listing)
+# --------------------------------------------------------------------------
+
+
+def test_sidecar_named_thumbnail_is_enriched_when_the_listing_hides_it(server, monkeypatch):
+    clip = write_clip(server, CARDINAL_CLIP)
+    thumb = write_thumb(clip, "cardinalidae_t0")
+    payload = sidecar_payload([track(11, "cardinalidae", 0, 30, confidence=0.81)], fps=30.0)
+    payload["thumbnails"] = [{"file": thumb.name}]
+    write_sidecar(clip, payload)
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: iter(()))
+
+    thumbs = by_path(server._get_clip_detail(CARDINAL_CLIP))
+
+    t0 = thumbs[thumb.name]
+    assert t0["track_id"] == 11
+    assert t0["start_time"] == 0.0
+    assert t0["end_time"] == 1.0
+    assert t0["confidence"] == 0.81

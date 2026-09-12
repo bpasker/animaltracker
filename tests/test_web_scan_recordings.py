@@ -7,8 +7,10 @@ behaviour fails loudly.  Quirks are asserted as-is and flagged with
 """
 
 import itertools
+import json
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -627,3 +629,107 @@ def test_full_tree_scan(server, clips_dir):
     )
     assert found["manual_cam2_1600000000.mp4"]["date"] == "Manual"
     assert len(found["1715900000_deer.mp4"]["thumbnails"]) == 1
+
+
+# --------------------------------------------------------------------------
+# _get_thumbnails_for_clip: thumbnails named by the sidecar
+# --------------------------------------------------------------------------
+# The post-processor records the thumbnail files it wrote in the clip's
+# .log.json. On the NFS archive a directory listing fetched between the clip
+# rename and those writes can stay cached and hide the files for good while
+# they open fine by name (prod, 2026-09-11), so the lookup checks the named
+# files directly instead of trusting the listing alone.
+
+DOG_DIR = os.path.join("cam1", "2026", "09", "11")
+DOG_STEM = "1789184388_mammalia_carnivora_canidae"
+DOG_THUMB = f"{DOG_STEM}_thumb_mammalia_carnivora_canidae_t0.jpg"
+
+
+def hide_listing(monkeypatch):
+    """Simulate the stale NFS listing: every directory glob comes back empty."""
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: iter(()))
+
+
+def write_dog_clip(clips_dir, sidecar_thumbnails=None):
+    clip = write_file(clips_dir / DOG_DIR / f"{DOG_STEM}.mp4")
+    if sidecar_thumbnails is not None:
+        write_file(clip.with_suffix(".log.json"),
+                   json.dumps({"thumbnails": sidecar_thumbnails}).encode())
+    return clip
+
+
+def test_sidecar_named_thumbnail_is_found_when_the_listing_hides_it(server, clips_dir, monkeypatch):
+    clip = write_dog_clip(clips_dir, [{"file": DOG_THUMB}])
+    write_file(clip.parent / DOG_THUMB)
+    hide_listing(monkeypatch)
+
+    (thumb,) = server._get_thumbnails_for_clip(clip)
+
+    assert thumb["path"] == os.path.join(DOG_DIR, DOG_THUMB)
+    assert thumb["url"] == "/clips/" + thumb["path"]
+    assert thumb["species"] == "Dog/Canid"
+    assert thumb["track_index"] == 0
+
+
+def test_sidecar_named_file_that_is_not_on_disk_is_not_reported(server, clips_dir, monkeypatch):
+    clip = write_dog_clip(clips_dir, [{"file": DOG_THUMB}])
+    hide_listing(monkeypatch)
+
+    assert server._get_thumbnails_for_clip(clip) == []
+
+
+def test_listing_and_sidecar_naming_the_same_file_yield_one_entry(server, clips_dir):
+    clip = write_dog_clip(clips_dir, [{"file": DOG_THUMB}])
+    write_file(clip.parent / DOG_THUMB)
+
+    thumbs = server._get_thumbnails_for_clip(clip)
+
+    assert [t["path"] for t in thumbs] == [os.path.join(DOG_DIR, DOG_THUMB)]
+
+
+def test_sidecar_entries_that_are_not_this_clips_thumbnails_are_ignored(server, clips_dir, monkeypatch):
+    other = "1789184399_animal_thumb_animal_t0.jpg"
+    clip = write_dog_clip(clips_dir, [
+        {"file": other},                        # another clip's thumbnail
+        {"file": f"../{DOG_THUMB}"},            # not a plain file name
+        {"file": f"{DOG_STEM}_thumb_x.txt"},    # not a jpg
+        {"path": DOG_THUMB},                    # wrong key
+        "not-a-dict",
+    ])
+    write_file(clip.parent / other)
+    write_file(clip.parent.parent / DOG_THUMB)
+    write_file(clip.parent / f"{DOG_STEM}_thumb_x.txt")
+    hide_listing(monkeypatch)
+
+    assert server._get_thumbnails_for_clip(clip) == []
+
+
+def test_sidecar_is_only_read_when_the_listing_shows_nothing(server, clips_dir, monkeypatch):
+    # The archive scan calls this for every clip; parsing a 200 KB sidecar per
+    # clip would slow it down, so a listing that has thumbnails is trusted.
+    clip = write_dog_clip(clips_dir, [{"file": DOG_THUMB}])
+    write_file(clip.parent / DOG_THUMB)
+
+    def boom(_clip_path):
+        raise AssertionError("sidecar read although the listing had thumbnails")
+
+    monkeypatch.setattr(server, "_read_sidecar", boom)
+
+    assert len(server._get_thumbnails_for_clip(clip)) == 1
+
+
+def test_a_sidecar_passed_in_is_used_without_rereading(server, clips_dir, monkeypatch):
+    clip = write_dog_clip(clips_dir)  # no sidecar on disk
+    write_file(clip.parent / DOG_THUMB)
+    hide_listing(monkeypatch)
+
+    thumbs = server._get_thumbnails_for_clip(clip, log_data={"thumbnails": [{"file": DOG_THUMB}]})
+
+    assert [t["path"] for t in thumbs] == [os.path.join(DOG_DIR, DOG_THUMB)]
+
+
+def test_unreadable_sidecar_is_swallowed(server, clips_dir):
+    clip = write_dog_clip(clips_dir)
+    write_file(clip.with_suffix(".log.json"), b"{not json")
+
+    assert server._get_thumbnails_for_clip(clip) == []

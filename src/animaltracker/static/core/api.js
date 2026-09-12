@@ -21,7 +21,9 @@
      api.day(date, query, opts)              -> { date, clips, summary }
      api.monitor(opts)                       -> monitor payload
      api.logs(query, opts)                   -> logs payload
-     api.settings(opts) / api.saveSettings(body, opts)
+     api.config(opts) / api.saveConfig(body, opts)
+     api.probeCamera(body, opts)             -> { rtsp?, onvif?, env? }
+     api.restart(opts)                       -> { status:'restarting', unit }
      api.deleteClip(path, opts)              -> true
      api.bulkDelete(paths, opts)             -> { deleted_count, ... }
      api.reprocess(path, settings, opts)     -> server payload
@@ -47,6 +49,8 @@ export function ApiError(message, info) {
   this.status = (info && info.status) || 0;
   this.endpoint = (info && info.endpoint) || '';
   this.detail = (info && info.detail) || '';
+  /* The decoded JSON error body when the server sent one ({ error, problems }). */
+  this.body = (info && info.body) || null;
   this.cause = info && info.cause;
   /* Not a subclass of Error on purpose: Safari 15 loses the prototype chain
      through some transpiled paths, and every consumer checks .name. */
@@ -118,9 +122,14 @@ function request(method, endpoint, opts) {
     store.set({ connected: true });
     if (!res.ok) {
       return res.text().then(function (text) {
+        var body = null;
+        if (text && text.charAt(0) === '{') {
+          try { body = JSON.parse(text); } catch (e) { body = null; }
+        }
+        var detail = body && typeof body.error === 'string' ? body.error : (text || '').slice(0, 400);
         throw new ApiError(
           httpMessage(res.status, endpoint),
-          { status: res.status, endpoint: endpoint, detail: (text || '').slice(0, 400) }
+          { status: res.status, endpoint: endpoint, detail: detail, body: body }
         );
       }, function () {
         throw new ApiError(httpMessage(res.status, endpoint),
@@ -222,12 +231,29 @@ export var api = {
     return request('GET', '/api/logs' + qs(query), opts);
   },
 
-  settings: function (opts) {
-    return request('GET', '/api/settings', opts);
+  /** The validated cameras.yml plus runtime annotations (configstore.py). */
+  config: function (opts) {
+    return request('GET', '/api/config', opts);
   },
 
-  saveSettings: function (body, opts) {
-    return request('POST', '/api/settings', Object.assign({ body: body }, opts || {}));
+  /** body: { general: {...}, cameras: [{ id, ... }, ...] } — cameras missing
+      from the list are removed, unknown ids are added. The server validates,
+      backs up and writes the file, then applies what it can live. */
+  saveConfig: function (body, opts) {
+    return request('POST', '/api/config', Object.assign({ body: body }, opts || {}));
+  },
+
+  /** body: any of { rtsp: { uri, transport }, onvif: { host, port,
+      username_env, password_env }, env: [names] }. Probes run server-side;
+      credentials are looked up by env name and never travel. */
+  probeCamera: function (body, opts) {
+    return request('POST', '/api/config/probe',
+      Object.assign({ body: body, timeout: 30000 }, opts || {}));
+  },
+
+  /** Restart the service through systemd. 501 when not running under it. */
+  restart: function (opts) {
+    return request('POST', '/api/system/restart', Object.assign({ timeout: 10000 }, opts || {}));
   },
 
   /* The server deletes for real — there is no soft-delete window on disk.

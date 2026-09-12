@@ -13,8 +13,10 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from .species_names import get_common_name, format_species_display, get_species_icon
+from . import configstore
 
 # Server's timezone (configurable or auto-detected)
+import threading
 import time as _time
 
 # Automated clips are named "<epoch>_<species>.mp4"; the epoch is the event's
@@ -452,7 +454,14 @@ class WebServer:
         self.app.router.add_get('/settings', self.handle_settings_page)
         self.app.router.add_get('/api/settings', self.handle_get_settings)
         self.app.router.add_post('/api/settings', self.handle_update_settings)
-        
+        # Configuration editor behind /app/settings: the file is the source of
+        # truth, saves are validated + backed up, restart-only fields are
+        # reported as pending. See configstore.py.
+        self.app.router.add_get('/api/config', self.handle_get_config)
+        self.app.router.add_post('/api/config', self.handle_save_config)
+        self.app.router.add_post('/api/config/probe', self.handle_probe_camera)
+        self.app.router.add_post('/api/system/restart', self.handle_restart)
+
         # New client-side app. Served at /app while the rewrite is in progress so the
         # existing pages stay available for comparison; the root routes move here at
         # cutover.
@@ -10750,6 +10759,173 @@ class WebServer:
         # Write back to file
         with self.config_path.open('w', encoding='utf-8') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    # ------------------------------------------------------------------
+    # /api/config — the settings editor's contract (see configstore.py)
+    # ------------------------------------------------------------------
+
+    def _stream_state(self, worker) -> dict:
+        """The same live/stale/offline verdict /api/cameras gives."""
+        now = _time.time()
+        last_ts = float(getattr(worker, 'latest_frame_ts', 0.0) or 0.0)
+        age = (now - last_ts) if last_ts > 0 else None
+        connected = bool(getattr(worker, 'stream_connected', False))
+        has_frame = getattr(worker, 'latest_frame', None) is not None
+        if not has_frame:
+            state = 'offline'
+        elif not connected or (age is not None and age > STALE_AFTER_SECONDS):
+            state = 'stale'
+        else:
+            state = 'live'
+        return {'state': state, 'frame_age': round(age, 1) if age is not None else None}
+
+    def _config_runtime_annotation(self, camera_id: str):
+        """What the running process knows about one configured camera."""
+        worker = self.workers.get(camera_id)
+        if worker is None:
+            return {'running': False}
+        info = {'running': True}
+        info.update(self._stream_state(worker))
+        info['onvif_connected'] = bool(
+            getattr(worker, 'onvif_client', None) and getattr(worker, 'onvif_profile_token', None)
+        )
+        info['profile_token'] = getattr(worker, 'onvif_profile_token', None)
+        info['has_tracker'] = getattr(worker, 'ptz_tracker', None) is not None
+        return info
+
+    def _config_error_response(self, err: 'configstore.ConfigError', status: int):
+        return web.json_response({
+            'error': str(err),
+            'problems': list(err.problems),
+            'config_path': str(self.config_path) if self.config_path else None,
+        }, status=status)
+
+    async def handle_get_config(self, request):
+        """GET /api/config — the validated file plus runtime annotations."""
+        if not self.config_path:
+            return web.json_response({'error': 'The server was started without a config path.'}, status=500)
+        loop = asyncio.get_running_loop()
+        recent = await loop.run_in_executor(None, self._get_recent_detections)
+        try:
+            payload = await loop.run_in_executor(
+                None,
+                lambda: configstore.describe(
+                    self.config_path, self.runtime, self.workers,
+                    self._config_runtime_annotation, recent,
+                ),
+            )
+        except configstore.ConfigError as err:
+            return self._config_error_response(err, 500)
+        except OSError as err:
+            return web.json_response({'error': f'Could not read {self.config_path}: {err}'}, status=500)
+        return web.json_response(payload)
+
+    async def handle_save_config(self, request):
+        """POST /api/config — merge, validate, back up, write, apply live."""
+        if not self.config_path:
+            return web.json_response({'error': 'The server was started without a config path.'}, status=500)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({'error': 'Invalid JSON body'}, status=400)
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, lambda: configstore.save(self.config_path, body, self.runtime, self.workers)
+            )
+        except configstore.ConfigError as err:
+            return self._config_error_response(err, 400)
+        except OSError as err:
+            LOGGER.error("Failed to write %s: %s", self.config_path, err, exc_info=True)
+            return web.json_response({
+                'error': f'{self.config_path.name} was not written: {err}',
+                'problems': [],
+            }, status=500)
+
+        for cam_id, patch in result.get('ptz_state', {}).items():
+            try:
+                self._update_ptz_state(cam_id, **patch)
+            except Exception as err:  # noqa: BLE001 - the config is already saved
+                LOGGER.warning("Could not sync ptz_state.json for %s: %s", cam_id, err)
+
+        changes = result['changes']
+        if result['written']:
+            LOGGER.info(
+                "Settings saved to %s (general: %s; cameras: %s; added: %s; removed: %s; live: %d) backup=%s",
+                self.config_path, changes['general'], list(changes['cameras'].keys()),
+                changes['added'], changes['removed'], len(result['applied_live']), result['backup'],
+            )
+        reasons = configstore.pending_restart(result['config'], self.runtime, self.workers)
+        support = configstore.restart_support()
+        return web.json_response({
+            'status': 'ok',
+            'written': result['written'],
+            'backup': result['backup'],
+            'applied_live': result['applied_live'],
+            'changes': changes,
+            'restart': {
+                'required': bool(reasons),
+                'reasons': reasons,
+                'supported': support['supported'],
+                'unit': support['unit'],
+            },
+        })
+
+    async def handle_probe_camera(self, request):
+        """POST /api/config/probe — test a stream URI, an ONVIF endpoint, or env names.
+
+        Body: {"rtsp": {"uri", "transport"}, "onvif": {"host", "port",
+        "username_env", "password_env"}, "env": ["NAME", ...]} — any subset.
+        Secrets never travel: ONVIF credentials are looked up by env name.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({'error': 'Invalid JSON body'}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({'error': 'Body must be an object'}, status=400)
+        loop = asyncio.get_running_loop()
+        out = {}
+        tasks = {}
+        rtsp = body.get('rtsp')
+        if isinstance(rtsp, dict):
+            tasks['rtsp'] = loop.run_in_executor(
+                None, lambda: configstore.probe_rtsp(str(rtsp.get('uri') or ''), str(rtsp.get('transport') or 'tcp'))
+            )
+        onvif = body.get('onvif')
+        if isinstance(onvif, dict):
+            tasks['onvif'] = loop.run_in_executor(
+                None, lambda: configstore.probe_onvif(
+                    str(onvif.get('host') or ''), onvif.get('port') or 80,
+                    str(onvif.get('username_env') or ''), str(onvif.get('password_env') or ''),
+                )
+            )
+        names = body.get('env')
+        if isinstance(names, list):
+            out['env'] = configstore.env_presence([str(n) for n in names][:50])
+        for key, task in tasks.items():
+            out[key] = await task
+        return web.json_response(out)
+
+    async def handle_restart(self, request):
+        """POST /api/system/restart — restart the service through systemd."""
+        support = configstore.restart_support()
+        if not support['supported']:
+            return web.json_response({
+                'error': 'Not running under systemd, so the process cannot restart itself. '
+                         'Restart it by hand (for example: sudo systemctl restart animaltracker).',
+                'supported': False,
+            }, status=501)
+        unit = support['unit']
+        LOGGER.warning("Restart requested from the settings page; restarting %s", unit)
+
+        def _go():
+            configstore.restart_now(unit)
+
+        loop = asyncio.get_running_loop()
+        # Answer first so the client sees the acknowledgement, then let go.
+        loop.call_later(0.5, lambda: threading.Thread(target=_go, name='service-restart', daemon=True).start())
+        return web.json_response({'status': 'restarting', 'unit': unit})
 
     def _load_ptz_state(self) -> dict:
         """Load persisted PTZ state from file."""

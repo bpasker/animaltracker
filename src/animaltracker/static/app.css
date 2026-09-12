@@ -4735,3 +4735,264 @@ body.is-locked{
     grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
   }
 }
+
+
+/* ============================================================================
+   SETTINGS EDITOR  (views/settings.js)
+   A grouped section nav beside one section at a time. Everything here is
+   built from the tokens above; the only new shapes are the notice (a
+   pending-restart banner), the disclosure (an "Advanced" fold inside a
+   fieldset), the probe line under a connection test, and the danger zone.
+   ========================================================================= */
+
+.settings{
+  display:grid;
+  gap:var(--s-6);
+  align-items:start;
+  grid-template-columns:minmax(0,1fr);
+}
+.settings__nav{
+  display:grid;
+  gap:var(--s-4);
+  min-width:0;
+}
+.settings__navgroup{
+  display:grid;
+  gap:var(--s-1);
+  min-width:0;
+}
+.settings__navlist{
+  display:flex;
+  flex-wrap:wrap;
+  gap:var(--s-2);
+  min-width:0;
+}
+.settings__navlist .tab{
+  justify-content:flex-start;
+  max-width:100%;
+}
+.settings__navlist .tab > .truncate{ min-width:0 }
+.tab__meta{
+  margin-left:auto;
+  padding-left:var(--s-2);
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  font-weight:var(--w-regular);
+  color:var(--c-text-3);
+  white-space:nowrap;
+}
+.tab__meta--live{ color:var(--c-live-text) }
+.tab__meta--stale{ color:var(--c-stale-text) }
+.tab__meta--off{ color:var(--c-danger-text) }
+.settings__panel{
+  display:grid;
+  gap:var(--s-6);
+  min-width:0;
+}
+.settings__head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:var(--s-3);
+  flex-wrap:wrap;
+}
+.settings__head > .stack{ flex:1 1 240px }
+.settings__blurb{
+  margin:0;
+  font-size:var(--t-sm);
+  color:var(--c-text-2);
+}
+.settings__intro{
+  display:flex;
+  align-items:flex-start;
+  gap:var(--s-2);
+  margin:0;
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+  line-height:var(--lh-snug);
+}
+.settings__intro .i-sm{ flex:none; margin-top:1px }
+
+@media (min-width:1024px){
+  .settings{ grid-template-columns:236px minmax(0,1fr) }
+  .settings__nav{
+    position:sticky;
+    top:calc(var(--chrome-top) + var(--s-4));
+  }
+  .settings__navlist{ flex-direction:column; align-items:stretch }
+}
+
+/* Status line under a camera's title: dot + words, never colour alone. */
+.statusline{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:var(--s-2) var(--s-3);
+  font-size:var(--t-xs);
+  color:var(--c-text-2);
+}
+.statusline .camrow__dot{ grid-row:auto }
+.statusline__sep{ color:var(--c-text-3) }
+
+/* -- Notice: a pending-restart or warning banner ------------------------- */
+.notice{
+  display:flex;
+  align-items:flex-start;
+  gap:var(--s-3);
+  padding:var(--s-4);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-md);
+  background:var(--c-surface-2);
+  color:var(--c-text);
+}
+.notice > .i{ flex:none; margin-top:1px }
+.notice--warn{
+  background:var(--c-stale-wash);
+  border-color:transparent;
+  color:var(--c-stale-text);
+}
+.notice--danger{
+  background:var(--c-danger-wash);
+  border-color:transparent;
+  color:var(--c-danger-text);
+}
+.notice__body{ flex:1 1 240px; min-width:0; display:grid; gap:var(--s-1) }
+.notice__title{
+  margin:0;
+  font-size:var(--t-sm);
+  font-weight:var(--w-semi);
+}
+.notice__list{
+  margin:0;
+  padding-left:1.2em;
+  font-size:var(--t-xs);
+  line-height:var(--lh-normal);
+}
+.notice__list li{ overflow-wrap:anywhere }
+.notice__hint{
+  margin:0;
+  font-size:var(--t-xs);
+  opacity:.9;
+}
+.notice__actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:var(--s-2);
+  align-self:center;
+}
+
+/* -- Disclosure: the "Advanced" fold inside a fieldset -------------------- */
+.disclosure{
+  border-top:1px solid var(--c-line-soft);
+  padding-top:var(--s-3);
+}
+.disclosure__summary{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-height:var(--tap);
+  cursor:pointer;
+  list-style:none;
+  font-size:var(--t-xs);
+  font-weight:var(--w-medium);
+  color:var(--c-text-2);
+  -webkit-user-select:none;
+  user-select:none;
+}
+.disclosure__summary::-webkit-details-marker{ display:none }
+.disclosure__summary:focus-visible{
+  outline:2px solid var(--c-focus);
+  outline-offset:2px;
+  border-radius:var(--r-xs);
+}
+.disclosure__chev{ transition:transform var(--dur-fast) var(--ease-out) }
+.disclosure[open] > .disclosure__summary .disclosure__chev{ transform:rotate(180deg) }
+.disclosure__body{
+  display:grid;
+  gap:var(--s-5);
+  padding-top:var(--s-4);
+}
+
+/* -- Probe: result line of a connection test ----------------------------- */
+.probe{
+  display:flex;
+  align-items:flex-start;
+  gap:var(--s-2);
+  min-height:20px;
+  font-size:var(--t-xs);
+  line-height:var(--lh-snug);
+  color:var(--c-text-2);
+}
+.probe .i-sm{ flex:none; margin-top:1px }
+.probe--ok{ color:var(--c-live-text) }
+.probe--bad{ color:var(--c-danger-text) }
+.probe__detail{
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+  overflow-wrap:anywhere;
+}
+.probe__profiles{
+  display:grid;
+  gap:var(--s-2);
+  margin-top:var(--s-2);
+}
+.probe__profile{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:var(--s-2);
+}
+
+/* -- Env presence tag next to a variable-name field --------------------- */
+.envtag{
+  display:inline-flex;
+  align-items:center;
+  gap:var(--s-1);
+  padding:1px var(--s-2);
+  border-radius:var(--r-pill);
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  font-weight:var(--w-medium);
+  background:var(--c-surface-sunken);
+  color:var(--c-text-3);
+}
+.envtag--set{ background:var(--c-live-wash); color:var(--c-live-text) }
+.envtag--unset{ background:var(--c-danger-wash); color:var(--c-danger-text) }
+
+/* -- Read-only facts (config path, backup dir) --------------------------- */
+.facts{
+  display:grid;
+  gap:var(--s-2);
+  margin:0;
+}
+.facts > div{
+  display:grid;
+  gap:2px;
+}
+.facts dt{
+  font-size:var(--t-xs);
+  color:var(--c-text-3);
+}
+.facts dd{
+  margin:0;
+  font-family:var(--font-mono);
+  font-size:var(--t-sm);
+  color:var(--c-text-2);
+  overflow-wrap:anywhere;
+}
+
+/* -- Danger zone --------------------------------------------------------- */
+.dangerzone{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--s-3);
+  padding:var(--s-4);
+  border:1px dashed var(--c-danger);
+  border-radius:var(--r-md);
+}
+.dangerzone__text{ flex:1 1 240px; min-width:0; display:grid; gap:2px }
+.dangerzone__title{ margin:0; font-size:var(--t-sm); font-weight:var(--w-semi); color:var(--c-text) }
+.dangerzone__hint{ margin:0; font-size:var(--t-xs); color:var(--c-text-3) }

@@ -28,3 +28,7 @@ config/cameras.yml
 config/secrets.env
 config/*.env
 config/cameras.mac.yml
+
+# Settings-page backups of cameras.yml (see src/animaltracker/configstore.py)
+config/backups/
+config/*.tmp

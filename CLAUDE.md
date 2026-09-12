@@ -56,7 +56,11 @@ The system uses a two-stage detection approach:
 - `ptz_tracker.py` - PTZ auto-tracking controller, pixel-to-PTZ coordinate mapping
 - `ptz_calibration.py` - Auto-calibration via ORB feature matching between wide/zoom frames
 - `onvif_client.py` - ONVIF camera control and discovery
-- `web.py` - Flask web UI for clip browsing
+- `web.py` - aiohttp web UI and JSON API (the client-side app lives in `static/`)
+- `configstore.py` - the settings editor's transaction on `config/cameras.yml`:
+  read + validate, deep-merge the managed keys, back up, atomic write, apply
+  live-safe fields to the running process, diff file vs. runtime for the
+  pending-restart banner, RTSP/ONVIF probes, systemd restart
 
 ### Multi-Camera PTZ Tracking
 
@@ -98,6 +102,30 @@ RTSP Stream → StreamWorker → Real-time Detector → ObjectTracker → PTZTra
 
 - `config/cameras.yml` - Camera RTSP URIs, detection thresholds, PTZ settings
 - `config/secrets.env` - ONVIF credentials, Pushover tokens, Kaggle API keys
+- `config/backups/` - the last 20 versions of `cameras.yml` written by the
+  settings page (gitignored)
+
+### Settings page (`/app/settings`)
+
+`static/views/settings.js` talks to `GET/POST /api/config`,
+`POST /api/config/probe` and `POST /api/system/restart` (all in `web.py`,
+backed by `configstore.py`). Rules that keep it safe:
+
+- The file is the source of truth: GET returns the validated file with every
+  schema default filled in, plus runtime annotations per camera.
+- `GENERAL_FIELDS` / `CAMERA_FIELDS` in `configstore.py` list the managed keys
+  and whether the pipeline reads each one live (`True`) or at startup
+  (`False`). The client inventory (`GENERAL_SECTIONS` / `CAMERA_GROUPS` in
+  `settings.js`) must carry the matching `restart` flag; adding a field means
+  touching both lists.
+- POST deep-merges into the parsed file, validates the result with
+  `RuntimeConfig`, backs up, writes atomically, then `setattr`s live fields on
+  the running models. Restart-only fields are never applied live, because the
+  pending-restart banner is the diff between file and runtime.
+- Values equal to the schema default are not written for keys the file lacks,
+  so hand-kept files stay compact.
+- The legacy `/settings` page still uses `/api/settings`; that path is
+  unchanged and slated for removal at cutover.
 
 PTZ calibration parameters in cameras.yml:
 ```yaml

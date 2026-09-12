@@ -20,6 +20,7 @@
   - [Linux / Jetson Nano](#linux--jetson-nano-setup)
   - [Windows](#windows-setup)
 - [Configuration Guide](#-configuration-guide)
+  - [Editing settings from the web UI](#editing-settings-from-the-web-ui)
   - [Detector Backends: SpeciesNet vs YOLO](#detector-backends-speciesnet-vs-yolo)
 - [CLI Commands Reference](#-cli-commands-reference)
 - [Running as a Service](#-running-as-a-service)
@@ -296,6 +297,33 @@ cameras:
       confidence: 0.5                # Detection confidence (0.0-1.0)
       min_frames: 3                  # Frames before triggering
 ```
+
+### Editing settings from the web UI
+
+Open `http://<host>:8080/app/settings`. The page edits `config/cameras.yml`
+in place, so it is the everyday way to tune the system and to add cameras
+without a shell:
+
+- **General** pages: *Detection* (backends, YOLO weights, SpeciesNet version,
+  location priors), *Recording* (clip buffer, post-processing, false-positive
+  cleanup, track merging), *Storage* (paths, retention), *Notifications*
+  (Pushover variable names, alert link base URL, global exclusions) and
+  *System* (metrics port, timezone, service restart).
+- **Cameras**: one page per camera with identity, stream, ONVIF, detection
+  thresholds, PTZ auto-tracking, species filters and notifications. **Add
+  camera** creates a new entry (with a *Test stream* check and optional ONVIF
+  block); **Remove camera** drops one. *Test stream* and *Test ONVIF* probe
+  the camera from the server and list its media profiles.
+- Fields marked **Restart** are read once at startup. After a save, a banner
+  lists what the running process is out of date on and offers **Restart now**
+  (under systemd; elsewhere it tells you the command).
+- Every save validates the whole file with the schema the pipeline loads,
+  keeps the previous version in `config/backups/` (last 20) and writes
+  atomically. Keys the page does not manage (for example `ebird:`) are left
+  untouched; YAML comments are not preserved.
+- Secrets never pass through the page: ONVIF and Pushover credentials are
+  referenced by environment-variable name, and the page shows whether each
+  name is set in the process environment (`config/secrets.env`).
 
 ### Detector Backends: SpeciesNet vs YOLO
 

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "settings-dev",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["scripts/dev_web.py", "config/cameras.sample.yml", "--port", "8081"],
+      "port": 8081
+    }
+  ]
+}

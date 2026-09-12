@@ -4,6 +4,7 @@ from __future__ import annotations
 import gc
 import logging
 import re
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -84,7 +85,38 @@ def _is_edge_anchored_elongated_bbox(bbox: List[float], frame_shape) -> bool:
 
 class BaseDetector(ABC):
     """Abstract base class for detection backends."""
-    
+
+    # Guards the lazy creation of each instance's model lock.
+    _lock_guard = threading.Lock()
+
+    @property
+    def model_lock(self) -> threading.Lock:
+        """The lock every forward pass of this instance runs under.
+
+        One detector instance is shared by every camera worker, and the
+        workers call ``infer`` from executor threads at the same time. The
+        YOLOv5 head inside MegaDetector caches its anchor grid per input
+        shape and rebuilds it when the shape changes, so two concurrent
+        calls with differently shaped frames (a 4:3 camera next to a 16:9
+        one letterbox to different heights) corrupt each other's forward
+        pass with "The size of tensor a (96) must match the size of tensor
+        b (120)". Ultralytics YOLO objects are not thread-safe either. The
+        GPU runs one kernel stream at a time anyway, so serialising the
+        forward pass costs little.
+
+        Created lazily so it exists for instances built without their
+        constructor (tests, ``object.__new__``) and for subclasses that do
+        not call ``super().__init__``.
+        """
+        lock = self.__dict__.get("_model_lock")
+        if lock is None:
+            with BaseDetector._lock_guard:
+                lock = self.__dict__.get("_model_lock")
+                if lock is None:
+                    lock = threading.Lock()
+                    self.__dict__["_model_lock"] = lock
+        return lock
+
     @abstractmethod
     def infer(self, frame: np.ndarray, conf_threshold: float = 0.5) -> List[Detection]:
         """Run inference on a single frame."""
@@ -169,7 +201,8 @@ class YoloDetector(BaseDetector):
         if self.animal_only:
             predict_kwargs['classes'] = list(self.ANIMAL_CLASS_IDS)
         
-        results = self.model.predict(**predict_kwargs)
+        with self.model_lock:
+            results = self.model.predict(**predict_kwargs)
         detections: List[Detection] = []
         
         for result in results:
@@ -348,7 +381,10 @@ class MegaDetectorBackend(BaseDetector):
         # need it because we never look at it. predict() reads the result
         # tensor on CPU (NMS, .item() for conf), which implicitly
         # synchronises CUDA so the elapsed time here is real wall clock.
-        pred = self._detector.predict("inmem", preprocessed)
+        # Serialised: see BaseDetector.model_lock. Prep above stays outside
+        # the lock, it is per-call CPU work with no shared state.
+        with self.model_lock:
+            pred = self._detector.predict("inmem", preprocessed)
         _t2 = _time.perf_counter()
 
         detections: List[Detection] = []
@@ -702,9 +738,9 @@ class SpeciesNetDetector(BaseDetector):
         # the tempfile we used to write.
         key = "inmem"
 
-        detector_result = self._sn_detector.predict(
-            key, self._sn_detector.preprocess(pil_img)
-        )
+        preprocessed = self._sn_detector.preprocess(pil_img)
+        with self.model_lock:  # see BaseDetector.model_lock
+            detector_result = self._sn_detector.predict(key, preprocessed)
         raw_dets = detector_result.get("detections") or []
 
         # One ensemble verdict per box the detector found, not one per frame.
@@ -906,9 +942,9 @@ class SpeciesNetDetector(BaseDetector):
             # sees every box. combine() returns the prediction list directly,
             # where predict() wrapped it in {"predictions": [...]}.
             bboxes = [self._BBox(*det["bbox"]) for det in raw_dets]
-            classifier_result = self._sn_classifier.predict(
-                key, self._sn_classifier.preprocess(pil_img, bboxes=bboxes)
-            )
+            crop = self._sn_classifier.preprocess(pil_img, bboxes=bboxes)
+            with self.model_lock:
+                classifier_result = self._sn_classifier.predict(key, crop)
             return self._sn_ensemble.combine(
                 filepaths=[key],
                 classifier_results={key: classifier_result},
@@ -937,7 +973,8 @@ class SpeciesNetDetector(BaseDetector):
                 self._sn_classifier.preprocess(pil_img, bboxes=[self._BBox(*det["bbox"])])
                 for _, _, det in to_classify
             ]
-            classifier_results = self._sn_classifier.batch_predict(keys, crops)
+            with self.model_lock:
+                classifier_results = self._sn_classifier.batch_predict(keys, crops)
             combined = self._sn_ensemble.combine(
                 filepaths=keys,
                 classifier_results=dict(zip(keys, classifier_results)),

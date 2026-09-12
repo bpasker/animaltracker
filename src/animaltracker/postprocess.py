@@ -195,6 +195,10 @@ class ProcessingSettings:
     spatial_merge_enabled: bool = True  # Merge tracks in similar locations (best!)
     spatial_merge_iou: float = 0.3  # Min IoU overlap to consider same object
     spatial_merge_gap: int = 30  # Max frame gap for spatial matching
+    # A track that starts within this many body lengths (longest box side)
+    # of where the previous one ended continues it, whatever the IoU: an
+    # animal walking away shrinks faster than it moves. 0 disables.
+    spatial_merge_reach: float = 1.0
     hierarchical_merge_enabled: bool = True  # Merge generic→specific (animal→canidae)
     hierarchical_merge_gap: int = 120  # Max frame gap for hierarchical merge
     min_specific_detections: int = 2  # Min detections for specific track to absorb generic
@@ -233,6 +237,7 @@ class ProcessingSettings:
             "spatial_merge_enabled": self.spatial_merge_enabled,
             "spatial_merge_iou": self.spatial_merge_iou,
             "spatial_merge_gap": self.spatial_merge_gap,
+            "spatial_merge_reach": self.spatial_merge_reach,
             "hierarchical_merge_enabled": self.hierarchical_merge_enabled,
             "hierarchical_merge_gap": self.hierarchical_merge_gap,
             "min_specific_detections": self.min_specific_detections,
@@ -260,6 +265,7 @@ class ProcessingSettings:
             spatial_merge_enabled=data.get("spatial_merge_enabled", True),
             spatial_merge_iou=data.get("spatial_merge_iou", 0.3),
             spatial_merge_gap=data.get("spatial_merge_gap", 30),
+            spatial_merge_reach=data.get("spatial_merge_reach", 1.0),
             hierarchical_merge_enabled=data.get("hierarchical_merge_enabled", True),
             hierarchical_merge_gap=data.get("hierarchical_merge_gap", 120),
             min_specific_detections=data.get("min_specific_detections", 2),
@@ -834,11 +840,13 @@ class ClipPostProcessor:
             spatial_merged = tracker.merge_spatially_adjacent_tracks(
                 iou_threshold=settings.spatial_merge_iou,
                 max_frame_gap=settings.spatial_merge_gap,
+                reach=settings.spatial_merge_reach,
             )
             if spatial_merged > 0:
                 note("spatial_merge",
                      f"Merged {spatial_merged} tracks based on spatial continuity "
-                     f"(IoU≥{settings.spatial_merge_iou}, gap≤{settings.spatial_merge_gap})")
+                     f"(IoU≥{settings.spatial_merge_iou} or centre within "
+                     f"{settings.spatial_merge_reach} body lengths, gap≤{settings.spatial_merge_gap})")
 
             # Merge spurious parallel tracks (overlapping in time but same location)
             # ByteTrack sometimes creates duplicate tracks when briefly losing an object

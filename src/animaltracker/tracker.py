@@ -6,6 +6,7 @@ objects, accumulating classifications to pick the best identification.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -1269,21 +1270,63 @@ class ObjectTracker:
             return 0.0
         
         return inter_area / union_area
+
+    def _center_distance_ratio(self, bbox1: List[float], bbox2: List[float]) -> float:
+        """Distance between two boxes' centres, in body lengths.
+
+        The body length is the longest side of either box, so the same
+        pixel move counts for more the smaller (further away) the animal is.
+        0.0 means the boxes share a centre; a degenerate box gives ``inf``.
+
+        Args:
+            bbox1, bbox2: Bounding boxes as [x1, y1, x2, y2]
+
+        Returns:
+            Centre-to-centre distance divided by the longest box side
+        """
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        body_length = max(x2_1 - x1_1, y2_1 - y1_1, x2_2 - x1_2, y2_2 - y1_2)
+        if body_length <= 0:
+            return float("inf")
+        dx = (x1_1 + x2_1) / 2 - (x1_2 + x2_2) / 2
+        dy = (y1_1 + y2_1) / 2 - (y1_2 + y2_2) / 2
+        return math.hypot(dx, dy) / body_length
     
-    def merge_spatially_adjacent_tracks(self, iou_threshold: float = 0.3, max_frame_gap: int = 30) -> int:
+    def merge_spatially_adjacent_tracks(
+        self,
+        iou_threshold: float = 0.3,
+        max_frame_gap: int = 30,
+        reach: float = 1.0,
+    ) -> int:
         """Merge tracks that end and start in similar spatial locations.
         
         This is a simpler, more robust merge strategy:
         - If Track A ends at frame N with bounding box at position P
         - And Track B starts at frame N+gap with bounding box at position Q
-        - And P and Q have high IoU (spatial overlap)
+        - And P and Q overlap (IoU) or Q's centre lies within ``reach``
+          body lengths of P's centre
         - Then they're probably the same animal
         
         This works regardless of species labels - pure spatial continuity.
+
+        IoU alone misses an animal that is walking away or towards the
+        camera: its box shrinks or grows between the two fragments, so the
+        overlap falls below the threshold although the animal barely moved.
+        A dog walking away from the door (2026-09-11) ended one track with a
+        175 px box and started the next a third of a body length away with a
+        112 px box; the IoU was 0.34, under the configured 0.6, and the far
+        fragment stood as a separate "squirrel". The centre-distance test
+        measures the move in units of the longer side of either box (one
+        body length), so it scales with how close the animal is.
         
         Args:
             iou_threshold: Minimum IoU between ending/starting bboxes to merge (0.3 = 30% overlap)
             max_frame_gap: Maximum frame gap to consider for spatial matching
+            reach: Maximum centre-to-centre distance, in body lengths, for
+                the later track's first box to count as a continuation of
+                the earlier track's last box; 0 disables the distance test
+                and leaves IoU as the only criterion
             
         Returns:
             Number of tracks merged
@@ -1354,18 +1397,21 @@ class ObjectTracker:
                     # Too far apart temporally
                     continue
                 
-                # Check spatial overlap (IoU between end of earlier and start of later)
+                # Check spatial continuity between the end of earlier and the
+                # start of later: overlap, or a centre within reach
                 iou = self._calculate_iou(earlier['last_bbox'], later['first_bbox'])
+                distance = self._center_distance_ratio(earlier['last_bbox'], later['first_bbox'])
+                within_reach = reach > 0 and distance <= reach
                 
-                if iou >= iou_threshold:
+                if iou >= iou_threshold or within_reach:
                     LOGGER.info(
                         "Spatial merge: Track %d (%s, frames %d-%d) + Track %d (%s, frames %d-%d), "
-                        "IoU=%.2f, gap=%d frames",
+                        "IoU=%.2f, centre distance=%.2f body lengths, gap=%d frames",
                         earlier['track_id'], earlier['species'], 
                         earlier['first_frame'], earlier['last_frame'],
                         later['track_id'], later['species'],
                         later['first_frame'], later['last_frame'],
-                        iou, frame_gap
+                        iou, distance, frame_gap
                     )
                     
                     later_info = later['info']

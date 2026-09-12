@@ -54,9 +54,9 @@ def _replay(**tracker_kwargs) -> ObjectTracker:
     return tracker
 
 
-def _processor() -> ClipPostProcessor:
+def _processor(**overrides) -> ClipPostProcessor:
     proc = object.__new__(ClipPostProcessor)
-    proc.settings = ProcessingSettings.from_dict(_clip()["settings"])
+    proc.settings = ProcessingSettings.from_dict({**_clip()["settings"], **overrides})
     return proc
 
 
@@ -122,10 +122,12 @@ def test_a_dog_read_as_a_cat_for_one_frame_is_a_minority_vote():
 def test_the_closing_passes_catch_the_cat_frames_even_when_the_tracker_fragments():
     # Belt and braces: with the old threshold the two recorded felidae frames
     # were tracks of their own. The late gap-fill and weak-track passes fold
-    # them into the dog's tracks whatever the tracker did.
+    # them into the dog's tracks whatever the tracker did. The spatial pass
+    # is held to overlap only (no reach), or it stitches the one-frame
+    # fragments itself and the closing passes are never exercised.
     tracker = _replay(minimum_matching_threshold=OLD_THRESHOLD)
 
-    log = _processor()._merge_tracks(tracker)
+    log = _processor(spatial_merge_reach=0)._merge_tracks(tracker)
 
     assert _species(tracker) == [CANIDAE]
     assert len(tracker.tracks) == 2

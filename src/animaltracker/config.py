@@ -37,6 +37,7 @@ class ClipSettings(BaseModel):
     track_merge_gap: int = Field(default=120, ge=10, le=500, description="Max frame gap to merge same-species tracks")
     spatial_merge_enabled: bool = Field(default=True, description="Merge tracks in same location (ignores species misclassifications)")
     spatial_merge_iou: float = Field(default=0.3, ge=0.1, le=0.9, description="Min bounding box overlap to merge (0.3 = 30%)")
+    spatial_merge_reach: float = Field(default=1.0, ge=0, le=5, description="Also merge a track that starts within this many body lengths (longest box side) of where the previous one ended, whatever the overlap; 0 = overlap only")
     hierarchical_merge_enabled: bool = Field(default=True, description="Merge 'animal' tracks into specific species tracks")
     single_animal_mode: bool = Field(default=False, description="Force merge ALL non-overlapping tracks into one")
     # Unified post-processing (new approach - analyze saved video file instead of in-memory frames)

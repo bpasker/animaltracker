@@ -6226,6 +6226,7 @@ class WebServer:
             'spatial_merge_enabled': getattr(clip_cfg, 'spatial_merge_enabled', True) if clip_cfg else True,
             'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3) if clip_cfg else 0.3,
             'spatial_merge_gap': 30,  # Default gap for spatial matching
+            'spatial_merge_reach': getattr(clip_cfg, 'spatial_merge_reach', 1.0) if clip_cfg else 1.0,
             'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True) if clip_cfg else True,
             'hierarchical_merge_gap': 120,
             'min_specific_detections': 2,

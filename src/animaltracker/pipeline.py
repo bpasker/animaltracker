@@ -1778,6 +1778,7 @@ class StreamWorker:
                             spatial_merge_enabled=getattr(clip_cfg, 'spatial_merge_enabled', True),
                             spatial_merge_iou=getattr(clip_cfg, 'spatial_merge_iou', 0.3),
                             spatial_merge_gap=30,
+                            spatial_merge_reach=getattr(clip_cfg, 'spatial_merge_reach', 1.0),
                             hierarchical_merge_enabled=getattr(clip_cfg, 'hierarchical_merge_enabled', True),
                             hierarchical_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
                             single_animal_mode=getattr(clip_cfg, 'single_animal_mode', False),

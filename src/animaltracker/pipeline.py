@@ -282,9 +282,17 @@ class EventState:
     species_key_frames: dict = field(default_factory=dict)
     # Object tracker for this event
     tracker: Optional[ObjectTracker] = None
+    # Pixel boxes of the detections accepted on the most recent detection
+    # frame. ``StreamWorker._filter_false_positives`` relaxes its minimum-area
+    # gate for a box that overlaps one of these, so the animal that started
+    # the event keeps extending it after it sits down or walks away and its
+    # box shrinks below ``min_detection_area``.
+    last_accepted_bboxes: List[List[float]] = field(default_factory=list)
 
     def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray, frame_idx: Optional[int] = None) -> None:
         self.last_detection_ts = frame_ts
+        if detections:
+            self.last_accepted_bboxes = [list(det.bbox) for det in detections]
 
         # NOTE: The ObjectTracker is now driven by StreamWorker._process_frame
         # BEFORE the PTZ tracker call, so detections already carry track_ids
@@ -1544,6 +1552,29 @@ class StreamWorker:
         except Exception:  # pragma: no cover - defensive; never block detection
             return False
 
+    @staticmethod
+    def _continues_event_subject(
+        bbox: List[float], last_bboxes: List[List[float]]
+    ) -> bool:
+        """True when ``bbox``'s centre lies within one body length of a box
+        the open event accepted on its most recent detection frame.
+
+        A subject that sits down or walks away shrinks below
+        ``min_detection_area`` while staying where it was; a leaf blowing
+        across another part of the frame does not. Each last box is grown by
+        its own width and height on every side, which tolerates the movement
+        between two realtime inferences at a few fps and a missed frame in
+        between.
+        """
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        for x1, y1, x2, y2 in last_bboxes:
+            w = x2 - x1
+            h = y2 - y1
+            if (x1 - w) <= cx <= (x2 + w) and (y1 - h) <= cy <= (y2 + h):
+                return True
+        return False
+
     def _filter_false_positives(
         self, detections: List[Detection], frame_width: int, frame_height: int
     ) -> List[Detection]:
@@ -1568,6 +1599,17 @@ class StreamWorker:
         that no longer contained them. Measured effect: 59% of cam1's
         detections of a tracked coyote never reached the tracker, which then
         logged "cam1 has none" and returned to patrol on a visible target.
+
+        The same relaxation applies per box while this camera has an event
+        open: a box under ``min_detection_area`` is kept when it clears
+        ``tracking_min_detection_area`` and overlaps a box the event accepted
+        on its last detection frame (``EventState.last_accepted_bboxes``, see
+        ``_continues_event_subject``). Without it the animal that started the
+        event stops counting the moment it sits down and its box shrinks
+        below the gate, and the event closes after ``post_seconds`` with the
+        animal still in frame: the Otteson2 squirrel of 2026-09-12 sat at
+        0.45-0.49% of the frame against a 0.5% gate. The entry gate for
+        starting an event is unchanged.
         """
         if not detections:
             return detections
@@ -1575,13 +1617,18 @@ class StreamWorker:
         # Use threshold-level min_detection_area (applies to all cameras),
         # relaxed while the PTZ tracker is actively following a subject.
         min_area_frac = self.camera.thresholds.min_detection_area
+        relaxed_area_frac = min(
+            min_area_frac, self.camera.thresholds.tracking_min_detection_area
+        )
         if self._ptz_is_tracking():
-            min_area_frac = min(
-                min_area_frac,
-                self.camera.thresholds.tracking_min_detection_area,
-            )
+            min_area_frac = relaxed_area_frac
         frame_area = frame_width * frame_height
         min_area_pixels = min_area_frac * frame_area
+        relaxed_area_pixels = relaxed_area_frac * frame_area
+        event_bboxes = (
+            self.event_state.last_accepted_bboxes
+            if self.event_state is not None else []
+        )
 
         # Animals have aspect ratios roughly between 1:4 and 4:1
         # Leaves/branches tend to be much thinner (1:8 or more)
@@ -1593,14 +1640,26 @@ class StreamWorker:
             bbox_h = det.bbox[3] - det.bbox[1]
             det_area = bbox_w * bbox_h
             
-            # Filter tiny detections
+            # Filter tiny detections, unless the box continues the subject of
+            # the open event (an animal that sat down or walked away).
             if det_area < min_area_pixels:
-                LOGGER.debug(
-                    "[FP_FILTER] %s: too small (%.1fpx², %.2f%% of frame, min=%.2f%%)",
-                    self.camera.id, det_area, (det_area / frame_area) * 100,
-                    min_area_frac * 100
-                )
-                continue
+                if (
+                    det_area >= relaxed_area_pixels
+                    and event_bboxes
+                    and self._continues_event_subject(det.bbox, event_bboxes)
+                ):
+                    LOGGER.debug(
+                        "[FP_FILTER] %s: kept %.2f%% box under min=%.2f%%: it overlaps the event subject's last box",
+                        self.camera.id, (det_area / frame_area) * 100,
+                        min_area_frac * 100,
+                    )
+                else:
+                    LOGGER.debug(
+                        "[FP_FILTER] %s: too small (%.1fpx², %.2f%% of frame, min=%.2f%%)",
+                        self.camera.id, det_area, (det_area / frame_area) * 100,
+                        min_area_frac * 100
+                    )
+                    continue
             
             # Filter extreme aspect ratios (likely branches/leaves)
             if bbox_w > 0 and bbox_h > 0:

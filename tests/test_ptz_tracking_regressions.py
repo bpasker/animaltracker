@@ -41,6 +41,7 @@ def _worker(mode=None):
     w.camera = _FakeCamera()
     w.ptz_tracker = _FakePTZTracker(mode) if mode else None
     w.ptz_drives_tracking = mode is not None
+    w.event_state = None
     return w
 
 

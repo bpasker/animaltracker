@@ -5028,6 +5028,10 @@ body.is-locked{
   overflow-wrap:anywhere;
 }
 .secretrow__actions{ display:flex; gap:var(--s-2); flex:none }
+/* A variable-name input with its write-only "Set value" button beside it. */
+.secretset{ display:flex; align-items:center; gap:var(--s-2); min-width:0 }
+.secretset .input{ flex:1 1 auto; min-width:0 }
+.secretset .btn{ flex:none }
 
 /* -- Read-only facts (config path, backup dir) --------------------------- */
 .facts{

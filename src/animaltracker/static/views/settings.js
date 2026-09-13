@@ -1876,10 +1876,13 @@ function destinationsField(o) {
   function refreshTags() {
     var cur = list();
     for (var i = 0; i < rows.length && i < cur.length; i++) {
-      envTag(rows[i].tags.user_key_env, String(cur[i].user_key_env || '').trim());
+      var keyName = String(cur[i].user_key_env || '').trim();
+      envTag(rows[i].tags.user_key_env, keyName);
+      rows[i].setBtns.user_key_env.lastChild.textContent = S.env[keyName] === true ? 'Replace value' : 'Set value';
       var tok = String(cur[i].app_token_env || '').trim();
       rows[i].tags.app_token_env.hidden = !tok;
       envTag(rows[i].tags.app_token_env, tok);
+      rows[i].setBtns.app_token_env.lastChild.textContent = S.env[tok] === true ? 'Replace value' : 'Set value';
     }
   }
 
@@ -1892,7 +1895,19 @@ function destinationsField(o) {
     var tag = h('span.envtag', { text: '…' });
     var lab = h('label.field__label', { 'for': id, text: label });
     lab.appendChild(tag);
-    var wrap = h('div.field', lab, input, h('p.field__hint', { text: hint }));
+    /* The value itself is set here, write-only, without leaving the card. */
+    var setBtn = h('button.btn.btn--secondary.btn--sm', { type: 'button' }, h('span.btn__label', 'Set value'));
+    track(on(setBtn, 'click', function () {
+      var cur = list()[idx];
+      var name = String(cur && cur[key] || '').trim();
+      if (!name) { toast.info('Name the variable first.'); input.focus(); return; }
+      if (!ENV_RE.test(name)) { toast.info('That is not a variable name.', { detail: 'Letters, digits and underscores only.' }); input.focus(); return; }
+      setSecretDialog({
+        name: name, live: true,
+        used_by: [(key === 'user_key_env' ? 'user key' : 'app token') + ' of destination \'' + titleFor(cur) + '\'']
+      }, secretsFile());
+    }));
+    var wrap = h('div.field', lab, h('div.secretset', input, setBtn), h('p.field__hint', { text: hint }));
     var current = list()[idx];
     input.value = current && current[key] ? String(current[key]) : '';
     track(on(input, 'input', function () {
@@ -1910,7 +1925,7 @@ function destinationsField(o) {
       if (t !== input.value) { input.value = t; cur[idx][key] = t; onModelChanged(); }
       refreshTags();
     }));
-    return { wrap: wrap, input: input, tag: tag };
+    return { wrap: wrap, input: input, tag: tag, setBtn: setBtn };
   }
 
   function removeAt(idx) {
@@ -1971,7 +1986,8 @@ function destinationsField(o) {
         rows.push({
           card: card,
           inputs: { name: nameInput, user_key_env: key.input, app_token_env: tok.input },
-          tags: { user_key_env: key.tag, app_token_env: tok.tag }
+          tags: { user_key_env: key.tag, app_token_env: tok.tag },
+          setBtns: { user_key_env: key.setBtn, app_token_env: tok.setBtn }
         });
         listEl.appendChild(card);
       }(i));
@@ -2025,9 +2041,13 @@ function destinationsField(o) {
   return ctl;
 }
 
+function secretsFile() {
+  return S.secrets && S.secrets.file ? S.secrets.file : 'config/secrets.env';
+}
+
 function addDestinationDialog(onAdd) {
   var existing = destinationList();
-  var f = { name: '', id: '', user_key_env: '', app_token_env: '' };
+  var f = { name: '', id: '', user_key_env: '', app_token_env: '', user_key: '', app_token: '' };
   var touched = { id: false, key: false };
   var errs = {};
   var els = {};
@@ -2082,6 +2102,10 @@ function addDestinationDialog(onAdd) {
     else if (!ENV_RE.test(env)) errs.user_key_env = 'Letters, digits and underscores only.';
     var tok = f.app_token_env.trim();
     if (tok && !ENV_RE.test(tok)) errs.app_token_env = 'Letters, digits and underscores only.';
+    if (f.user_key.trim() && env && !/^PUSHOVER_/.test(env) && S.env[env] === undefined) {
+      errs.user_key = 'Only a PUSHOVER_… variable can take its value here before the destination is saved; name it that way, or set the value under Secrets after saving.';
+    }
+    if (f.app_token.trim() && !tok) errs.app_token = 'Name the app token variable above, or leave this empty.';
     showErrors();
     var any = false;
     for (var k in errs) if (Object.prototype.hasOwnProperty.call(errs, k)) any = true;
@@ -2091,17 +2115,30 @@ function addDestinationDialog(onAdd) {
   var nameInput = h('input.input', { type: 'text', placeholder: 'Brandon', autocomplete: 'off' });
   var idInput = h('input.input.input--mono', { type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
   var keyInput = h('input.input.input--mono', { type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+  var keyValue = h('input.input.input--mono', { type: 'password', autocomplete: 'new-password', autocapitalize: 'off', spellcheck: 'false', placeholder: 'paste the 30-character key' });
+  var showKeys = h('input.check__box', { type: 'checkbox' });
   var tokInput = h('input.input.input--mono', { type: 'text', placeholder: 'uses the app token above', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+  var tokValue = h('input.input.input--mono', { type: 'password', autocomplete: 'new-password', autocapitalize: 'off', spellcheck: 'false' });
   f.id = uniqueId('');
   idInput.value = f.id;
   f.user_key_env = envFromId(f.id);
   keyInput.value = f.user_key_env;
 
+  var tokValueField = field('app_token', 'App token', 'The token itself, for the variable named above. Written to ' + secretsFile() + ' now; never shown again.', tokValue);
+  tokValueField.hidden = true;
+  showKeys.addEventListener('change', function () {
+    keyValue.type = showKeys.checked ? 'text' : 'password';
+    tokValue.type = showKeys.checked ? 'text' : 'password';
+  });
+
   var content = h('div.stack',
     field('name', 'Name', 'Who this is. Shown in each camera\'s picker.', nameInput),
     field('id', 'Id', 'Short and permanent: cameras refer to it, so it cannot be renamed later.', idInput),
-    field('user_key_env', 'User key variable', 'The variable in config/secrets.env holding their Pushover user or group key. Save, then paste the key itself under Secrets. Reuse PUSHOVER_USER_KEY for the key already in use.', keyInput),
-    field('app_token_env', 'App token variable', 'Optional: a variable holding a different Pushover application token, for a destination on another Pushover account.', tokInput));
+    field('user_key_env', 'User key variable', 'The variable in ' + secretsFile() + ' that holds their Pushover user or group key. Reuse PUSHOVER_USER_KEY for the key already in use.', keyInput),
+    field('user_key', 'User key', 'Their user key from the Pushover app. Written to ' + secretsFile() + ' and applied the moment you add the destination; never shown again. Leave empty if the variable is already set.', keyValue),
+    h('label.check', showKeys, h('span.check__label', 'Show keys while typing')),
+    field('app_token_env', 'App token variable', 'Optional: a variable holding a different Pushover application token, for a destination on another Pushover account.', tokInput),
+    tokValueField);
 
   nameInput.addEventListener('input', function () {
     f.name = nameInput.value;
@@ -2118,26 +2155,71 @@ function addDestinationDialog(onAdd) {
   keyInput.addEventListener('input', function () {
     touched.key = true;
     f.user_key_env = keyInput.value;
-    if (errs.user_key_env) { delete errs.user_key_env; showErrors(); }
+    if (errs.user_key_env || errs.user_key) { delete errs.user_key_env; delete errs.user_key; showErrors(); }
+  });
+  keyValue.addEventListener('input', function () {
+    f.user_key = keyValue.value;
+    if (errs.user_key) { delete errs.user_key; showErrors(); }
   });
   tokInput.addEventListener('input', function () {
     f.app_token_env = tokInput.value;
-    if (errs.app_token_env) { delete errs.app_token_env; showErrors(); }
+    tokValueField.hidden = !tokInput.value.trim();
+    if (errs.app_token_env || errs.app_token) { delete errs.app_token_env; delete errs.app_token; showErrors(); }
+  });
+  tokValue.addEventListener('input', function () {
+    f.app_token = tokValue.value;
+    if (errs.app_token) { delete errs.app_token; showErrors(); }
   });
 
+  var busy = false;
   var dlg = dialog({
     role: 'dialog',
     title: 'Add a destination',
-    body: 'Someone who can receive alerts. The key itself stays in config/secrets.env; only the variable name is saved.',
+    body: 'Someone who can receive alerts. The destination is added to the draft and saved with your changes; a key pasted here goes into ' + secretsFile() + ' right away.',
     width: 560,
     content: content,
     initialFocus: nameInput,
     actions: [
       { label: 'Cancel', variant: 'secondary', value: null },
       { label: 'Add destination', variant: 'primary', value: 'add', keepOpen: true, onSelect: function () {
-        if (!validate()) return;
-        onAdd({ id: f.id.trim(), name: f.name.trim(), user_key_env: f.user_key_env.trim(), app_token_env: f.app_token_env.trim() });
-        dlg.close('added');
+        if (busy || !validate()) return;
+        var dest = { id: f.id.trim(), name: f.name.trim(), user_key_env: f.user_key_env.trim(), app_token_env: f.app_token_env.trim() };
+        var writes = [];
+        if (f.user_key.trim()) writes.push({ name: dest.user_key_env, value: f.user_key, field: 'user_key' });
+        if (dest.app_token_env && f.app_token.trim()) writes.push({ name: dest.app_token_env, value: f.app_token, field: 'app_token' });
+        var addBtn = dlg.el.querySelector('.btn--primary');
+        function done() {
+          busy = false;
+          if (addBtn) addBtn.disabled = false;
+          onAdd(dest);
+          dlg.close('added');
+          if (writes.length) {
+            toast.success((dest.name || dest.id) + ': key saved', {
+              detail: 'Applied to the running service. Save changes to add the destination itself.'
+            });
+          }
+        }
+        /* The keys are written one after another before the destination
+           joins the draft, so a refused write keeps the dialog open with
+           the error on the field it belongs to. */
+        function write(i) {
+          if (i >= writes.length) { done(); return; }
+          api.setSecret({ name: writes[i].name, value: writes[i].value }, { signal: S.abort.signal }).then(function () {
+            if (S.destroyed) return;
+            S.env[writes[i].name] = true;
+            refreshEnvTags();
+            write(i + 1);
+          }, function (e) {
+            busy = false;
+            if (addBtn) addBtn.disabled = false;
+            if (S.destroyed || api.isAbort(e)) return;
+            errs[writes[i].field] = api.describe(e);
+            showErrors();
+          });
+        }
+        busy = true;
+        if (addBtn) addBtn.disabled = true;
+        write(0);
       } }
     ]
   });
@@ -2272,8 +2354,8 @@ function renderSecretsCard() {
   var vars = isArray(meta.variables) ? meta.variables : [];
   var wrap = h('div.stack.stack--tight');
   wrap.appendChild(h('p.field__hint', { text: 'Values are written to ' + file +
-    ' and applied to the running service at once; they are never shown again. Only variables the saved ' +
-    'configuration names can be set, so save a new destination or camera first, then set its value here.' }));
+    ' and applied to the running service at once; they are never shown again. Pushover variables can also be set ' +
+    'from a destination\'s card; anything else appears here once the saved configuration names it.' }));
   if (!vars.length) {
     wrap.appendChild(h('p.field__hint', { text: 'The saved configuration names no variables yet.' }));
     return wrap;

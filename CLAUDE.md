@@ -135,8 +135,9 @@ backed by `configstore.py`). Rules that keep it safe:
   the pipeline only warns and skips it.
 - Secrets are write-only: `POST /api/secrets` (`configstore.set_secret`)
   writes `NAME=value` into `config/secrets.env` beside the config (backup,
-  atomic replace, 0600 when created) and into `os.environ`, and only for
-  names the saved configuration references (`env_references`). The value is
+  atomic replace, 0600 when created) and into `os.environ`, only for names
+  the saved configuration references (`env_references`) or any `PUSHOVER_…`
+  name (so the add-destination dialog can take the key). The value is
   never logged or returned; `describe()` lists the variables under
   `secrets.variables` with who uses them and whether the process reads them
   live (Pushover) or at startup (ONVIF).

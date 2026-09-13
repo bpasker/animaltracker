@@ -329,9 +329,11 @@ without a shell:
   untouched; YAML comments are not preserved.
 - Secrets are write-only: ONVIF and Pushover credentials are referenced by
   environment-variable name, and the page shows whether each name is set in
-  the process environment (`config/secrets.env`). The **Secrets** card on the
-  Notifications page sets a value for any variable the saved configuration
-  names: it is written to `secrets.env` (backed up, replaced atomically) and
+  the process environment (`config/secrets.env`). A Pushover user key is
+  pasted straight into the **Add a destination** dialog (or set later from
+  the destination's card); the **Secrets** card on the Notifications page
+  does the same for every other variable the saved configuration names. A
+  value is written to `secrets.env` (backed up, replaced atomically) and
   into the running service at once, so a Pushover key works without a
   restart, and nothing ever reads it back. Camera credentials are read when
   the service starts, so restart after changing those.

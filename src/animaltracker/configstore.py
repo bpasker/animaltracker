@@ -53,6 +53,9 @@ CAMERA_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
 SECRETS_FILE_NAME = "secrets.env"      # beside cameras.yml; systemd's EnvironmentFile
 SECRET_VALUE_MAX_LEN = 512
 _ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+# Variables only this application reads: they may be set before the saved
+# configuration names them, so a key can be pasted while adding a destination.
+_FREELY_SETTABLE_RE = re.compile(r"^PUSHOVER_[A-Z0-9_]+$")
 _ENV_PLAIN_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@+=,%-]*$")
 
 _MISSING = object()
@@ -867,9 +870,12 @@ def set_secret(config_path: Path, name: str, value: Optional[str], keep: int = B
     """Write ``NAME=value`` into the env file beside the config and into this
     process's environment; ``None`` or an empty value removes it.
 
-    Only a variable the saved configuration names can be set: the page has
-    no login, and the process environment is shared with everything the
-    service runs. The value is never logged and never returned. The file is
+    Only a variable the saved configuration names can be set, plus any
+    ``PUSHOVER_…`` variable (nothing but this application's notifier reads
+    those, so a key can be pasted while the destination that will use it is
+    still unsaved): the page has no login, and the process environment is
+    shared with everything the service runs. The value is never logged and
+    never returned. The file is
     backed up and replaced atomically like ``cameras.yml``; a file created
     here is mode 0600, an existing one keeps its mode and owner. The first
     existing ``NAME=`` line is replaced in place (later duplicates are
@@ -894,12 +900,15 @@ def set_secret(config_path: Path, name: str, value: Optional[str], keep: int = B
 
     cfg = validate(load_raw(Path(config_path)))
     allowed = {ref["name"]: ref for ref in env_references(cfg)}
-    if name not in allowed:
+    ref = allowed.get(name)
+    if ref is None and _FREELY_SETTABLE_RE.match(name):
+        ref = {"name": name, "used_by": ["not named by the saved configuration yet"], "live": True}
+    if ref is None:
         raise ConfigError(
             f"{name} is not a variable the configuration names.",
-            [{"path": "secrets.name", "message": "Save the destination or camera that uses this variable first."}],
+            [{"path": "secrets.name",
+              "message": "PUSHOVER_… variables can be set at any time; others once the saved configuration names them."}],
         )
-    ref = allowed[name]
     path = secrets_path(config_path)
     with _WRITE_LOCK:
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []

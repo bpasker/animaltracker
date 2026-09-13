@@ -639,3 +639,17 @@ def test_set_secret_handler_writes_and_never_echoes(cfg_path, tmp_path, monkeypa
     assert status == 400
     status, body = call(srv.handle_set_secret, ValueError("bad json"))
     assert status == 400
+
+
+def test_pushover_variables_can_be_set_before_the_config_names_them(cfg_path, monkeypatch):
+    """A key pasted in the add-destination dialog lands before the
+    destination is saved; nothing but the notifier reads PUSHOVER_* names."""
+    monkeypatch.delenv("PUSHOVER_USER_KEY_NEW", raising=False)
+    result = configstore.set_secret(cfg_path, "PUSHOVER_USER_KEY_NEW", "k")
+    assert result["set"] is True and result["live"] is True
+    assert result["used_by"] == ["not named by the saved configuration yet"]
+    assert os.environ["PUSHOVER_USER_KEY_NEW"] == "k"
+    assert (cfg_path.parent / "secrets.env").read_text() == "PUSHOVER_USER_KEY_NEW=k\n"
+    with pytest.raises(configstore.ConfigError) as info:
+        configstore.set_secret(cfg_path, "CAM9_ONVIF_PASS", "k")
+    assert "PUSHOVER" in info.value.problems[0]["message"]

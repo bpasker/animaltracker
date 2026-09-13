@@ -428,3 +428,112 @@ def test_explicit_null_inside_a_block_survives_for_present_keys():
     assert new["cameras"][0]["ptz_tracking"]["zoom_fov_calibration_path"] is None
     cfg = configstore.validate(new)
     assert cfg.cameras[0].ptz_tracking.zoom_fov_calibration_path is None
+
+
+# --------------------------------------------------------------------------
+# Pushover destinations
+# --------------------------------------------------------------------------
+
+DESTINATIONS = [
+    {"id": "brandon", "name": "Brandon", "user_key_env": "PUSHOVER_USER_KEY", "app_token_env": None},
+    {"id": "jane", "name": "", "user_key_env": "PUSHOVER_USER_KEY_JANE", "app_token_env": "PUSHOVER_APP_TOKEN_JANE"},
+]
+
+
+def test_destinations_and_camera_picks_round_trip_and_apply_live(cfg_path, monkeypatch):
+    rt, workers = running(cfg_path)
+    result = configstore.save(cfg_path, {
+        "general": {"notification": {"destinations": DESTINATIONS, "pushover_user_key_env": None}},
+        "cameras": [{"id": "cam1", "notification": {"destinations": ["jane"]}}],
+    }, rt, workers)
+
+    written = configstore.load_raw(cfg_path)["general"]["notification"]
+    assert written["destinations"] == [
+        {"id": "brandon", "name": "Brandon", "user_key_env": "PUSHOVER_USER_KEY"},
+        {"id": "jane", "user_key_env": "PUSHOVER_USER_KEY_JANE", "app_token_env": "PUSHOVER_APP_TOKEN_JANE"},
+    ], "entries are written whole, blank names and tokens dropped"
+    assert "pushover_user_key_env" not in written, "a cleared fallback leaves the file"
+    assert configstore.load_raw(cfg_path)["cameras"][0]["notification"]["destinations"] == ["jane"]
+
+    assert [d.id for d in rt.general.notification.destinations] == ["brandon", "jane"], "applied live"
+    assert rt.general.notification.pushover_user_key_env is None
+    assert workers["cam1"].camera.notification.destinations == ["jane"]
+    assert {"notification.destinations", "notification.pushover_user_key_env",
+            "cam1.notification.destinations"} <= set(result["applied_live"])
+    assert configstore.pending_restart(result["config"], rt, workers) == []
+
+    monkeypatch.setenv("PUSHOVER_USER_KEY_JANE", "k")
+    monkeypatch.delenv("PUSHOVER_APP_TOKEN_JANE", raising=False)
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    described = configstore.describe(cfg_path, rt, workers)
+    assert described["env"]["PUSHOVER_USER_KEY_JANE"] is True
+    assert described["env"]["PUSHOVER_APP_TOKEN_JANE"] is False
+    assert described["general"]["notification"]["destinations"][1]["name"] is None
+    assert described["cameras"][0]["notification"]["destinations"] == ["jane"]
+
+    # Back to "everyone": None removes the key, [] is kept as an explicit none.
+    configstore.save(cfg_path, {"cameras": [{"id": "cam1", "notification": {"destinations": None}}]}, rt, workers)
+    assert "destinations" not in configstore.load_raw(cfg_path)["cameras"][0]["notification"]
+    assert workers["cam1"].camera.notification.destinations is None
+    configstore.save(cfg_path, {"cameras": [{"id": "cam1", "notification": {"destinations": []}}]}, rt, workers)
+    assert configstore.load_raw(cfg_path)["cameras"][0]["notification"]["destinations"] == []
+    assert workers["cam1"].camera.notification.destinations == []
+
+
+def test_a_camera_naming_an_unknown_destination_is_refused_on_its_own_field(cfg_path):
+    rt, workers = running(cfg_path)
+    before = cfg_path.read_text()
+    with pytest.raises(configstore.ConfigError) as info:
+        configstore.save(cfg_path, {"cameras": [{"id": "cam1", "notification": {"destinations": ["ghost"]}}]}, rt, workers)
+    assert info.value.problems == [{
+        "path": "cameras.cam1.notification.destinations",
+        "message": "Unknown destination 'ghost'. No destinations are defined under General → Notifications.",
+    }]
+    assert cfg_path.read_text() == before
+
+    configstore.save(cfg_path, {"general": {"notification": {"destinations": DESTINATIONS[:1]}}}, rt, workers)
+    with pytest.raises(configstore.ConfigError) as info2:
+        configstore.save(cfg_path, {"cameras": [{"id": "cam1", "notification": {"destinations": ["brandon", "ghost"]}}]}, rt, workers)
+    assert "Define it under General" in info2.value.problems[0]["message"]
+
+
+def test_bad_destination_entries_are_refused_with_their_index_in_the_path(cfg_path):
+    rt, workers = running(cfg_path)
+    with pytest.raises(configstore.ConfigError) as dup:
+        configstore.save(cfg_path, {"general": {"notification": {"destinations": [
+            {"id": "a", "user_key_env": "X"}, {"id": "a", "user_key_env": "Y"}]}}}, rt, workers)
+    assert dup.value.problems[0]["path"] == "general.notification.destinations"
+    with pytest.raises(configstore.ConfigError) as bad:
+        configstore.save(cfg_path, {"general": {"notification": {"destinations": [
+            {"id": "ok", "user_key_env": "X"}, {"id": "bad id", "user_key_env": "1Y"}]}}}, rt, workers)
+    paths = {p["path"] for p in bad.value.problems}
+    assert paths == {"general.notification.destinations.1.id", "general.notification.destinations.1.user_key_env"}
+    with pytest.raises(configstore.ConfigError):
+        configstore.merge_payload(copy.deepcopy(BASE), {"general": {"notification": {"destinations": "brandon"}}})
+
+
+def test_clearing_the_fallback_without_destinations_is_refused(cfg_path):
+    rt, workers = running(cfg_path)
+    with pytest.raises(configstore.ConfigError) as info:
+        configstore.save(cfg_path, {"general": {"notification": {"destinations": [], "pushover_user_key_env": None}}}, rt, workers)
+    assert "at least one destination" in info.value.problems[0]["message"]
+    assert configstore.load_raw(cfg_path)["general"]["notification"]["pushover_user_key_env"] == "PUSHOVER_USER_KEY"
+
+
+def test_pushover_variable_names_apply_live_now(cfg_path):
+    """The notifier reads the settings object on every send, so renaming a
+    variable no longer waits for a restart (the variable itself still has
+    to be in the environment, which the env tag shows)."""
+    rt, workers = running(cfg_path)
+    result = configstore.save(cfg_path, {"general": {"notification": {"pushover_app_token_env": "PO_TOKEN"}}}, rt, workers)
+    assert rt.general.notification.pushover_app_token_env == "PO_TOKEN"
+    assert "notification.pushover_app_token_env" in result["applied_live"]
+    assert configstore.pending_restart(result["config"], rt, workers) == []
+
+
+def test_an_empty_destination_list_is_not_written_for_a_file_that_lacks_it():
+    new, changes = configstore.merge_payload(copy.deepcopy(BASE), {
+        "general": {"notification": {"destinations": [], "pushover_user_key_env": "PUSHOVER_USER_KEY"}},
+        "cameras": [{"id": "cam1", "notification": {"destinations": None}}],
+    })
+    assert new == BASE and changes["general"] == [] and changes["cameras"] == {}

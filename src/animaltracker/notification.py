@@ -4,10 +4,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Sequence
 
 import requests
 
+from .config import NotificationSettings, PushoverDestination
 from .species_names import get_common_name
 
 LOGGER = logging.getLogger(__name__)
@@ -29,81 +30,125 @@ class NotificationContext:
 
 
 class PushoverNotifier:
-    """Pushover notification sender supporting multiple user keys.
-    
-    User keys can be specified as a comma-separated list in the environment variable.
-    For example: PUSHOVER_USER_KEY=user1key,user2key,user3key
-    
-    Each user key receives an independent notification.
-    """
-    
-    def __init__(self, app_token_env: str, user_key_env: str) -> None:
-        self.app_token_env = app_token_env
-        self.user_key_env = user_key_env
+    """Pushover sender that routes each alert to named destinations.
 
-    @property
-    def _app_token(self) -> str:
-        token = os.environ.get(self.app_token_env)
+    ``settings`` is the running ``NotificationSettings``; it is read on every
+    send, so the settings page can change destinations and variable names
+    without a restart. A destination names an environment variable holding a
+    Pushover user or group key (a comma-separated list sends to each key).
+
+    A camera passes the destination ids it wants: ``None`` means every
+    destination (or the fallback ``pushover_user_key_env`` while none are
+    defined), ``[]`` means none. Ids that are not configured are logged and
+    skipped rather than raised: a routing typo must never stop detection.
+    """
+
+    def __init__(self, settings: NotificationSettings) -> None:
+        self.settings = settings
+
+    def recipients_for(self, destinations: Optional[Sequence[str]], camera_id: str = "?") -> List[PushoverDestination]:
+        """The destinations an alert from ``camera_id`` goes to."""
+        if destinations is None:
+            return self.settings.resolved_destinations()
+        known = {dest.id: dest for dest in self.settings.destinations}
+        picked: List[PushoverDestination] = []
+        unknown: List[str] = []
+        for wanted in destinations:
+            dest = known.get(wanted)
+            if dest is None:
+                unknown.append(str(wanted))
+            elif all(p.id != dest.id for p in picked):
+                picked.append(dest)
+        if unknown:
+            LOGGER.warning(
+                "Camera %s names Pushover destination(s) %s that are not configured; ignoring them",
+                camera_id, ", ".join(unknown),
+            )
+        return picked
+
+    def _app_token(self, dest: PushoverDestination) -> Optional[str]:
+        """The application token a destination sends with; None (and logged) when unset."""
+        env = dest.app_token_env or self.settings.pushover_app_token_env or ""
+        token = os.environ.get(env) if env else None
         if not token:
-            raise RuntimeError(f"Missing env var {self.app_token_env} for Pushover token")
+            LOGGER.error(
+                "Pushover destination '%s' needs the app token in %s, which is not set in the environment; skipping it",
+                dest.label, env or "<unset>",
+            )
         return token
 
-    @property
-    def _user_keys(self) -> list[str]:
-        """Return list of user keys (supports comma-separated values)."""
-        keys_str = os.environ.get(self.user_key_env)
-        if not keys_str:
-            raise RuntimeError(f"Missing env var {self.user_key_env} for Pushover user key")
-        # Split by comma and strip whitespace from each key
-        keys = [k.strip() for k in keys_str.split(",") if k.strip()]
+    @staticmethod
+    def _user_keys(dest: PushoverDestination) -> List[str]:
+        """The key(s) a destination's variable holds; empty (and logged) when unset."""
+        raw = os.environ.get(dest.user_key_env or "", "")
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
         if not keys:
-            raise RuntimeError(f"No valid user keys found in {self.user_key_env}")
+            LOGGER.error(
+                "Pushover destination '%s' reads %s, which is not set in the environment; skipping it",
+                dest.label, dest.user_key_env,
+            )
         return keys
 
-    def send(self, ctx: NotificationContext, priority: int = 0, sound: Optional[str] = None) -> None:
-        message = self._format_message(ctx)
+    @staticmethod
+    def _attachment(ctx: NotificationContext) -> Optional[dict]:
+        """The thumbnail as a multipart file, read once for every recipient."""
+        if not ctx.thumbnail_path:
+            return None
+        try:
+            from pathlib import Path
+            thumb_path = Path(ctx.thumbnail_path)
+            if thumb_path.exists():
+                with open(thumb_path, "rb") as img_file:
+                    LOGGER.debug("Attaching thumbnail: %s", thumb_path)
+                    return {"attachment": (thumb_path.name, img_file.read(), "image/jpeg")}
+        except Exception as e:  # noqa: BLE001
+            LOGGER.warning("Failed to attach thumbnail %s: %s", ctx.thumbnail_path, e)
+        return None
+
+    def send(self, ctx: NotificationContext, priority: int = 0, sound: Optional[str] = None,
+             destinations: Optional[Sequence[str]] = None) -> int:
+        """Send the alert; returns how many user keys it was delivered to."""
         common_name = get_common_name(ctx.species)
-        user_keys = self._user_keys
-        LOGGER.info("Dispatching Pushover alert for %s (%s) to %d recipient(s)", 
-                    common_name, ctx.camera_id, len(user_keys))
-        
-        for user_key in user_keys:
-            files = None
-            data = {
-                "token": self._app_token,
-                "user": user_key,
-                "title": f"{common_name} detected @ {ctx.camera_name}",
-                "message": message,
-                "priority": priority,
-                "sound": sound or "pushover",
-            }
-            
-            # Add clickable URL to video if web_base_url is configured
-            clip_url = self._build_clip_url(ctx)
-            if clip_url:
-                data["url"] = clip_url
-                data["url_title"] = "View Recording"
-            
-            # Attach thumbnail image if available
-            if ctx.thumbnail_path:
+        recipients = self.recipients_for(destinations, ctx.camera_id)
+        if not recipients:
+            LOGGER.info("No Pushover destination for camera %s; alert for %s not sent", ctx.camera_id, common_name)
+            return 0
+
+        data = {
+            "title": f"{common_name} detected @ {ctx.camera_name}",
+            "message": self._format_message(ctx),
+            "priority": priority,
+            "sound": sound or "pushover",
+        }
+        # Add clickable URL to video if web_base_url is configured
+        clip_url = self._build_clip_url(ctx)
+        if clip_url:
+            data["url"] = clip_url
+            data["url_title"] = "View Recording"
+        files = self._attachment(ctx)
+
+        LOGGER.info("Dispatching Pushover alert for %s (%s) to %s",
+                    common_name, ctx.camera_id, ", ".join(dest.label for dest in recipients))
+        sent = 0
+        seen_keys: set[str] = set()
+        for dest in recipients:
+            token = self._app_token(dest)
+            if not token:
+                continue
+            for user_key in self._user_keys(dest):
+                if user_key in seen_keys:
+                    continue  # two destinations sharing a key still get one alert
+                seen_keys.add(user_key)
                 try:
-                    from pathlib import Path
-                    thumb_path = Path(ctx.thumbnail_path)
-                    if thumb_path.exists():
-                        # Read image file and attach as multipart form data
-                        with open(thumb_path, "rb") as img_file:
-                            files = {"attachment": (thumb_path.name, img_file.read(), "image/jpeg")}
-                        LOGGER.debug("Attaching thumbnail: %s", thumb_path)
-                except Exception as e:
-                    LOGGER.warning("Failed to attach thumbnail %s: %s", ctx.thumbnail_path, e)
-            
-            try:
-                response = requests.post(PUSHOVER_ENDPOINT, data=data, files=files, timeout=15)
-                response.raise_for_status()
-                LOGGER.debug("Pushover alert sent successfully to user key ending in ...%s", user_key[-4:])
-            except requests.RequestException as exc:  # noqa: BLE001
-                LOGGER.exception("Failed to send Pushover alert to user key ending in ...%s: %s", 
-                                user_key[-4:], exc)
+                    response = requests.post(PUSHOVER_ENDPOINT, data=dict(data, token=token, user=user_key),
+                                             files=files, timeout=15)
+                    response.raise_for_status()
+                    sent += 1
+                    LOGGER.debug("Pushover alert sent to '%s' (user key ending in ...%s)", dest.label, user_key[-4:])
+                except requests.RequestException as exc:  # noqa: BLE001
+                    LOGGER.exception("Failed to send Pushover alert to '%s' (user key ending in ...%s): %s",
+                                     dest.label, user_key[-4:], exc)
+        return sent
 
     def _build_clip_url(self, ctx: NotificationContext) -> Optional[str]:
         """Build a clickable URL to the clip if web_base_url is configured."""

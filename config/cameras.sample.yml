@@ -51,7 +51,20 @@ general:
     - squirrel
   notification:
     pushover_app_token_env: PUSHOVER_APP_TOKEN
+    # Fallback: used while no destinations are defined. May hold several
+    # comma-separated keys.
     pushover_user_key_env: PUSHOVER_USER_KEY
+    # Named recipients. A camera alerts every destination unless its own
+    # notification.destinations lists a subset ([] = none). Only variable
+    # names live here; the keys stay in secrets.env.
+    # destinations:
+    #   - id: brandon
+    #     name: Brandon
+    #     user_key_env: PUSHOVER_USER_KEY_BRANDON
+    #   - id: neighbour
+    #     name: Neighbour
+    #     user_key_env: PUSHOVER_USER_KEY_NEIGHBOUR
+    #     app_token_env: PUSHOVER_APP_TOKEN_NEIGHBOUR   # optional: their own app
     # Web UI base URL for clickable video links in notifications
     # Example: http://192.168.1.100:8080 (your Jetson/server IP and port)
     web_base_url: null
@@ -126,3 +139,4 @@ cameras:
     notification:
       priority: 1
       sound: siren
+      # destinations: [neighbour]   # only these ids; omit = every destination

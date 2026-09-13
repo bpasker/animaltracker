@@ -5,8 +5,14 @@ from pathlib import Path
 from typing import List, Optional
 
 import os
+import re
 import yaml
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, model_validator, validator
+
+# A destination id names the recipient in each camera's list, the way a
+# camera id names clip folders: short, permanent, safe in YAML and URLs.
+DESTINATION_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+ENV_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 
 
 def _load_yaml(path: Path) -> dict:
@@ -82,10 +88,101 @@ class RetentionSettings(BaseModel):
     max_utilization_pct: int = Field(default=80, ge=1, le=99)
 
 
+class PushoverDestination(BaseModel):
+    """One Pushover recipient a camera can be pointed at.
+
+    The user (or group) key itself stays in the environment like every
+    other secret; the config only names the variable that holds it.
+    """
+    id: str = Field(description="Short, permanent id cameras refer to (letters, digits, '-' or '_', up to 32 characters)")
+    name: Optional[str] = Field(default=None, description="Label shown in the settings page; the id when empty")
+    user_key_env: str = Field(description="Environment variable holding the Pushover user or group key. A comma-separated list sends to each key.")
+    app_token_env: Optional[str] = Field(default=None, description="Environment variable holding a Pushover application token to send with instead of pushover_app_token_env (a destination on another Pushover account)")
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        safe = (value or "").strip()
+        if not re.match(DESTINATION_ID_PATTERN, safe):
+            raise ValueError("use letters, digits, '-' or '_' (up to 32 characters)")
+        return safe
+
+    @field_validator("name")
+    @classmethod
+    def _blank_name_is_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        safe = value.strip()
+        return safe or None
+
+    @field_validator("user_key_env")
+    @classmethod
+    def _validate_env_name(cls, value: str) -> str:
+        safe = (value or "").strip()
+        if not re.match(ENV_NAME_PATTERN, safe):
+            raise ValueError("must be an environment variable name (letters, digits and underscores)")
+        return safe
+
+    @field_validator("app_token_env")
+    @classmethod
+    def _validate_optional_env_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        safe = value.strip()
+        if not safe:
+            return None
+        if not re.match(ENV_NAME_PATTERN, safe):
+            raise ValueError("must be an environment variable name (letters, digits and underscores)")
+        return safe
+
+    @property
+    def label(self) -> str:
+        return self.name or self.id
+
+
 class NotificationSettings(BaseModel):
     pushover_app_token_env: str
-    pushover_user_key_env: str
+    pushover_user_key_env: Optional[str] = Field(default=None, description="Fallback: the variable holding the user key(s) every camera alerts while no destinations are defined. Several keys can be comma-separated.")
+    destinations: List[PushoverDestination] = Field(default_factory=list, description="Named Pushover recipients. A camera alerts every one of them unless its own notification.destinations lists a subset.")
     web_base_url: Optional[str] = Field(default=None, description="Base URL for web UI (e.g., http://192.168.1.195:8080). Used for clickable links in notifications.")
+
+    @field_validator("pushover_user_key_env")
+    @classmethod
+    def _blank_key_env_is_none(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        safe = value.strip()
+        return safe or None
+
+    @field_validator("destinations")
+    @classmethod
+    def _unique_destination_ids(cls, value: List[PushoverDestination]) -> List[PushoverDestination]:
+        seen: set[str] = set()
+        for dest in value:
+            if dest.id in seen:
+                raise ValueError(f"destination id '{dest.id}' appears twice")
+            seen.add(dest.id)
+        return value
+
+    @model_validator(mode="after")
+    def _needs_a_recipient(self) -> "NotificationSettings":
+        if not self.destinations and not self.pushover_user_key_env:
+            raise ValueError("set pushover_user_key_env or define at least one destination")
+        return self
+
+    def resolved_destinations(self) -> List[PushoverDestination]:
+        """The recipients a camera without its own list alerts.
+
+        The configured destinations when there are any; otherwise the
+        fallback variable, presented as one implicit destination so the
+        notifier has a single code path. Not selectable by cameras: their
+        lists are checked against ``destinations`` only.
+        """
+        if self.destinations:
+            return list(self.destinations)
+        if self.pushover_user_key_env:
+            return [PushoverDestination(id="default", name="Default", user_key_env=self.pushover_user_key_env)]
+        return []
 
 
 class ONVIFSettings(BaseModel):
@@ -181,6 +278,22 @@ class PTZTrackingSettings(BaseModel):
 class CameraNotificationSettings(BaseModel):
     priority: int = 0
     sound: Optional[str] = None
+    destinations: Optional[List[str]] = Field(default=None, description="Ids of the Pushover destinations this camera alerts. Absent: every destination. Empty list: none.")
+
+    @field_validator("destinations")
+    @classmethod
+    def _clean_destination_ids(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        out: List[str] = []
+        for item in value:
+            safe = str(item if item is not None else "").strip()
+            if not safe:
+                raise ValueError("destination ids cannot be empty")
+            if safe in out:
+                raise ValueError(f"destination '{safe}' appears twice")
+            out.append(safe)
+        return out
 
 
 class CameraConfig(BaseModel):

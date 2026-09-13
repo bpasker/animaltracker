@@ -4960,6 +4960,51 @@ body.is-locked{
 .envtag--set{ background:var(--c-live-wash); color:var(--c-live-text) }
 .envtag--unset{ background:var(--c-danger-wash); color:var(--c-danger-text) }
 
+/* -- Pushover destinations (a card per recipient) and a camera's pick ---- */
+.destlist{ display:grid; gap:var(--s-3); min-width:0 }
+.destcard{
+  display:grid;
+  gap:var(--s-3);
+  padding:var(--s-3) var(--s-4) var(--s-4);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-md);
+  background:var(--c-surface-2);
+  min-width:0;
+}
+.destcard__head{
+  display:flex;
+  align-items:center;
+  gap:var(--s-2);
+  min-width:0;
+}
+.destcard__title{
+  flex:1 1 auto;
+  min-width:0;
+  font-size:var(--t-sm);
+  font-weight:var(--w-semi);
+  color:var(--c-text);
+  overflow-wrap:anywhere;
+}
+.destcard__id{
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  color:var(--c-text-3);
+  overflow-wrap:anywhere;
+}
+.destcard__grid{ display:grid; gap:var(--s-3) var(--s-4); min-width:0 }
+@media (min-width:640px){
+  .destcard__grid{ grid-template-columns:1fr 1fr }
+}
+.recipients{ display:grid; min-width:0 }
+.recipients__sub{ display:grid; padding-left:calc(22px + var(--s-3)) }
+.recipients .check__label{
+  display:inline-flex;
+  flex-wrap:wrap;
+  align-items:baseline;
+  gap:var(--s-2);
+}
+.field__hint--warn{ color:var(--c-stale-text) }
+
 /* -- Read-only facts (config path, backup dir) --------------------------- */
 .facts{
   display:grid;

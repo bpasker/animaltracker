@@ -113,8 +113,9 @@ GENERAL_FIELDS: Dict[str, bool] = {
     "retention.min_days": True,
     "retention.max_days": True,
     "retention.max_utilization_pct": False,
-    "notification.pushover_app_token_env": False,
-    "notification.pushover_user_key_env": False,
+    "notification.pushover_app_token_env": True,
+    "notification.pushover_user_key_env": True,
+    "notification.destinations": True,    # the whole list; the notifier reads it on every send
     "notification.web_base_url": True,
     "exclusion_list": True,
 }
@@ -143,6 +144,7 @@ CAMERA_FIELDS: Dict[str, bool] = {
     "exclude_species": True,
     "notification.priority": True,
     "notification.sound": True,
+    "notification.destinations": True,    # ids from general.notification.destinations; None = all
 }
 
 # Preferred key order for a camera block written from scratch, so a new
@@ -169,8 +171,6 @@ _RESTART_GENERAL_WORDS = {
     "detector.longitude": "the location priors",
     "clip.max_concurrent_postprocess": "the post-processing concurrency",
     "retention.max_utilization_pct": "the disk usage ceiling",
-    "notification.pushover_app_token_env": "the Pushover credential names",
-    "notification.pushover_user_key_env": "the Pushover credential names",
 }
 
 _RESTART_CAMERA_BLOCKS = (
@@ -342,7 +342,10 @@ def general_defaults() -> dict:
         from .config import GeneralSettings
         probe = GeneralSettings(
             storage_root="", logs_root="",
-            notification={"pushover_app_token_env": "", "pushover_user_key_env": ""},
+            # A placeholder recipient: the model refuses a block with neither
+            # a fallback variable nor a destination. Both keys are dropped
+            # below, so they are never mistaken for defaults.
+            notification={"pushover_app_token_env": "X", "pushover_user_key_env": "X"},
         )
         dumped = _dump(probe)
         for key in ("storage_root", "logs_root"):
@@ -426,6 +429,67 @@ def _validate_new_id(cid: Any) -> str:
     return cid
 
 
+def _normalize_destinations(general_in: dict) -> None:
+    """Tidy ``notification.destinations`` of a payload in place.
+
+    Entries are written whole (known keys only, in the sample file's order,
+    blank names dropped) so a saved list reads the same however the client
+    assembled it. Values are not validated here: pydantic reports a bad id
+    or variable name with the entry's index in the path.
+    """
+    notif = general_in.get("notification")
+    if not isinstance(notif, dict) or "destinations" not in notif:
+        return
+    raw = notif["destinations"]
+    if raw is None:
+        notif["destinations"] = []
+        return
+    if not isinstance(raw, list):
+        raise ConfigError("'notification.destinations' must be a list.",
+                          [{"path": "general.notification.destinations", "message": "Expected a list of destinations."}])
+    out: List[dict] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ConfigError("Every destination must be an object.",
+                              [{"path": f"general.notification.destinations.{i}", "message": "Expected an object with id, name and user_key_env."}])
+        item: dict = {"id": str(entry.get("id") if entry.get("id") is not None else "").strip()}
+        name = str(entry.get("name") if entry.get("name") is not None else "").strip()
+        if name:
+            item["name"] = name
+        item["user_key_env"] = str(entry.get("user_key_env") if entry.get("user_key_env") is not None else "").strip()
+        token_env = str(entry.get("app_token_env") if entry.get("app_token_env") is not None else "").strip()
+        if token_env:
+            item["app_token_env"] = token_env
+        out.append(item)
+    notif["destinations"] = out
+
+
+def check_destination_refs(cfg: RuntimeConfig) -> List[Dict[str, str]]:
+    """Problems for cameras naming destinations the general block lacks.
+
+    The pipeline only warns about these (a routing typo must not stop
+    detection or recording), so the settings page refuses them here, with
+    the camera's field as the path, before anything reaches disk.
+    """
+    known = [dest.id for dest in cfg.general.notification.destinations]
+    problems: List[Dict[str, str]] = []
+    for cam in cfg.cameras:
+        wanted = cam.notification.destinations
+        if not wanted:
+            continue
+        missing = [w for w in wanted if w not in known]
+        if not missing:
+            continue
+        names = ", ".join(f"'{m}'" for m in missing)
+        tail = ("Define it under General → Notifications first." if known
+                else "No destinations are defined under General → Notifications.")
+        problems.append({
+            "path": f"cameras.{cam.id}.notification.destinations",
+            "message": f"Unknown destination {names}. {tail}",
+        })
+    return problems
+
+
 def merge_payload(raw: dict, payload: dict) -> Tuple[dict, Dict[str, Any]]:
     """Apply a settings payload to a parsed document.
 
@@ -450,6 +514,8 @@ def merge_payload(raw: dict, payload: dict) -> Tuple[dict, Dict[str, Any]]:
         if not isinstance(general, dict):
             general = {}
             new["general"] = general
+        general_in = copy.deepcopy(general_in)
+        _normalize_destinations(general_in)
         changes["general"] = _merge_managed(general, general_in, GENERAL_FIELDS, general_defaults())
 
     cameras_in = payload.get("cameras")
@@ -706,6 +772,9 @@ def save(path: Path, payload: dict, runtime: Any, workers: Dict[str, Any]) -> Di
             old_cfg = None
         new_raw, changes = merge_payload(raw, payload)
         cfg = validate(new_raw)
+        dangling = check_destination_refs(cfg)
+        if dangling:
+            raise ConfigError("Some cameras name Pushover destinations that do not exist.", dangling)
         touched = bool(changes["general"] or changes["cameras"] or changes["added"] or changes["removed"])
         backup = write_config(path, new_raw) if touched else None
         applied = hot_apply(runtime, workers, cfg, changes) if touched else []
@@ -731,6 +800,11 @@ def _env_names(cfg: RuntimeConfig) -> List[str]:
         val = getattr(notif, attr, None) if notif is not None else None
         if val:
             names.append(val)
+    for dest in (getattr(notif, "destinations", None) or []):
+        for attr in ("user_key_env", "app_token_env"):
+            val = getattr(dest, attr, None)
+            if val:
+                names.append(val)
     for cam in cfg.cameras:
         if cam.onvif is not None:
             for attr in ("username_env", "password_env"):

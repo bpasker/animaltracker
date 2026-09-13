@@ -1698,7 +1698,7 @@ class StreamWorker:
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
         
-        def finalize_event(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, species_key_frames, ptz_decisions, detector_config):
+        def finalize_event(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
             """Finalize event with optional post-clip species analysis.
 
             Split-model architecture:
@@ -1987,7 +1987,7 @@ class StreamWorker:
                     storage_root=str(storage_root),
                     web_base_url=web_base_url,
                 )
-                self.notifier.send(ctx, priority=priority, sound=sound)
+                self.notifier.send(ctx, priority=priority, sound=sound, destinations=destinations)
                 LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)",
                            ctx.camera_id, clip_path, final_species, tracks_count)
 
@@ -2060,6 +2060,9 @@ class StreamWorker:
             ctx_base,
             self.camera.notification.priority,
             self.camera.notification.sound,
+            # Copied now, like priority and sound: the settings page may
+            # change the camera's list while post-processing is still running.
+            None if self.camera.notification.destinations is None else list(self.camera.notification.destinations),
             species_key_frames,
             ptz_log,
             detector_cfg,  # Pass detector config for split-model post-processing
@@ -2270,10 +2273,10 @@ class PipelineOrchestrator:
                 realtime_backend, postprocess_backend
             )
 
-        self.notifier = PushoverNotifier(
-            runtime.general.notification.pushover_app_token_env,
-            runtime.general.notification.pushover_user_key_env,
-        )
+        # The notifier keeps the settings object itself (not copies of the
+        # variable names) so destination edits from the settings page apply
+        # without a restart.
+        self.notifier = PushoverNotifier(runtime.general.notification)
         self.storage = StorageManager(
             storage_root=Path(self.runtime.general.storage_root),
             logs_root=Path(self.runtime.general.logs_root),

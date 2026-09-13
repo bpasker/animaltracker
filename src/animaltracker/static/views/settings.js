@@ -40,7 +40,7 @@ import { icon } from '../core/icons.js';
 import { api } from '../core/api.js';
 import { store } from '../core/store.js';
 import { toast } from '../core/toast.js';
-import { dialog } from '../core/overlay.js';
+import { dialog, isOverlayOpen } from '../core/overlay.js';
 import { router } from '../core/router.js';
 import { speciesClass } from '../core/format.js';
 
@@ -94,6 +94,7 @@ var SOUND_OPTIONS = [
 ];
 
 var CAMERA_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+var ENV_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var DEFAULT_SECTION = 'general.detection';
 
 /* --------------------------------------------------------------------------
@@ -103,6 +104,7 @@ var DEFAULT_SECTION = 'general.detection';
              placeholder, upper, emptyMeans, recent, advanced, when, controls,
              requiredWhen }
    kind: number | pct | slider | switch | select | text | env | list | species
+         | destinations (the Pushover recipient list) | recipients (a camera's pick of them)
    restart: the pipeline reads this at startup (badge + banner), else live.
    scale: display = model × scale (min/max/step are in display units).
    when: 'onvif' | 'ptz' — rendered only while that block is switched on.
@@ -231,11 +233,15 @@ var GENERAL_SECTIONS = [
     id: 'general.notifications', label: 'Notifications', iconName: 'external',
     blurb: 'Pushover alerts, and the species that never alert.',
     groups: [
-      { id: 'pushover', legend: 'Pushover', hint: 'Secrets stay in config/secrets.env; only the variable names are stored here.', fields: [
-        { key: 'notification.pushover_app_token_env', kind: 'env', required: true, restart: true,
-          label: 'App token variable', hint: 'Name of the environment variable holding the Pushover application token.' },
-        { key: 'notification.pushover_user_key_env', kind: 'env', required: true, restart: true,
-          label: 'User key variable', hint: 'Variable holding the user key. Several keys can be comma-separated in secrets.env.' },
+      { id: 'pushover', legend: 'Pushover', hint: 'Secrets stay in config/secrets.env; only the variable names are stored here. A variable has to be in that file when the service starts.', fields: [
+        { key: 'notification.pushover_app_token_env', kind: 'env', required: true,
+          label: 'App token variable', hint: 'Environment variable holding the Pushover application token. A destination can name its own.' },
+        { key: 'notification.destinations', kind: 'destinations',
+          label: 'Destinations',
+          hint: 'Who can receive alerts. Each destination names the variable holding a Pushover user or group key. Every camera alerts every destination unless it picks some in its own Notifications section.',
+          emptyMeans: 'No destinations yet — every camera alerts the fallback user key variable below.' },
+        { key: 'notification.pushover_user_key_env', kind: 'env', nullable: true,
+          label: 'Fallback user key variable', hint: 'Used only while no destinations are defined. Several keys can be comma-separated in secrets.env.' },
         { key: 'notification.web_base_url', kind: 'text', nullable: true, mono: true,
           label: 'Web UI base URL', placeholder: 'http://192.168.1.195:8080',
           hint: 'Makes each alert link straight to its clip.' }
@@ -416,7 +422,9 @@ var CAMERA_GROUPS = [
     { key: 'notification.priority', kind: 'select', options: PRIORITY_OPTIONS, numeric: true,
       label: 'Priority', hint: 'Pushover priority for alerts from this camera.' },
     { key: 'notification.sound', kind: 'select', options: SOUND_OPTIONS, nullable: true,
-      label: 'Sound', hint: 'Pushover sound.' }
+      label: 'Sound', hint: 'Pushover sound.' },
+    { key: 'notification.destinations', kind: 'recipients', nullable: true,
+      label: 'Send alerts to', hint: 'Every destination defined under General → Notifications, or only the ones ticked here.' }
   ] }
 ];
 
@@ -480,13 +488,23 @@ function pathKey(path) { return path.join(''); }
 function normList(v) {
   if (!isArray(v)) return '';
   var out = [];
-  for (var i = 0; i < v.length; i++) out.push(String(v[i]).toLowerCase());
+  for (var i = 0; i < v.length; i++) {
+    var item = v[i];
+    out.push(item && typeof item === 'object'
+      ? JSON.stringify(item, Object.keys(item).sort())
+      : String(item).toLowerCase());
+  }
   out.sort();
-  return out.join('');
+  return out.join('\u0001');
 }
 
 function eqValue(a, b) {
-  if (isArray(a) || isArray(b)) return normList(a) === normList(b);
+  if (isArray(a) || isArray(b)) {
+    /* A list and "no list" differ: for a camera's destinations null means
+       every destination and [] means none. */
+    if (!isArray(a) || !isArray(b)) return false;
+    return normList(a) === normList(b);
+  }
   var aEmpty = a === null || a === undefined || a === '';
   var bEmpty = b === null || b === undefined || b === '';
   if (aEmpty || bEmpty) return aEmpty && bEmpty;
@@ -547,6 +565,36 @@ function envName(id, kind) {
   return String(id || 'cam').toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_ONVIF_' + kind;
 }
 
+/* A Pushover destination as the draft holds it: four strings, never null. */
+function normDestination(d) {
+  var src = d && typeof d === 'object' ? d : {};
+  function str(v) { return v === null || v === undefined ? '' : String(v).trim(); }
+  return { id: str(src.id), name: str(src.name), user_key_env: str(src.user_key_env), app_token_env: str(src.app_token_env) };
+}
+
+function destList(v) {
+  if (!isArray(v)) return [];
+  var out = [];
+  for (var i = 0; i < v.length; i++) out.push(normDestination(v[i]));
+  return out;
+}
+
+function destinationIds(model) {
+  var list = getAt(model, ['general', 'notification', 'destinations']);
+  var ids = [];
+  if (isArray(list)) for (var i = 0; i < list.length; i++) if (list[i] && list[i].id) ids.push(String(list[i].id));
+  return ids;
+}
+
+/* A camera's pick, reduced to destinations that exist (a hand-edited file
+   can name one that was removed; the server refuses those on save). */
+function knownRecipients(list, model) {
+  var ids = destinationIds(model);
+  var out = [];
+  for (var i = 0; i < list.length; i++) if (ids.indexOf(list[i]) >= 0 && out.indexOf(list[i]) < 0) out.push(list[i]);
+  return out;
+}
+
 function hostFromUri(uri) {
   var m = /^[a-z]+:\/\/(?:[^@\/]*@)?([^:\/?#]+)/i.exec(String(uri || ''));
   return m ? m[1] : '';
@@ -576,6 +624,10 @@ function coerce(spec, v) {
     case 'list':
     case 'species':
       return strList(v);
+    case 'destinations':
+      return destList(v);
+    case 'recipients':
+      return isArray(v) ? strList(v) : null;
     default:
       return v;
   }
@@ -622,6 +674,10 @@ function normalize(raw) {
     if (!id || model.cameras[id]) continue;
     model.cameras[id] = normalizeCamera(c, id);
     model.order.push(id);
+  }
+  for (var p = 0; p < model.order.length; p++) {
+    var pick = model.cameras[model.order[p]].notification;
+    if (pick && isArray(pick.destinations)) pick.destinations = knownRecipients(pick.destinations, model);
   }
   return model;
 }
@@ -683,6 +739,19 @@ function serialize(spec, v) {
     case 'list':
     case 'species':
       return strList(v);
+    case 'destinations': {
+      var dests = destList(v);
+      var outList = [];
+      for (var d = 0; d < dests.length; d++) {
+        outList.push({
+          id: dests[d].id, name: dests[d].name || null,
+          user_key_env: dests[d].user_key_env, app_token_env: dests[d].app_token_env || null
+        });
+      }
+      return outList;
+    }
+    case 'recipients':
+      return isArray(v) ? strList(v) : null;
     default:
       return v;
   }
@@ -706,7 +775,9 @@ function buildCameraPayload(model, id) {
     if (spec.parts[0] === 'onvif') continue;
     /* Hidden `when` fields are still sent: the block is written whole, and
        they keep the last value the operator saw. */
-    setAt(out, spec.parts, serialize(spec, getAt(cam, spec.parts)));
+    var value = serialize(spec, getAt(cam, spec.parts));
+    if (spec.kind === 'recipients' && isArray(value)) value = knownRecipients(value, model);
+    setAt(out, spec.parts, value);
   }
   if (cam.onvif && cam.onvif.enabled) {
     var host = String(cam.onvif.host || '').trim();
@@ -784,7 +855,7 @@ function validateSpec(spec, value, path, prefix, out) {
         if (spec.required) out.push({ path: path, message: label + ' is required.' });
         return;
       }
-      if (spec.kind === 'env' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s)) {
+      if (spec.kind === 'env' && !ENV_RE.test(s)) {
         out.push({ path: path, message: label + ' must be an environment variable name (letters, digits and underscores).' });
         return;
       }
@@ -792,6 +863,30 @@ function validateSpec(spec, value, path, prefix, out) {
         out.push({ path: path, message: label + ' must be ' + (spec.patternHint || 'in the expected format') + '.' });
       }
       return;
+    case 'destinations': {
+      var dests = destList(value);
+      var seenIds = {};
+      for (var i = 0; i < dests.length; i++) {
+        var d = dests[i];
+        var row = path.concat([String(i)]);
+        var who = d.name || d.id || ('destination ' + (i + 1));
+        if (!CAMERA_ID_RE.test(d.id)) {
+          out.push({ path: row.concat(['id']), message: label + ' — ' + who + ': the id must be letters, digits, - or _ (up to 32 characters).' });
+        } else if (seenIds[d.id]) {
+          out.push({ path: row.concat(['id']), message: label + ' — the id "' + d.id + '" is used twice.' });
+        }
+        seenIds[d.id] = 1;
+        if (!d.user_key_env) {
+          out.push({ path: row.concat(['user_key_env']), message: label + ' — ' + who + ': the user key variable is required.' });
+        } else if (!ENV_RE.test(d.user_key_env)) {
+          out.push({ path: row.concat(['user_key_env']), message: label + ' — ' + who + ': the user key variable must be an environment variable name (letters, digits and underscores).' });
+        }
+        if (d.app_token_env && !ENV_RE.test(d.app_token_env)) {
+          out.push({ path: row.concat(['app_token_env']), message: label + ' — ' + who + ': the app token variable must be an environment variable name (letters, digits and underscores).' });
+        }
+      }
+      return;
+    }
     default:
       return;
   }
@@ -813,6 +908,12 @@ function validateModel(model) {
       path: ['general', 'retention', 'min_days'],
       message: 'Keep at least (' + minD + ' d) cannot exceed keep at most (' + maxD + ' d).'
     });
+  }
+  var dests = destList(getAt(model, ['general', 'notification', 'destinations']));
+  var fallback = String(getAt(model, ['general', 'notification', 'pushover_user_key_env']) || '').trim();
+  if (!dests.length && !fallback) {
+    out.push({ path: ['general', 'notification', 'pushover_user_key_env'],
+      message: 'Add a destination or set the fallback user key variable — otherwise no alert can be sent.' });
   }
 
   for (var c = 0; c < model.order.length; c++) {
@@ -878,7 +979,16 @@ function toYaml(value, indent) {
   var k, i;
   if (isArray(value)) {
     if (!value.length) return pad + '[]\n';
-    for (i = 0; i < value.length; i++) lines.push(pad + '- ' + yamlScalar(value[i]));
+    for (i = 0; i < value.length; i++) {
+      var item = value[i];
+      if (item && typeof item === 'object' && !isArray(item)) {
+        /* The object's lines sit one level in; the first takes the dash. */
+        var block = toYaml(item, indent + 1).replace(/\n$/, '');
+        lines.push(pad + '- ' + block.slice(pad.length + 2));
+      } else {
+        lines.push(pad + '- ' + yamlScalar(item));
+      }
+    }
     return lines.join('\n') + '\n';
   }
   if (value && typeof value === 'object') {
@@ -1706,6 +1816,441 @@ function speciesField(o) {
   };
 }
 
+/* --- Pushover destinations (general) ------------------------------------ */
+
+/* The list lives at general.notification.destinations and cameras refer to
+   entries by id, so the id is set once, in the add dialog, and never edited
+   in place: a rename would silently detach every camera that picked it. */
+
+function slugId(name) {
+  var s = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return s.slice(0, 32).replace(/-+$/, '');
+}
+
+function envFromId(id) {
+  return 'PUSHOVER_USER_KEY_' + String(id || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
+}
+
+function destinationList() {
+  var v = S.draft ? getAt(S.draft, ['general', 'notification', 'destinations']) : null;
+  return isArray(v) ? v : [];
+}
+
+function envTag(tag, name) {
+  tag.className = 'envtag';
+  if (!name) { tag.textContent = 'no name'; return; }
+  var present = S.env[name];
+  if (present === true) { tag.classList.add('envtag--set'); tag.textContent = 'set'; }
+  else if (present === false) { tag.classList.add('envtag--unset'); tag.textContent = 'not set'; }
+  else { tag.textContent = 'unchecked'; scheduleEnvCheck(name); }
+}
+
+function destinationsField(o) {
+  var shell = fieldShell({ label: o.label, hint: o.hint, labelTag: 'h3.field__label' });
+  shell.el = h('section.field', { 'aria-labelledby': shell.labelId });
+  var listEl = h('div.destlist');
+  var countEl = h('p.field__hint', { role: 'status', 'aria-live': 'polite' });
+  var addBtn = h('button.btn.btn--secondary.btn--sm', { type: 'button' },
+    h('span.btn__icon', { 'aria-hidden': 'true' }, icon('plus', { size: 'sm' })),
+    h('span.btn__label', 'Add destination'));
+  shell.el.appendChild(shell.labelEl);
+  shell.el.appendChild(shell.hintEl);
+  shell.el.appendChild(shell.errEl);
+  shell.el.appendChild(listEl);
+  shell.el.appendChild(countEl);
+  shell.el.appendChild(h('div.row.row--wrap', addBtn));
+  shell.el.appendChild(shell.statusEl);
+
+  var rows = [];
+
+  function list() {
+    var v = getAt(S.draft, o.path);
+    if (!isArray(v)) { v = []; setAt(S.draft, o.path, v); }
+    return v;
+  }
+
+  function titleFor(d) { return d.name || d.id; }
+
+  function refreshTags() {
+    var cur = list();
+    for (var i = 0; i < rows.length && i < cur.length; i++) {
+      envTag(rows[i].tags.user_key_env, String(cur[i].user_key_env || '').trim());
+      var tok = String(cur[i].app_token_env || '').trim();
+      rows[i].tags.app_token_env.hidden = !tok;
+      envTag(rows[i].tags.app_token_env, tok);
+    }
+  }
+
+  function envInput(idx, key, label, hint, placeholder) {
+    var id = uid('denv');
+    var input = h('input.input.input--mono#' + id, {
+      type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+      placeholder: placeholder || null
+    });
+    var tag = h('span.envtag', { text: '…' });
+    var lab = h('label.field__label', { 'for': id, text: label });
+    lab.appendChild(tag);
+    var wrap = h('div.field', lab, input, h('p.field__hint', { text: hint }));
+    var current = list()[idx];
+    input.value = current && current[key] ? String(current[key]) : '';
+    track(on(input, 'input', function () {
+      var cur = list();
+      if (!cur[idx]) return;
+      cur[idx][key] = input.value;
+      ctl.setError(null);
+      onModelChanged();
+      refreshTags();
+    }));
+    track(on(input, 'blur', function () {
+      var cur = list();
+      if (!cur[idx]) return;
+      var t = input.value.trim();
+      if (t !== input.value) { input.value = t; cur[idx][key] = t; onModelChanged(); }
+      refreshTags();
+    }));
+    return { wrap: wrap, input: input, tag: tag };
+  }
+
+  function removeAt(idx) {
+    var cur = list();
+    var gone = cur[idx];
+    if (!gone) return;
+    cur.splice(idx, 1);
+    /* Cameras that picked it by id lose the tick; a saved reference to a
+       destination that no longer exists is refused by the server. */
+    var touched = 0;
+    for (var c = 0; c < S.draft.order.length; c++) {
+      var cam = S.draft.cameras[S.draft.order[c]];
+      var sel = cam && cam.notification ? cam.notification.destinations : null;
+      if (!isArray(sel)) continue;
+      var at = sel.indexOf(gone.id);
+      if (at >= 0) { sel.splice(at, 1); touched += 1; }
+    }
+    render();
+    onModelChanged();
+    toast.info('Removed ' + titleFor(gone) + ' from the draft', {
+      detail: (touched ? 'Unticked on ' + touched + ' ' + plural(touched, 'camera') + '. ' : '') + 'Save to write the change.'
+    });
+    addBtn.focus();
+  }
+
+  function render() {
+    clear(listEl);
+    rows = [];
+    var cur = list();
+    for (var i = 0; i < cur.length; i++) {
+      (function (idx) {
+        var d = cur[idx];
+        var nameId = uid('dname');
+        var nameInput = h('input.input#' + nameId, { type: 'text', autocomplete: 'off', placeholder: d.id });
+        nameInput.value = d.name || '';
+        var title = h('span.destcard__title', { text: titleFor(d) });
+        var removeBtn = h('button.icon-btn.icon-btn--danger', { type: 'button', 'aria-label': 'Remove ' + titleFor(d) },
+          icon('trash', { size: 'sm' }));
+        track(on(removeBtn, 'click', function () { removeAt(idx); }));
+        track(on(nameInput, 'input', function () {
+          var l = list();
+          if (!l[idx]) return;
+          l[idx].name = nameInput.value;
+          title.textContent = titleFor(l[idx]);
+          ctl.setError(null);
+          onModelChanged();
+        }));
+        var key = envInput(idx, 'user_key_env', 'User key variable',
+          'Holds this person\'s Pushover user or group key. A comma-separated list sends to each key.');
+        var tok = envInput(idx, 'app_token_env', 'App token variable',
+          'Optional: a different Pushover application token for this destination.', 'uses the app token above');
+        var card = h('div.destcard',
+          h('div.destcard__head', title, h('span.destcard__id', { text: d.id }), removeBtn),
+          h('div.destcard__grid',
+            h('div.field', h('label.field__label', { 'for': nameId, text: 'Name' }), nameInput,
+              h('p.field__hint', { text: 'Shown here and in each camera\'s picker.' })),
+            key.wrap, tok.wrap));
+        rows.push({
+          card: card,
+          inputs: { name: nameInput, user_key_env: key.input, app_token_env: tok.input },
+          tags: { user_key_env: key.tag, app_token_env: tok.tag }
+        });
+        listEl.appendChild(card);
+      }(i));
+    }
+    var n = cur.length;
+    countEl.textContent = n
+      ? n + ' ' + plural(n, 'destination') + ' · every camera alerts all of them unless it picks some.'
+      : (o.emptyMeans || 'No destinations.');
+    refreshTags();
+  }
+
+  track(on(addBtn, 'click', function () {
+    addDestinationDialog(function (dest) {
+      list().push(dest);
+      /* The section may have been rebuilt while the dialog was open (a
+         quiet refresh); draw through whichever controller is live now. */
+      var live = S.fieldByKey[ctl.key] || ctl;
+      live.sync();
+      onModelChanged();
+      live.focus([String(list().length - 1), 'name']);
+    });
+  }));
+
+  var lastSub = null;
+  var ctl = baseController(shell, o.path, {
+    label: o.label,
+    focus: function (sub) {
+      var s = sub || lastSub;
+      var row = s && rows[Number(s[0])];
+      var input = row && s[1] && row.inputs[s[1]] ? row.inputs[s[1]] : null;
+      if (input) input.focus(); else addBtn.focus();
+    },
+    sync: function () { render(); ctl.setError(null); }
+  });
+  var plainSetError = ctl.setError;
+  /* `sub` is what is left of a field path after the list's own key: the row
+     index and the property, from validateSpec or a server problem path. */
+  ctl.setError = function (msg, sub) {
+    plainSetError(msg);
+    for (var i = 0; i < rows.length; i++) {
+      for (var k in rows[i].inputs) {
+        if (Object.prototype.hasOwnProperty.call(rows[i].inputs, k)) rows[i].inputs[k].removeAttribute('aria-invalid');
+      }
+    }
+    lastSub = msg ? (sub || null) : null;
+    var row = sub && rows[Number(sub[0])];
+    if (msg && row && sub[1] && row.inputs[sub[1]]) row.inputs[sub[1]].setAttribute('aria-invalid', 'true');
+  };
+  ctl.refreshEnv = refreshTags;
+  render();
+  return ctl;
+}
+
+function addDestinationDialog(onAdd) {
+  var existing = destinationList();
+  var f = { name: '', id: '', user_key_env: '', app_token_env: '' };
+  var touched = { id: false, key: false };
+  var errs = {};
+  var els = {};
+
+  function hasId(id) {
+    for (var i = 0; i < existing.length; i++) if (existing[i].id === id) return true;
+    return false;
+  }
+  function uniqueId(base) {
+    var root = base || 'dest';
+    var id = root;
+    var n = 1;
+    while (hasId(id)) { n += 1; id = root + n; }
+    return id.slice(0, 32);
+  }
+
+  function field(key, label, hint, inputEl) {
+    var id = uid('addd');
+    inputEl.id = id;
+    var err = h('p.field__error', { hidden: true, role: 'alert' });
+    var wrap = h('div.field', h('label.field__label', { 'for': id, text: label }), inputEl, h('p.field__hint', { text: hint }), err);
+    els[key] = { input: inputEl, err: err, hint: wrap.querySelector('.field__hint') };
+    return wrap;
+  }
+
+  function showErrors() {
+    for (var k in els) {
+      if (!Object.prototype.hasOwnProperty.call(els, k)) continue;
+      var e = els[k];
+      clear(e.err);
+      if (errs[k]) {
+        e.err.hidden = false;
+        e.err.appendChild(icon('alert', { size: 'sm' }));
+        e.err.appendChild(h('span', { text: errs[k] }));
+        e.hint.hidden = true;
+        e.input.setAttribute('aria-invalid', 'true');
+      } else {
+        e.err.hidden = true;
+        e.hint.hidden = false;
+        e.input.removeAttribute('aria-invalid');
+      }
+    }
+  }
+
+  function validate() {
+    errs = {};
+    var id = f.id.trim();
+    if (!CAMERA_ID_RE.test(id)) errs.id = 'Letters, digits, - or _ only, up to 32 characters.';
+    else if (hasId(id)) errs.id = 'A destination with this id already exists.';
+    var env = f.user_key_env.trim();
+    if (!env) errs.user_key_env = 'Name the variable in config/secrets.env that holds the user key.';
+    else if (!ENV_RE.test(env)) errs.user_key_env = 'Letters, digits and underscores only.';
+    var tok = f.app_token_env.trim();
+    if (tok && !ENV_RE.test(tok)) errs.app_token_env = 'Letters, digits and underscores only.';
+    showErrors();
+    var any = false;
+    for (var k in errs) if (Object.prototype.hasOwnProperty.call(errs, k)) any = true;
+    return !any;
+  }
+
+  var nameInput = h('input.input', { type: 'text', placeholder: 'Brandon', autocomplete: 'off' });
+  var idInput = h('input.input.input--mono', { type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+  var keyInput = h('input.input.input--mono', { type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+  var tokInput = h('input.input.input--mono', { type: 'text', placeholder: 'uses the app token above', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+  f.id = uniqueId('');
+  idInput.value = f.id;
+  f.user_key_env = envFromId(f.id);
+  keyInput.value = f.user_key_env;
+
+  var content = h('div.stack',
+    field('name', 'Name', 'Who this is. Shown in each camera\'s picker.', nameInput),
+    field('id', 'Id', 'Short and permanent: cameras refer to it, so it cannot be renamed later.', idInput),
+    field('user_key_env', 'User key variable', 'The variable in config/secrets.env holding their Pushover user or group key. Reuse PUSHOVER_USER_KEY for the key already in use.', keyInput),
+    field('app_token_env', 'App token variable', 'Optional: a variable holding a different Pushover application token, for a destination on another Pushover account.', tokInput));
+
+  nameInput.addEventListener('input', function () {
+    f.name = nameInput.value;
+    if (!touched.id) { f.id = uniqueId(slugId(f.name)); idInput.value = f.id; }
+    if (!touched.key) { f.user_key_env = envFromId(f.id); keyInput.value = f.user_key_env; }
+    if (errs.id) { delete errs.id; showErrors(); }
+  });
+  idInput.addEventListener('input', function () {
+    touched.id = true;
+    f.id = idInput.value;
+    if (!touched.key) { f.user_key_env = envFromId(f.id.trim()); keyInput.value = f.user_key_env; }
+    if (errs.id) { delete errs.id; showErrors(); }
+  });
+  keyInput.addEventListener('input', function () {
+    touched.key = true;
+    f.user_key_env = keyInput.value;
+    if (errs.user_key_env) { delete errs.user_key_env; showErrors(); }
+  });
+  tokInput.addEventListener('input', function () {
+    f.app_token_env = tokInput.value;
+    if (errs.app_token_env) { delete errs.app_token_env; showErrors(); }
+  });
+
+  var dlg = dialog({
+    role: 'dialog',
+    title: 'Add a destination',
+    body: 'Someone who can receive alerts. The key itself stays in config/secrets.env; only the variable name is saved.',
+    width: 560,
+    content: content,
+    initialFocus: nameInput,
+    actions: [
+      { label: 'Cancel', variant: 'secondary', value: null },
+      { label: 'Add destination', variant: 'primary', value: 'add', keepOpen: true, onSelect: function () {
+        if (!validate()) return;
+        onAdd({ id: f.id.trim(), name: f.name.trim(), user_key_env: f.user_key_env.trim(), app_token_env: f.app_token_env.trim() });
+        dlg.close('added');
+      } }
+    ]
+  });
+  window.setTimeout(function () { try { nameInput.focus(); } catch (e) {} }, 0);
+}
+
+/* --- Recipients (a camera's pick of the destinations) ------------------- */
+
+function recipientsField(o) {
+  var shell = fieldShell({ label: o.label, hint: o.hint, labelTag: 'h3.field__label' });
+  shell.el = h('section.field', { 'aria-labelledby': shell.labelId });
+  var body = h('div.recipients');
+  var countEl = h('p.field__hint', { role: 'status', 'aria-live': 'polite' });
+  shell.el.appendChild(shell.labelEl);
+  shell.el.appendChild(body);
+  shell.el.appendChild(countEl);
+  shell.el.appendChild(shell.hintEl);
+  shell.el.appendChild(shell.errEl);
+  shell.el.appendChild(shell.statusEl);
+
+  var radioName = uid('rcp');
+  var allRadio = null;
+  var someRadio = null;
+  var goBtn = null;
+  var boxes = [];
+
+  function value() {
+    var v = getAt(S.draft, o.path);
+    return isArray(v) ? v : null;
+  }
+
+  function refresh() {
+    var dests = destinationList();
+    var v = value();
+    var all = v === null;
+    if (allRadio) { allRadio.checked = all; someRadio.checked = !all; }
+    var picked = 0;
+    for (var i = 0; i < boxes.length; i++) {
+      var on_ = !all && v.indexOf(boxes[i].id) >= 0;
+      boxes[i].input.checked = all ? true : on_;
+      boxes[i].input.disabled = all;
+      if (on_) picked += 1;
+    }
+    countEl.className = 'field__hint';
+    if (!dests.length) countEl.textContent = '';
+    else if (all) countEl.textContent = 'All ' + dests.length + ' ' + plural(dests.length, 'destination') + ', including any added later.';
+    else if (picked) countEl.textContent = picked + ' of ' + dests.length + ' ' + plural(dests.length, 'destination') + '.';
+    else { countEl.textContent = 'None ticked — this camera sends no alerts.'; countEl.classList.add('field__hint--warn'); }
+  }
+
+  function commit(next) {
+    setAt(S.draft, o.path, next);
+    refresh();
+    ctl.setError(null);
+    onModelChanged();
+  }
+
+  function render() {
+    clear(body);
+    boxes = [];
+    allRadio = null;
+    someRadio = null;
+    goBtn = null;
+    var dests = destinationList();
+    if (!dests.length) {
+      goBtn = h('button.btn.btn--secondary.btn--sm', { type: 'button' }, h('span.btn__label', 'Define destinations'));
+      track(on(goBtn, 'click', function () { selectSection('general.notifications'); }));
+      body.appendChild(h('p.field__hint', { text: 'No destinations are defined yet, so alerts from this camera go to the fallback user key variable.' }));
+      body.appendChild(h('div.row.row--wrap', goBtn));
+      refresh();
+      return;
+    }
+    allRadio = h('input.check__box', { type: 'radio', name: radioName, value: 'all' });
+    someRadio = h('input.check__box', { type: 'radio', name: radioName, value: 'some' });
+    body.appendChild(h('label.check', allRadio, h('span.check__label', 'Every destination')));
+    body.appendChild(h('label.check', someRadio, h('span.check__label', 'Only these:')));
+    var sub = h('div.recipients__sub');
+    for (var i = 0; i < dests.length; i++) {
+      (function (d) {
+        var box = h('input.check__box', { type: 'checkbox', value: d.id });
+        var lab = h('label.check', box,
+          h('span.check__label', h('span', { text: d.name || d.id }), h('span.destcard__id', { text: d.user_key_env })));
+        track(on(box, 'change', function () {
+          var cur = value();
+          var next = isArray(cur) ? cur.slice() : [];
+          var at = next.indexOf(d.id);
+          if (box.checked && at < 0) next.push(d.id);
+          if (!box.checked && at >= 0) next.splice(at, 1);
+          commit(next);
+        }));
+        boxes.push({ id: d.id, input: box });
+        sub.appendChild(lab);
+      }(dests[i]));
+    }
+    body.appendChild(sub);
+    track(on(allRadio, 'change', function () { if (allRadio.checked) commit(null); }));
+    track(on(someRadio, 'change', function () {
+      if (!someRadio.checked) return;
+      /* Start from everyone ticked; untick to narrow. */
+      var ids = [];
+      for (var k = 0; k < dests.length; k++) ids.push(dests[k].id);
+      commit(ids);
+    }));
+    refresh();
+  }
+
+  var ctl = baseController(shell, o.path, {
+    label: o.label,
+    focus: function () { if (allRadio) allRadio.focus(); else if (goBtn) goBtn.focus(); },
+    sync: function () { render(); ctl.setError(null); }
+  });
+  render();
+  return ctl;
+}
+
 /* ==========================================================================
    SPEC -> CONTROLLER
    ========================================================================= */
@@ -1761,6 +2306,12 @@ function renderField(spec, ctx) {
         emptyMeans: spec.emptyMeans,
         recent: spec.recent && ctx.camera ? ctx.camera.recent_detections : null
       }));
+      break;
+    case 'destinations':
+      ctl = destinationsField(Object.assign(o, { emptyMeans: spec.emptyMeans }));
+      break;
+    case 'recipients':
+      ctl = recipientsField(o);
       break;
     default:
       return null;
@@ -2227,15 +2778,34 @@ function setSaveBusy(busy) {
 }
 
 function sectionOfPath(path) {
-  if (path[0] === 'general') return GENERAL_SECTION_BY_KEY[path.slice(1).join('.')] || DEFAULT_SECTION;
+  if (path[0] === 'general') {
+    /* general.notification.destinations.1.user_key_env belongs to the
+       section that owns the longest known prefix. */
+    for (var n = path.length; n > 1; n--) {
+      var sec = GENERAL_SECTION_BY_KEY[path.slice(1, n).join('.')];
+      if (sec) return sec;
+    }
+    return DEFAULT_SECTION;
+  }
   return path[1];
+}
+
+/* The controller for a path: an exact match, else the one owning the
+   longest prefix, with the rest of the path (a list index and property)
+   handed back so the controller can point at the row. */
+function controllerFor(path) {
+  for (var n = path.length; n > 0; n--) {
+    var ctl = S.fieldByKey[pathKey(path.slice(0, n))];
+    if (ctl) return { ctl: ctl, rest: path.slice(n) };
+  }
+  return null;
 }
 
 function focusPath(path) {
   var sec = sectionOfPath(path);
   if (sec !== S.section) selectSection(sec, { silent: false });
-  var ctl = S.fieldByKey[pathKey(path)];
-  if (!ctl) {
+  var hit = controllerFor(path);
+  if (!hit) {
     /* The field may sit inside a closed Advanced fold. Open every fold in
        its group and try again. */
     for (var g in S.groupHosts) {
@@ -2243,13 +2813,14 @@ function focusPath(path) {
       var det = S.groupHosts[g].el.querySelector('details.disclosure');
       if (det && !det.open) { det.open = true; S.openAdvanced[g] = true; }
     }
-    ctl = S.fieldByKey[pathKey(path)];
+    hit = controllerFor(path);
   }
-  if (!ctl) return;
+  if (!hit) return;
+  var ctl = hit.ctl;
   var det2 = ctl.el.closest ? ctl.el.closest('details.disclosure') : null;
   if (det2 && !det2.open) det2.open = true;
   if (ctl.el && ctl.el.scrollIntoView) ctl.el.scrollIntoView({ block: 'center' });
-  if (ctl.focus) ctl.focus();
+  if (ctl.focus) ctl.focus(hit.rest);
 }
 
 function serverPath(p) {
@@ -2265,8 +2836,8 @@ function save() {
   if (problems.length) {
     var first = problems[0];
     focusPath(first.path);
-    var pctl = S.fieldByKey[pathKey(first.path)];
-    if (pctl && pctl.setError) pctl.setError(first.message);
+    var phit = controllerFor(first.path);
+    if (phit && phit.ctl.setError) phit.ctl.setError(first.message, phit.rest);
     toast.danger('Nothing was saved — ' + problems.length + ' ' + plural(problems.length, 'field') + ' failed validation.', {
       detail: first.message
     });
@@ -2355,8 +2926,8 @@ function save() {
       var firstPath = serverPath(serverProblems[0].path);
       focusPath(firstPath);
       for (var p = 0; p < serverProblems.length; p++) {
-        var c = S.fieldByKey[pathKey(serverPath(serverProblems[p].path))];
-        if (c && c.setError) c.setError(serverProblems[p].message);
+        var shit = controllerFor(serverPath(serverProblems[p].path));
+        if (shit && shit.ctl.setError) shit.ctl.setError(serverProblems[p].message, shit.rest);
       }
       toast.error('config/cameras.yml was NOT written — the server rejected ' + serverProblems.length + ' ' + plural(serverProblems.length, 'field') + '.', {
         detail: serverProblems[0].path + ': ' + serverProblems[0].message,
@@ -2940,10 +3511,12 @@ function load(opts) {
     S.refreshAbort = null;
     var model = normalize(raw);
     if (o.quiet) {
-      /* A background refresh must never overwrite work in progress. */
+      /* A background refresh must never overwrite work in progress: a
+         dirty draft, a focused control, or a dialog whose callback still
+         points at the controls it was opened from. */
       if (computeChanges().list.length) return;
       if (!S.panelEl) return;
-      if (!o.force && S.panelEl.contains(document.activeElement)) return;
+      if (!o.force && (S.panelEl.contains(document.activeElement) || isOverlayOpen())) return;
       applyServerMeta(raw);
       S.baseline = model;
       S.draft = clone(model);

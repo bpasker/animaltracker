@@ -124,6 +124,15 @@ backed by `configstore.py`). Rules that keep it safe:
   pending-restart banner is the diff between file and runtime.
 - Values equal to the schema default are not written for keys the file lacks,
   so hand-kept files stay compact.
+- Pushover recipients: `general.notification.destinations` is a list of
+  `{id, name, user_key_env, app_token_env?}` and each camera's
+  `notification.destinations` names ids (absent = every destination, `[]` =
+  none). `PushoverNotifier` holds the live `NotificationSettings` object
+  and resolves recipients on every send, so these and the variable-name
+  fields apply without a restart; with no destinations the fallback
+  `pushover_user_key_env` (comma-separated keys allowed) is used. The store
+  refuses a camera naming an unknown destination (`check_destination_refs`);
+  the pipeline only warns and skips it.
 - The legacy `/settings` page still uses `/api/settings`; that path is
   unchanged and slated for removal at cutover.
 

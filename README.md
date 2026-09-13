@@ -307,8 +307,14 @@ without a shell:
 - **General** pages: *Detection* (backends, YOLO weights, SpeciesNet version,
   location priors), *Recording* (clip buffer, post-processing, false-positive
   cleanup, track merging), *Storage* (paths, retention), *Notifications*
-  (Pushover variable names, alert link base URL, global exclusions) and
-  *System* (metrics port, timezone, service restart).
+  (Pushover variable names, named destinations, alert link base URL, global
+  exclusions) and *System* (metrics port, timezone, service restart).
+- **Who gets alerted**: under *Notifications*, add a **destination** per
+  person or group: a name plus the `secrets.env` variable holding their
+  Pushover user or group key (and optionally their own app token). Each
+  camera's *Notifications* section then sends to **every destination** or
+  **only the ticked ones**; ticking none silences that camera. With no
+  destinations defined, alerts go to `PUSHOVER_USER_KEY` as before.
 - **Cameras**: one page per camera with identity, stream, ONVIF, detection
   thresholds, PTZ auto-tracking, species filters and notifications. **Add
   camera** creates a new entry (with a *Test stream* check and optional ONVIF
@@ -699,9 +705,12 @@ pip install "numpy<2" "opencv-python-headless<4.11"
 3. Try different ONVIF ports (80, 8000, 8080)
 
 ### No notifications received
-1. Run `python scripts/test_pushover.py` to test
+1. Run `python scripts/test_pushover.py` to test (add destination ids to test a subset)
 2. Verify PUSHOVER_APP_TOKEN and PUSHOVER_USER_KEY in secrets.env
 3. Check Pushover app is installed on your phone
+4. With destinations defined: every destination's variable must show *set* on
+   the Notifications settings page (a new variable needs a restart), and the
+   camera's *Send alerts to* must not have everyone unticked
 
 ### High CPU usage / Slow detection
 1. Use sub-stream instead of main stream (lower resolution)

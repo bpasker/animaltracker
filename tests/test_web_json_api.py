@@ -264,3 +264,47 @@ def test_no_cameras_is_an_empty_list_not_an_error(server):
     assert status == 200
     assert body["cameras"] == []
     assert "timezone" in body
+
+
+# --------------------------------------------------------------------------
+# /api/monitor
+# --------------------------------------------------------------------------
+
+def test_monitor_host_stats_run_off_the_event_loop(server, tmp_path, monkeypatch):
+    """Disk usage is a statvfs on the storage root, an NFS mount in
+    production, so it must not run on the loop thread: a stalled NFS
+    server would freeze every camera worker and request in the process."""
+    import collections
+    import threading
+    import psutil
+
+    seen = {}
+    Usage = collections.namedtuple("Usage", "total used free percent")
+
+    def fake_disk_usage(path):
+        seen["thread"] = threading.current_thread()
+        seen["path"] = path
+        return Usage(total=300 * 1024**3, used=81 * 1024**3, free=219 * 1024**3, percent=27.0)
+
+    monkeypatch.setattr(psutil, "disk_usage", fake_disk_usage)
+    main_thread = threading.current_thread()
+
+    status, body = call(server.handle_get_monitor_data)
+    assert status == 200
+    assert seen["thread"] is not main_thread
+    assert seen["path"] == str(tmp_path)
+    assert body["system"]["disk_percent"] == 27.0
+    assert body["system"]["disk_total_gb"] == 300.0
+    assert body["cameras"] == [] and body["recent_clips"] == []
+
+
+def test_monitor_survives_a_failing_disk_probe(server, monkeypatch):
+    import psutil
+
+    def boom(path):
+        raise OSError("Stale file handle")
+
+    monkeypatch.setattr(psutil, "disk_usage", boom)
+    status, body = call(server.handle_get_monitor_data)
+    assert status == 200
+    assert body["system"]["disk_percent"] == 0 and body["system"]["cpu_percent"] == 0

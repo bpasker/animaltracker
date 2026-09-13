@@ -118,6 +118,20 @@ function shout(key, message, err, opts) {
   return toast.error(message, o);
 }
 
+/* An ApiError with status 0 is a timeout or a network failure: the server
+   never answered, so nothing it might have said about the pipeline is known
+   and "the pipeline stopped" would be a guess. Anything else is the server
+   talking, and its words are shown. */
+function isUnreachable(err) {
+  return !!err && err.name === 'ApiError' && err.status === 0;
+}
+
+function setUnreachable(on) {
+  if (S.unreachable === on) return;
+  S.unreachable = on;
+  S.cards.forEach(function (card) { paintCard(card); });
+}
+
 /* ========================================================================
    Small components. Each returns { el, set } and patches in place, because
    a refresh must never blow away focus or a half-finished gesture.
@@ -347,6 +361,7 @@ function newState() {
     layoutBtn: null, streamsBtn: null,
     mq: null, mqOff: null,
     camsError: null,
+    unreachable: false,    /* the camera poll got no answer at all (timeout or network) */
     lastSummary: null,
     tickTimer: null, camTimer: null, monTimer: null, posTimer: null, snapTimer: null
   };
@@ -1325,7 +1340,7 @@ function checkStall(card) {
   if (since >= STALL_MS && (CHATTY || serverBad)) {
     onStreamDrop(card, CHATTY
       ? 'No MJPEG data for ' + Math.round(since / 1000) + ' s.'
-      : 'The pipeline stopped producing frames.');
+      : (S.unreachable ? 'No answer from the server.' : 'The pipeline stopped producing frames.'));
     return;
   }
   if (since >= VERIFY_MS) {
@@ -1428,16 +1443,26 @@ function paintCard(card) {
   var showFault = hard || (state === 'stale' && card.attempt > 0);
   card.faultEl.hidden = !showFault;
   if (showFault) {
-    setText(card.faultTitle, card.attempt ? 'Stream lost — reconnecting' : 'Stream is down');
-    setText(card.faultCauseEl, card.faultCause ||
-      (serverState === 'offline' ? 'The pipeline reports this camera offline.'
-        : 'The stream stopped producing frames.'));
+    if (S.unreachable) {
+      /* The API is not answering either, so this is between this device
+         and the server; the pipeline is not known to be at fault. */
+      setText(card.faultTitle, 'Can\'t reach the server');
+      setText(card.faultCauseEl, 'No answer from ' + window.location.host +
+        '. Check this device\'s network; the pipeline may be running fine.');
+    } else {
+      setText(card.faultTitle, card.attempt ? 'Stream lost — reconnecting' : 'Stream is down');
+      setText(card.faultCauseEl, card.faultCause ||
+        (serverState === 'offline' ? 'The pipeline reports this camera offline.'
+          : 'The stream stopped producing frames.'));
+    }
     var line;
     if (card.retryTimer && card.nextTryAt) {
       var secs = Math.max(0, Math.ceil((card.nextTryAt - Date.now()) / 1000));
       line = 'Reconnecting — attempt ' + card.attempt + ', next try in ' + secs + ' s';
     } else if (card.attempt) {
       line = 'Reconnecting — attempt ' + card.attempt + ', trying now';
+    } else if (S.unreachable) {
+      line = 'Waiting for the server to answer.';
     } else {
       line = 'Waiting for the pipeline to bring the camera back.';
     }
@@ -1470,6 +1495,7 @@ function pollCameras() {
   return api.cameras({ signal: signal(), timeout: 8000 })
     .then(function (res) {
       S.camsError = null;
+      setUnreachable(false);
       S.tz = (res && res.timezone) || '';
       var rows = (res && res.cameras) || [];
       S.cams = rows;
@@ -1480,8 +1506,20 @@ function pollCameras() {
     .catch(function (err) {
       if (api.isAbort(err)) return;
       S.camsError = err;
+      setUnreachable(isUnreachable(err));
       renderSummary();
       if (!S.cards.size) renderFallback();
+      if (S.unreachable) {
+        /* A network-level failure already raised the app-wide
+           "Disconnected" toast (core/api.js flips store.connected); a
+           timeout is silent there and needs its own words. */
+        if (store.get('connected') !== false) {
+          shout('server', 'Can\'t reach the server.', err, {
+            retry: function () { pollCameras(); }
+          });
+        }
+        return;
+      }
       shout('cameras', 'Lost the camera list.', err, {
         retry: function () { pollCameras(); }
       });
@@ -1503,6 +1541,15 @@ function pollMonitor() {
         card.rBuffer.set('—', 'danger', 0, 'buffer unavailable');
         card.rTracks.set('—', 'danger');
       });
+      if (isUnreachable(err)) {
+        /* The camera poll decides whether the server is gone. Give it one
+           round before blaming telemetry, so an outage raises one toast,
+           not two; the readouts above already show the dashes. */
+        later(function () {
+          if (!S.unreachable) shout('monitor', 'Pipeline telemetry is unavailable.', err);
+        }, CAMERAS_MS + 1000);
+        return;
+      }
       shout('monitor', 'Pipeline telemetry is unavailable.', err);
     });
 }
@@ -1789,8 +1836,13 @@ function refreshSnapshots() {
  * skeleton would sit there for ever. A failed camera list has to say so in
  * the page, not only in a toast that has already timed out.
  */
+function unreachableText() {
+  return 'No answer from ' + window.location.host + ' within 8 s. Check this device\'s network; ' +
+    'the pipeline may be running fine.';
+}
+
 function renderFallback() {
-  var kind = S.camsError ? 'error' : 'empty';
+  var kind = S.camsError ? (S.unreachable ? 'unreachable' : 'error') : 'empty';
   if (S.fallbackKind === kind && S.fallbackEl && S.fallbackEl.parentNode === S.wall) {
     if (kind === 'error' && S.fallbackBody) {
       setText(S.fallbackBody, api.describe(S.camsError));
@@ -1798,15 +1850,17 @@ function renderFallback() {
     return;
   }
   var el;
-  if (kind === 'error') {
+  if (kind === 'error' || kind === 'unreachable') {
     var retryBtn = h('button.btn.btn--primary', { type: 'button' },
       icon('refresh', { size: 'sm', 'class': 'btn__icon' }),
       h('span.btn__label', 'Try again'));
     retryBtn.addEventListener('click', function () { pollCameras(); });
-    S.fallbackBody = h('p.empty__body', { text: api.describe(S.camsError) });
+    S.fallbackBody = h('p.empty__body', {
+      text: kind === 'unreachable' ? unreachableText() : api.describe(S.camsError)
+    });
     el = h('div.empty.empty--error', { role: 'alert' },
       h('div.empty__art', icon('alert', { size: 'lg' })),
-      h('h2.empty__title', 'The camera list did not load'),
+      h('h2.empty__title', kind === 'unreachable' ? 'Can\'t reach the server' : 'The camera list did not load'),
       S.fallbackBody,
       h('p.empty__endpoint', 'GET /api/cameras'),
       h('div.empty__actions', retryBtn));
@@ -1945,7 +1999,9 @@ function summarise() {
 
 function renderSummary() {
   var s = summarise();
-  var subtitle = S.camsError ? 'Camera list unavailable' : s.text;
+  var subtitle = S.camsError
+    ? (S.unreachable ? 'Server unreachable' : 'Camera list unavailable')
+    : s.text;
   /* Called every second by tick(); only a real change touches the chrome or
      the live region, or a screen reader would never stop talking. */
   if (subtitle !== S.lastSummary) {

@@ -391,6 +391,16 @@ def _journal_grep_pattern(log_type, level):
     return _LEVEL_GREP.get(level)
 
 
+_EMPTY_SYSTEM_STATS = {
+    'cpu_percent': 0, 'memory_percent': 0, 'memory_used_gb': 0, 'memory_total_gb': 0,
+    'disk_percent': 0, 'disk_used_gb': 0, 'disk_total_gb': 0,
+}
+_EMPTY_GPU_STATS = {
+    'available': False, 'name': None, 'utilization': 0, 'memory_percent': 0,
+    'memory_used_mb': 0, 'memory_total_mb': 0, 'temperature': 0, 'power_draw': 0, 'power_limit': 0,
+}
+
+
 class WebServer:
     def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None, runtime = None):
         self.workers = workers
@@ -7631,34 +7641,23 @@ class WebServer:
             'global_settings': global_settings,
         }
 
-    async def handle_get_monitor_data(self, request):
-        """Get real-time pipeline monitoring data as JSON."""
+    def _monitor_host_stats(self):
+        """System, GPU, detector and recent-clip figures for /api/monitor.
+
+        Runs on an executor thread, never on the event loop: the disk
+        figure is a statvfs on the storage root and the recent-clip scan
+        lists it, and on the production host that root is an NFS mount.
+        Done on the loop, a slow NFS server froze every camera worker and
+        every request in this process for as long as it took to answer.
+        Returns ``(system, gpu, detector_info, recent_clips)``.
+        """
         import psutil
-        
-        cameras = []
-        for camera_id, worker in self.workers.items():
-            # Get camera status
-            camera_data = {
-                'id': camera_id,
-                'name': worker.camera.name,
-                'location': worker.camera.location,
-                'status': 'connected' if worker.latest_frame is not None else 'disconnected',
-                'buffer_frames': worker.clip_buffer.frame_count,
-                'buffer_max_frames': worker.clip_buffer.max_frames,
-                'buffer_seconds': round(worker.clip_buffer.duration, 1),
-                'buffer_max_seconds': worker.clip_buffer.max_seconds,
-                'event_active': worker.event_state is not None,
-                'event_species': list(worker.event_state.species) if worker.event_state else [],
-                'event_duration': round(worker.event_state.duration, 1) if worker.event_state else 0,
-                'event_confidence': round(worker.event_state.max_confidence, 3) if worker.event_state else 0,
-                'tracking_enabled': worker.tracking_enabled,
-                'tracks_active': len(worker.event_state.tracker.tracks) if worker.event_state and worker.event_state.tracker else 0,
-            }
-            cameras.append(camera_data)
-        
+
         # System stats
         try:
-            cpu_percent = psutil.cpu_percent(interval=0.1)
+            # interval=None compares with the previous call instead of
+            # sleeping 100 ms; the first call after startup reads 0.
+            cpu_percent = psutil.cpu_percent(interval=None)
             memory = psutil.virtual_memory()
             disk = psutil.disk_usage(str(self.storage_root))
             
@@ -7765,6 +7764,43 @@ class WebServer:
                     'camera': clip.parent.name,
                 })
         
+        return system, gpu, detector_info, recent_clips
+
+    async def handle_get_monitor_data(self, request):
+        """Get real-time pipeline monitoring data as JSON."""
+        cameras = []
+        for camera_id, worker in self.workers.items():
+            # Get camera status
+            camera_data = {
+                'id': camera_id,
+                'name': worker.camera.name,
+                'location': worker.camera.location,
+                'status': 'connected' if worker.latest_frame is not None else 'disconnected',
+                'buffer_frames': worker.clip_buffer.frame_count,
+                'buffer_max_frames': worker.clip_buffer.max_frames,
+                'buffer_seconds': round(worker.clip_buffer.duration, 1),
+                'buffer_max_seconds': worker.clip_buffer.max_seconds,
+                'event_active': worker.event_state is not None,
+                'event_species': list(worker.event_state.species) if worker.event_state else [],
+                'event_duration': round(worker.event_state.duration, 1) if worker.event_state else 0,
+                'event_confidence': round(worker.event_state.max_confidence, 3) if worker.event_state else 0,
+                'tracking_enabled': worker.tracking_enabled,
+                'tracks_active': len(worker.event_state.tracker.tracks) if worker.event_state and worker.event_state.tracker else 0,
+            }
+            cameras.append(camera_data)
+        
+        # Host figures are gathered off the loop; see _monitor_host_stats.
+        loop = asyncio.get_running_loop()
+        try:
+            system, gpu, detector_info, recent_clips = await loop.run_in_executor(
+                None, self._monitor_host_stats
+            )
+        except Exception as err:  # noqa: BLE001 - telemetry is best effort
+            LOGGER.debug("Host stats unavailable: %s", err)
+            system, gpu, detector_info, recent_clips = (
+                dict(_EMPTY_SYSTEM_STATS), dict(_EMPTY_GPU_STATS), {'backend': 'unknown', 'country': None}, []
+            )
+
         # Active reprocessing jobs
         reprocessing = list(self.reprocessing_jobs.values())
         

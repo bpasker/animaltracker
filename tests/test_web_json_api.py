@@ -278,11 +278,11 @@ def test_monitor_host_stats_run_off_the_event_loop(server, tmp_path, monkeypatch
     import threading
     import psutil
 
-    seen = {}
+    seen = {"threads": [], "path": None}
     Usage = collections.namedtuple("Usage", "total used free percent")
 
     def fake_disk_usage(path):
-        seen["thread"] = threading.current_thread()
+        seen["threads"].append(threading.current_thread())
         seen["path"] = path
         return Usage(total=300 * 1024**3, used=81 * 1024**3, free=219 * 1024**3, percent=27.0)
 
@@ -291,11 +291,19 @@ def test_monitor_host_stats_run_off_the_event_loop(server, tmp_path, monkeypatch
 
     status, body = call(server.handle_get_monitor_data)
     assert status == 200
-    assert seen["thread"] is not main_thread
     assert seen["path"] == str(tmp_path)
     assert body["system"]["disk_percent"] == 27.0
     assert body["system"]["disk_total_gb"] == 300.0
     assert body["cameras"] == [] and body["recent_clips"] == []
+
+    # Every poll lands on the same dedicated thread, never the loop's: psutil
+    # keeps its CPU sample per thread, and a stalled NFS call must not take a
+    # thread the camera capture loops run on.
+    call(server.handle_get_monitor_data)
+    assert len(seen["threads"]) == 2
+    assert seen["threads"][0] is seen["threads"][1]
+    assert seen["threads"][0] is not main_thread
+    assert seen["threads"][0].name.startswith("monitor-stats")
 
 
 def test_monitor_survives_a_failing_disk_probe(server, monkeypatch):

@@ -7789,11 +7789,20 @@ class WebServer:
             }
             cameras.append(camera_data)
         
-        # Host figures are gathered off the loop; see _monitor_host_stats.
+        # Host figures are gathered off the loop (see _monitor_host_stats) on
+        # a thread of their own: a stalled NFS call must not take one of the
+        # default pool's threads, which the camera capture loops run on, and
+        # psutil keeps its "since the last call" CPU sample per thread, so
+        # the figure is only meaningful when every poll lands on the same one.
+        executor = getattr(self, '_stats_executor', None)
+        if executor is None:
+            import concurrent.futures
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='monitor-stats')
+            self._stats_executor = executor
         loop = asyncio.get_running_loop()
         try:
             system, gpu, detector_info, recent_clips = await loop.run_in_executor(
-                None, self._monitor_host_stats
+                executor, self._monitor_host_stats
             )
         except Exception as err:  # noqa: BLE001 - telemetry is best effort
             LOGGER.debug("Host stats unavailable: %s", err)

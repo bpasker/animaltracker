@@ -233,7 +233,7 @@ var GENERAL_SECTIONS = [
     id: 'general.notifications', label: 'Notifications', iconName: 'external',
     blurb: 'Pushover alerts, and the species that never alert.',
     groups: [
-      { id: 'pushover', legend: 'Pushover', hint: 'Secrets stay in config/secrets.env; only the variable names are stored here. A variable has to be in that file when the service starts.', fields: [
+      { id: 'pushover', legend: 'Pushover', hint: 'Only variable names are stored here. The values live in config/secrets.env and can be set under Secrets below.', fields: [
         { key: 'notification.pushover_app_token_env', kind: 'env', required: true,
           label: 'App token variable', hint: 'Environment variable holding the Pushover application token. A destination can name its own.' },
         { key: 'notification.destinations', kind: 'destinations',
@@ -250,7 +250,8 @@ var GENERAL_SECTIONS = [
         { key: 'exclusion_list', kind: 'species',
           label: 'Never alert for these species', hint: 'Applies to every camera, on top of its own exclude list.',
           emptyMeans: 'No global exclusions — every species alerts.' }
-      ] }
+      ] },
+      { id: 'secrets', legend: 'Secrets', custom: 'secrets', fields: [] }
     ]
   },
   {
@@ -1020,6 +1021,7 @@ function newSession() {
     baseline: null,      /* what the server last confirmed */
     draft: null,         /* what the operator is editing */
     env: {},             /* env var name -> present? */
+    secrets: null,       /* { file, exists, variables: [{ name, used_by, live }] } */
     defaults: {},        /* schema defaults from the server */
     restart: null,       /* { required, reasons, supported, unit } */
     configPath: '',
@@ -1640,7 +1642,7 @@ function scheduleEnvCheck(name) {
     api.probeCamera({ env: names }, { signal: S.abort.signal, timeout: 8000 }).then(function (res) {
       if (S.destroyed || !res || !res.env) return;
       for (var n in res.env) if (Object.prototype.hasOwnProperty.call(res.env, n)) S.env[n] = !!res.env[n];
-      for (var i = 0; i < S.fields.length; i++) if (S.fields[i].refreshEnv) S.fields[i].refreshEnv();
+      refreshEnvTags();
     }, function () { /* the tag simply stays "unchecked" */ });
   }, 700);
 }
@@ -2098,7 +2100,7 @@ function addDestinationDialog(onAdd) {
   var content = h('div.stack',
     field('name', 'Name', 'Who this is. Shown in each camera\'s picker.', nameInput),
     field('id', 'Id', 'Short and permanent: cameras refer to it, so it cannot be renamed later.', idInput),
-    field('user_key_env', 'User key variable', 'The variable in config/secrets.env holding their Pushover user or group key. Reuse PUSHOVER_USER_KEY for the key already in use.', keyInput),
+    field('user_key_env', 'User key variable', 'The variable in config/secrets.env holding their Pushover user or group key. Save, then paste the key itself under Secrets. Reuse PUSHOVER_USER_KEY for the key already in use.', keyInput),
     field('app_token_env', 'App token variable', 'Optional: a variable holding a different Pushover application token, for a destination on another Pushover account.', tokInput));
 
   nameInput.addEventListener('input', function () {
@@ -2251,6 +2253,158 @@ function recipientsField(o) {
   return ctl;
 }
 
+/* --- Secrets: write-only values for the variables the config names ------ */
+
+/* Unlike everything else on this page these are NOT staged: a value is
+   written to config/secrets.env and into the running process the moment
+   the dialog is confirmed, and nothing ever reads it back — the row only
+   ever shows "set" or "not set". The list comes from the SAVED file
+   (S.secrets, from GET /api/config), never from the draft: the server
+   accepts only names the saved configuration references. */
+
+function refreshEnvTags() {
+  for (var i = 0; i < S.fields.length; i++) if (S.fields[i].refreshEnv) S.fields[i].refreshEnv();
+}
+
+function renderSecretsCard() {
+  var meta = S.secrets || {};
+  var file = meta.file || 'config/secrets.env';
+  var vars = isArray(meta.variables) ? meta.variables : [];
+  var wrap = h('div.stack.stack--tight');
+  wrap.appendChild(h('p.field__hint', { text: 'Values are written to ' + file +
+    ' and applied to the running service at once; they are never shown again. Only variables the saved ' +
+    'configuration names can be set, so save a new destination or camera first, then set its value here.' }));
+  if (!vars.length) {
+    wrap.appendChild(h('p.field__hint', { text: 'The saved configuration names no variables yet.' }));
+    return wrap;
+  }
+  var list = h('div.secretlist');
+  for (var i = 0; i < vars.length; i++) {
+    (function (v) {
+      var tag = h('span.envtag', { text: '…' });
+      var usedText = (isArray(v.used_by) ? v.used_by : []).join(', ');
+      var setBtn = h('button.btn.btn--secondary.btn--sm', { type: 'button', 'aria-label': 'Set the value of ' + v.name },
+        h('span.btn__label', 'Set value'));
+      var removeBtn = h('button.btn.btn--ghost.btn--sm', { type: 'button', 'aria-label': 'Remove ' + v.name + ' from ' + file },
+        h('span.btn__label', 'Remove'));
+      function refresh() {
+        envTag(tag, v.name);
+        var present = S.env[v.name] === true;
+        removeBtn.hidden = !present;
+        setBtn.lastChild.textContent = present ? 'Replace value' : 'Set value';
+      }
+      track(on(setBtn, 'click', function () { setSecretDialog(v, file); }));
+      track(on(removeBtn, 'click', function () { removeSecretDialog(v, file); }));
+      var row = h('div.secretrow',
+        h('div.secretrow__text',
+          h('div.secretrow__head', h('span.secretrow__name', { text: v.name }), tag),
+          h('p.field__hint', { text: usedText + (v.live ? '' : ' · read when the service starts, so restart after changing it') })),
+        h('div.secretrow__actions', setBtn, removeBtn));
+      /* Registered like a field so the batched env probe and a saved value
+         refresh this tag too; it is never dirty and never validated. */
+      S.fields.push({
+        key: 'secret:' + v.name, path: ['secrets', v.name], el: row, label: v.name,
+        refreshEnv: refresh, setDirty: function () {}, setError: function () {}, setStatus: function () {}
+      });
+      refresh();
+      list.appendChild(row);
+    }(vars[i]));
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
+function setSecretDialog(v, file) {
+  var input = h('input.input.input--mono', {
+    type: 'password', autocomplete: 'new-password', autocapitalize: 'off', spellcheck: 'false',
+    'aria-label': 'Value for ' + v.name
+  });
+  var show = h('input.check__box', { type: 'checkbox' });
+  show.addEventListener('change', function () { input.type = show.checked ? 'text' : 'password'; });
+  var err = h('p.field__error', { hidden: true, role: 'alert' });
+  var hint = h('p.field__hint', { text: 'Pasted straight into ' + file + '. It is never shown again; set it again to replace it.' });
+  function showErr(msg) {
+    clear(err);
+    if (msg) {
+      err.hidden = false;
+      err.appendChild(icon('alert', { size: 'sm' }));
+      err.appendChild(h('span', { text: msg }));
+      hint.hidden = true;
+      input.setAttribute('aria-invalid', 'true');
+    } else {
+      err.hidden = true;
+      hint.hidden = false;
+      input.removeAttribute('aria-invalid');
+    }
+  }
+  input.addEventListener('input', function () { showErr(null); });
+  var content = h('div.stack',
+    h('div.field', h('label.field__label', { text: 'Value' }), input, hint, err),
+    h('label.check', show, h('span.check__label', 'Show while typing')));
+  var busy = false;
+  var dlg = dialog({
+    role: 'dialog',
+    title: 'Set ' + v.name,
+    body: (isArray(v.used_by) ? v.used_by : []).join(', ') +
+      (v.live ? '. Takes effect the moment it is saved.' : '. Read when the service starts, so restart afterwards.'),
+    width: 520,
+    content: content,
+    initialFocus: input,
+    actions: [
+      { label: 'Cancel', variant: 'secondary', value: null },
+      { label: 'Save value', variant: 'primary', value: 'save', keepOpen: true, onSelect: function () {
+        if (busy) return;
+        var value = input.value;
+        if (!value.trim()) { showErr('Paste the value first.'); input.focus(); return; }
+        busy = true;
+        api.setSecret({ name: v.name, value: value }, { signal: S.abort.signal }).then(function (res) {
+          busy = false;
+          if (S.destroyed) return;
+          S.env[v.name] = true;
+          input.value = '';
+          dlg.close('saved');
+          refreshEnvTags();
+          toast.success(v.name + ' set', {
+            detail: (res && res.live ? 'Applied to the running service.' : 'Saved; read at the next restart.') +
+              (res && res.backup ? ' The previous secrets.env is in backups.' : '')
+          });
+        }, function (e) {
+          busy = false;
+          if (S.destroyed || api.isAbort(e)) return;
+          showErr(api.describe(e));
+        });
+      } }
+    ]
+  });
+  window.setTimeout(function () { try { input.focus(); } catch (e) {} }, 0);
+}
+
+function removeSecretDialog(v, file) {
+  var dlg = dialog({
+    role: 'alertdialog',
+    tone: 'danger',
+    title: 'Remove ' + v.name + '?',
+    body: 'Its line is deleted from ' + file + ' and the running service forgets the value at once. ' +
+      'Anything using it (' + (isArray(v.used_by) ? v.used_by : []).join(', ') + ') stops working until it is set again.',
+    actions: [
+      { label: 'Keep it', variant: 'secondary', value: false, focus: true },
+      { label: 'Remove', variant: 'danger', value: true }
+    ]
+  });
+  dlg.result.then(function (yes) {
+    if (yes !== true || S.destroyed) return;
+    api.setSecret({ name: v.name, value: '' }, { signal: S.abort.signal }).then(function () {
+      if (S.destroyed) return;
+      S.env[v.name] = false;
+      refreshEnvTags();
+      toast.info(v.name + ' removed from ' + file);
+    }, function (e) {
+      if (S.destroyed || api.isAbort(e)) return;
+      toast.error(v.name + ' was not removed.', { detail: api.describe(e) });
+    });
+  });
+}
+
 /* ==========================================================================
    SPEC -> CONTROLLER
    ========================================================================= */
@@ -2346,6 +2500,7 @@ function renderGroup(group, ctx) {
     var ctl = renderField(main[m], ctx);
     if (ctl) fs.appendChild(ctl.el);
   }
+  if (group.custom === 'secrets') fs.appendChild(renderSecretsCard());
   if (group.probe === 'rtsp' && ctx.camera) fs.appendChild(rtspProbeRow(ctx.cameraId));
   if (group.probe === 'onvif' && ctx.camera && blockOn(ctx.camera, 'onvif')) fs.appendChild(onvifProbeRow(ctx.cameraId));
 
@@ -3488,6 +3643,7 @@ function errorState(err, retry) {
 
 function applyServerMeta(raw) {
   S.env = raw && raw.env && typeof raw.env === 'object' ? raw.env : {};
+  S.secrets = raw && raw.secrets && typeof raw.secrets === 'object' ? raw.secrets : null;
   S.defaults = raw && raw.defaults && typeof raw.defaults === 'object' ? raw.defaults : {};
   S.restart = raw && raw.restart ? raw.restart : { required: false, reasons: [], supported: false, unit: null };
   S.configPath = raw && raw.config_path ? String(raw.config_path) : '';

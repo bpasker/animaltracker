@@ -327,9 +327,14 @@ without a shell:
   keeps the previous version in `config/backups/` (last 20) and writes
   atomically. Keys the page does not manage (for example `ebird:`) are left
   untouched; YAML comments are not preserved.
-- Secrets never pass through the page: ONVIF and Pushover credentials are
-  referenced by environment-variable name, and the page shows whether each
-  name is set in the process environment (`config/secrets.env`).
+- Secrets are write-only: ONVIF and Pushover credentials are referenced by
+  environment-variable name, and the page shows whether each name is set in
+  the process environment (`config/secrets.env`). The **Secrets** card on the
+  Notifications page sets a value for any variable the saved configuration
+  names: it is written to `secrets.env` (backed up, replaced atomically) and
+  into the running service at once, so a Pushover key works without a
+  restart, and nothing ever reads it back. Camera credentials are read when
+  the service starts, so restart after changing those.
 
 ### Detector Backends: SpeciesNet vs YOLO
 

@@ -537,3 +537,105 @@ def test_an_empty_destination_list_is_not_written_for_a_file_that_lacks_it():
         "cameras": [{"id": "cam1", "notification": {"destinations": None}}],
     })
     assert new == BASE and changes["general"] == [] and changes["cameras"] == {}
+
+
+# --------------------------------------------------------------------------
+# Secrets: write-only values for the variables the configuration names
+# --------------------------------------------------------------------------
+
+def test_set_secret_appends_replaces_and_removes_without_touching_the_rest(cfg_path, monkeypatch):
+    for name in ("PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    env_file = cfg_path.parent / "secrets.env"
+    env_file.write_text("# keep me\nPUSHOVER_APP_TOKEN=old-token\nOTHER=1\n", encoding="utf-8")
+
+    result = configstore.set_secret(cfg_path, "PUSHOVER_USER_KEY", " user-key-1 ")
+    assert env_file.read_text() == "# keep me\nPUSHOVER_APP_TOKEN=old-token\nOTHER=1\nPUSHOVER_USER_KEY=user-key-1\n"
+    assert os.environ["PUSHOVER_USER_KEY"] == "user-key-1", "applied to the running process"
+    assert result["set"] is True and result["live"] is True and result["name"] == "PUSHOVER_USER_KEY"
+    assert "user-key-1" not in json.dumps(result), "the value never comes back"
+    assert result["backup"] and pathlib.Path(result["backup"]).parent == cfg_path.parent / "backups"
+    assert pathlib.Path(result["backup"]).name.startswith("secrets.env.")
+
+    configstore.set_secret(cfg_path, "PUSHOVER_APP_TOKEN", "new-token")
+    assert env_file.read_text().splitlines()[1] == "PUSHOVER_APP_TOKEN=new-token", "replaced in place"
+    assert os.environ["PUSHOVER_APP_TOKEN"] == "new-token"
+
+    gone = configstore.set_secret(cfg_path, "PUSHOVER_USER_KEY", "")
+    assert gone["set"] is False
+    assert env_file.read_text() == "# keep me\nPUSHOVER_APP_TOKEN=new-token\nOTHER=1\n"
+    assert "PUSHOVER_USER_KEY" not in os.environ
+
+
+def test_set_secret_quotes_awkward_values_and_drops_duplicate_lines(cfg_path, monkeypatch):
+    monkeypatch.delenv("PUSHOVER_APP_TOKEN", raising=False)
+    env_file = cfg_path.parent / "secrets.env"
+    env_file.write_text("export PUSHOVER_APP_TOKEN=a\nPUSHOVER_APP_TOKEN=b", encoding="utf-8")
+    configstore.set_secret(cfg_path, "PUSHOVER_APP_TOKEN", 'pa ss "word"')
+    assert env_file.read_text() == 'PUSHOVER_APP_TOKEN="pa ss \\"word\\""\n'
+    assert os.environ["PUSHOVER_APP_TOKEN"] == 'pa ss "word"'
+
+
+def test_set_secret_refuses_names_the_config_does_not_use_and_bad_values(cfg_path, monkeypatch):
+    monkeypatch.delenv("EBIRD_API_KEY", raising=False)
+    env_file = cfg_path.parent / "secrets.env"
+    env_file.write_text("PUSHOVER_APP_TOKEN=x\n", encoding="utf-8")
+    for name, value in (("EBIRD_API_KEY", "k"), ("bad-name", "k"), ("", "k"),
+                        ("PUSHOVER_APP_TOKEN", "two\nlines"), ("PUSHOVER_APP_TOKEN", "x" * 600)):
+        with pytest.raises(configstore.ConfigError) as info:
+            configstore.set_secret(cfg_path, name, value)
+        assert info.value.problems[0]["path"].startswith("secrets.")
+    assert env_file.read_text() == "PUSHOVER_APP_TOKEN=x\n"
+    assert "EBIRD_API_KEY" not in os.environ
+    assert not (cfg_path.parent / "backups").exists()
+
+
+def test_new_secrets_file_is_private_and_an_existing_mode_is_kept(cfg_path, monkeypatch):
+    monkeypatch.delenv("PUSHOVER_APP_TOKEN", raising=False)
+    env_file = cfg_path.parent / "secrets.env"
+    configstore.set_secret(cfg_path, "PUSHOVER_APP_TOKEN", "t")
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    os.chmod(env_file, 0o644)
+    configstore.set_secret(cfg_path, "PUSHOVER_APP_TOKEN", "t2")
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o644
+    assert not env_file.with_name("secrets.env.tmp").exists()
+
+
+def test_env_references_know_who_uses_a_variable_and_whether_it_is_live():
+    raw = copy.deepcopy(BASE)
+    raw["general"]["notification"]["destinations"] = [
+        {"id": "jane", "name": "Jane", "user_key_env": "KEY_JANE", "app_token_env": "PUSHOVER_APP_TOKEN"}]
+    raw["cameras"][0]["onvif"] = {"host": "10.0.0.1", "port": 80, "username_env": "CAM1_ONVIF_USER",
+                                  "password_env": "CAM1_ONVIF_PASS"}
+    refs = {r["name"]: r for r in configstore.env_references(configstore.validate(raw))}
+    assert refs["PUSHOVER_APP_TOKEN"]["used_by"] == ["Pushover app token", "app token of destination 'Jane'"]
+    assert refs["PUSHOVER_APP_TOKEN"]["live"] is True
+    assert refs["KEY_JANE"]["used_by"] == ["user key of destination 'Jane'"]
+    assert refs["CAM1_ONVIF_PASS"] == {"name": "CAM1_ONVIF_PASS", "used_by": ["ONVIF password of camera 'cam1'"], "live": False}
+
+
+def test_describe_lists_the_secrets_file_and_its_variables(cfg_path, monkeypatch):
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    rt, workers = running(cfg_path)
+    payload = configstore.describe(cfg_path, rt, workers)
+    assert payload["secrets"]["file"] == str(cfg_path.parent / "secrets.env")
+    assert payload["secrets"]["exists"] is False
+    assert [v["name"] for v in payload["secrets"]["variables"]] == ["PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY"]
+
+
+def test_set_secret_handler_writes_and_never_echoes(cfg_path, tmp_path, monkeypatch):
+    monkeypatch.delenv("PUSHOVER_USER_KEY", raising=False)
+    srv = make_server(cfg_path, tmp_path)
+    status, body = call(srv.handle_save_config, {"cameras": [{"id": "cam1", "name": "door"}]})  # warm-up: unchanged
+    status, body = call(srv.handle_set_secret, {"name": "PUSHOVER_USER_KEY", "value": "hunter2"})
+    assert status == 200 and body["status"] == "ok"
+    assert body["set"] is True and body["env"] == {"PUSHOVER_USER_KEY": True}
+    assert "hunter2" not in json.dumps(body)
+    assert (cfg_path.parent / "secrets.env").read_text() == "PUSHOVER_USER_KEY=hunter2\n"
+
+    status, body = call(srv.handle_set_secret, {"name": "NOT_IN_CONFIG", "value": "x"})
+    assert status == 400 and body["problems"][0]["path"] == "secrets.name"
+    status, body = call(srv.handle_set_secret, {"name": "PUSHOVER_USER_KEY", "value": 5})
+    assert status == 400
+    status, body = call(srv.handle_set_secret, ValueError("bad json"))
+    assert status == 400

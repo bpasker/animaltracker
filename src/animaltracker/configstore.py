@@ -32,6 +32,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -42,13 +43,17 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
-from .config import CameraConfig, RuntimeConfig
+from .config import ENV_NAME_PATTERN, CameraConfig, RuntimeConfig
 
 LOGGER = logging.getLogger(__name__)
 
 BACKUP_DIR_NAME = "backups"
 BACKUP_KEEP = 20
 CAMERA_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
+SECRETS_FILE_NAME = "secrets.env"      # beside cameras.yml; systemd's EnvironmentFile
+SECRET_VALUE_MAX_LEN = 512
+_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+_ENV_PLAIN_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@+=,%-]*$")
 
 _MISSING = object()
 _WRITE_LOCK = threading.Lock()
@@ -613,21 +618,23 @@ def dump_yaml(raw: dict) -> str:
     return yaml.safe_dump(raw, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
-def write_config(path: Path, raw: dict, keep: int = BACKUP_KEEP) -> Optional[Path]:
-    """Back up, then atomically replace ``path`` with ``raw`` as YAML.
+def write_text_atomically(path: Path, text: str, keep: int = BACKUP_KEEP,
+                          create_mode: int = 0o644) -> Optional[Path]:
+    """Back up ``path`` (when it exists), then replace it with ``text``.
 
     The temp file inherits the target's mode and owner (best effort: chown
     needs root, which the production service has) so a file the operator
-    owns stays theirs after a root-run save.
+    owns stays theirs after a root-run save. A file created from nothing
+    gets ``create_mode`` (the secrets file asks for 0600).
     """
-    text = _header(path) + dump_yaml(raw)
     backup = backup_config(path, keep=keep)
     tmp = path.with_name(path.name + ".tmp")
     try:
         st = path.stat()
     except OSError:
         st = None
-    with tmp.open("w", encoding="utf-8") as handle:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, create_mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
         handle.flush()
         try:
@@ -645,6 +652,11 @@ def write_config(path: Path, raw: dict, keep: int = BACKUP_KEEP) -> Optional[Pat
             pass
     os.replace(tmp, path)
     return backup
+
+
+def write_config(path: Path, raw: dict, keep: int = BACKUP_KEEP) -> Optional[Path]:
+    """Back up, then atomically replace ``path`` with ``raw`` as YAML."""
+    return write_text_atomically(path, _header(path) + dump_yaml(raw), keep=keep)
 
 
 # ---------------------------------------------------------------------------
@@ -793,34 +805,135 @@ def save(path: Path, payload: dict, runtime: Any, workers: Dict[str, Any]) -> Di
 # Describing the configuration for the UI
 # ---------------------------------------------------------------------------
 
-def _env_names(cfg: RuntimeConfig) -> List[str]:
-    names = []
+def env_references(cfg: RuntimeConfig) -> List[Dict[str, Any]]:
+    """Every environment variable the configuration names.
+
+    Each entry is ``{"name", "used_by": [...], "live": bool}``: ``live`` when
+    the running process reads the variable on use (the Pushover notifier
+    reads the environment on every send), false when it is read once at
+    startup (ONVIF credentials, taken when a camera worker connects).
+    """
+    refs: Dict[str, Dict[str, Any]] = {}
+
+    def add(name: Optional[str], used_by: str, live: bool) -> None:
+        if not name:
+            return
+        entry = refs.setdefault(name, {"name": name, "used_by": [], "live": True})
+        entry["used_by"].append(used_by)
+        entry["live"] = bool(entry["live"] and live)
+
     notif = getattr(cfg.general, "notification", None)
-    for attr in ("pushover_app_token_env", "pushover_user_key_env"):
-        val = getattr(notif, attr, None) if notif is not None else None
-        if val:
-            names.append(val)
-    for dest in (getattr(notif, "destinations", None) or []):
-        for attr in ("user_key_env", "app_token_env"):
-            val = getattr(dest, attr, None)
-            if val:
-                names.append(val)
+    if notif is not None:
+        add(getattr(notif, "pushover_app_token_env", None), "Pushover app token", True)
+        add(getattr(notif, "pushover_user_key_env", None), "Pushover fallback user key", True)
+        for dest in (getattr(notif, "destinations", None) or []):
+            add(dest.user_key_env, f"user key of destination '{dest.label}'", True)
+            add(dest.app_token_env, f"app token of destination '{dest.label}'", True)
     for cam in cfg.cameras:
         if cam.onvif is not None:
-            for attr in ("username_env", "password_env"):
-                val = getattr(cam.onvif, attr, None)
-                if val:
-                    names.append(val)
-    seen: List[str] = []
-    for n in names:
-        if n not in seen:
-            seen.append(n)
-    return seen
+            add(getattr(cam.onvif, "username_env", None), f"ONVIF user of camera '{cam.id}'", False)
+            add(getattr(cam.onvif, "password_env", None), f"ONVIF password of camera '{cam.id}'", False)
+    return list(refs.values())
+
+
+def _env_names(cfg: RuntimeConfig) -> List[str]:
+    return [ref["name"] for ref in env_references(cfg)]
 
 
 def env_presence(names: Iterable[str]) -> Dict[str, bool]:
     """Whether each named variable is set and non-empty. Values never leave."""
     return {str(n): bool(os.environ.get(str(n))) for n in names if n}
+
+
+# ---------------------------------------------------------------------------
+# Secrets: write-only values for the variables the configuration names
+# ---------------------------------------------------------------------------
+
+def secrets_path(config_path: Path) -> Path:
+    """The env file beside the config, the one systemd loads as EnvironmentFile."""
+    return Path(config_path).parent / SECRETS_FILE_NAME
+
+
+def _env_literal(value: str) -> str:
+    """``value`` as an env-file line carries it: bare when plain, otherwise
+    double-quoted with backslash escapes, which systemd and a shell
+    ``source`` both read."""
+    if _ENV_PLAIN_VALUE_RE.match(value):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def set_secret(config_path: Path, name: str, value: Optional[str], keep: int = BACKUP_KEEP) -> Dict[str, Any]:
+    """Write ``NAME=value`` into the env file beside the config and into this
+    process's environment; ``None`` or an empty value removes it.
+
+    Only a variable the saved configuration names can be set: the page has
+    no login, and the process environment is shared with everything the
+    service runs. The value is never logged and never returned. The file is
+    backed up and replaced atomically like ``cameras.yml``; a file created
+    here is mode 0600, an existing one keeps its mode and owner. The first
+    existing ``NAME=`` line is replaced in place (later duplicates are
+    dropped), otherwise the line is appended; comments and other lines are
+    kept as they are.
+    """
+    name = (name or "").strip()
+    if not re.match(ENV_NAME_PATTERN, name):
+        raise ConfigError("That is not an environment variable name.",
+                          [{"path": "secrets.name", "message": "Use letters, digits and underscores."}])
+    if value is not None:
+        value = str(value)
+        if "\n" in value or "\r" in value:
+            raise ConfigError("A secret cannot contain line breaks.",
+                              [{"path": "secrets.value", "message": "Line breaks are not allowed."}])
+        value = value.strip()
+        if len(value) > SECRET_VALUE_MAX_LEN:
+            raise ConfigError(f"A secret cannot be longer than {SECRET_VALUE_MAX_LEN} characters.",
+                              [{"path": "secrets.value", "message": f"At most {SECRET_VALUE_MAX_LEN} characters."}])
+        if not value:
+            value = None
+
+    cfg = validate(load_raw(Path(config_path)))
+    allowed = {ref["name"]: ref for ref in env_references(cfg)}
+    if name not in allowed:
+        raise ConfigError(
+            f"{name} is not a variable the configuration names.",
+            [{"path": "secrets.name", "message": "Save the destination or camera that uses this variable first."}],
+        )
+    ref = allowed[name]
+    path = secrets_path(config_path)
+    with _WRITE_LOCK:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
+        out: List[str] = []
+        done = False
+        for line in lines:
+            match = _ENV_LINE_RE.match(line)
+            if match and match.group(1) == name and not line.lstrip().startswith("#"):
+                if done:
+                    continue
+                done = True
+                if value is not None:
+                    out.append(f"{name}={_env_literal(value)}\n")
+                continue
+            out.append(line)
+        if value is not None and not done:
+            if out and not out[-1].endswith("\n"):
+                out[-1] += "\n"
+            out.append(f"{name}={_env_literal(value)}\n")
+        backup = write_text_atomically(path, "".join(out), keep=keep, create_mode=0o600)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    LOGGER.info("Secret %s %s in %s (%s)", name, "set" if value is not None else "removed",
+                path, "; ".join(ref["used_by"]))
+    return {
+        "name": name,
+        "set": value is not None,
+        "backup": str(backup) if backup else None,
+        "file": str(path),
+        "live": bool(ref["live"]),
+        "used_by": list(ref["used_by"]),
+    }
 
 
 def camera_defaults() -> Dict[str, Any]:
@@ -860,12 +973,14 @@ def describe(path: Path, runtime: Any, workers: Dict[str, Any],
         cameras.append(entry)
     reasons = pending_restart(cfg, runtime, workers)
     support = restart_support()
+    spath = secrets_path(path)
     return {
         "config_path": str(path),
         "backup_dir": str(path.parent / BACKUP_DIR_NAME),
         "general": _dump(cfg.general),
         "cameras": cameras,
         "env": env_presence(_env_names(cfg)),
+        "secrets": {"file": str(spath), "exists": spath.exists(), "variables": env_references(cfg)},
         "defaults": {"camera": camera_defaults()},
         "fields": {"general": GENERAL_FIELDS, "camera": CAMERA_FIELDS},
         "restart": {

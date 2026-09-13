@@ -471,6 +471,7 @@ class WebServer:
         self.app.router.add_post('/api/config', self.handle_save_config)
         self.app.router.add_post('/api/config/probe', self.handle_probe_camera)
         self.app.router.add_post('/api/system/restart', self.handle_restart)
+        self.app.router.add_post('/api/secrets', self.handle_set_secret)
 
         # New client-side app. Served at /app while the rewrite is in progress so the
         # existing pages stay available for comparison; the root routes move here at
@@ -10971,6 +10972,44 @@ class WebServer:
         # Answer first so the client sees the acknowledgement, then let go.
         loop.call_later(0.5, lambda: threading.Thread(target=_go, name='service-restart', daemon=True).start())
         return web.json_response({'status': 'restarting', 'unit': unit})
+
+    async def handle_set_secret(self, request):
+        """POST /api/secrets — write one variable into config/secrets.env and this process.
+
+        Body: ``{"name": "PUSHOVER_USER_KEY_X", "value": "..."}``; an empty
+        or missing value removes the variable. Only names the saved
+        configuration references are accepted (configstore.set_secret), and
+        the value is never logged or echoed: the response carries the name,
+        whether it is now set, and where the backup went.
+        """
+        if not self.config_path:
+            return web.json_response({'error': 'The server was started without a config path.'}, status=500)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({'error': 'Invalid JSON body'}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({'error': 'Body must be an object', 'problems': []}, status=400)
+        name = str(body.get('name') or '').strip()
+        value = body.get('value')
+        if value is not None and not isinstance(value, str):
+            return web.json_response({'error': 'The value must be a string.', 'problems': []}, status=400)
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None, lambda: configstore.set_secret(self.config_path, name, value)
+            )
+        except configstore.ConfigError as err:
+            return self._config_error_response(err, 400)
+        except OSError as err:
+            LOGGER.error("The secrets file was not written for %s: %s", name or '?', err)
+            return web.json_response({
+                'error': f'The secrets file was not written: {err}',
+                'problems': [],
+            }, status=500)
+        result['status'] = 'ok'
+        result['env'] = configstore.env_presence([name])
+        return web.json_response(result)
 
     def _load_ptz_state(self) -> dict:
         """Load persisted PTZ state from file."""

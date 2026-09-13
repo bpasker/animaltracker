@@ -24,6 +24,7 @@
      api.config(opts) / api.saveConfig(body, opts)
      api.probeCamera(body, opts)             -> { rtsp?, onvif?, env? }
      api.restart(opts)                       -> { status:'restarting', unit }
+     api.setSecret({ name, value }, opts)    -> { status:'ok', name, set, live, backup }
      api.deleteClip(path, opts)              -> true
      api.bulkDelete(paths, opts)             -> { deleted_count, ... }
      api.reprocess(path, settings, opts)     -> server payload
@@ -254,6 +255,14 @@ export var api = {
   /** Restart the service through systemd. 501 when not running under it. */
   restart: function (opts) {
     return request('POST', '/api/system/restart', Object.assign({ timeout: 10000 }, opts || {}));
+  },
+
+  /** body: { name, value } — written to config/secrets.env and into the
+      running process; an empty value removes the variable. Only names the
+      saved configuration references are accepted, and nothing ever returns
+      the value. */
+  setSecret: function (body, opts) {
+    return request('POST', '/api/secrets', Object.assign({ body: body }, opts || {}));
   },
 
   /* The server deletes for real — there is no soft-delete window on disk.

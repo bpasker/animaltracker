@@ -133,6 +133,13 @@ backed by `configstore.py`). Rules that keep it safe:
   `pushover_user_key_env` (comma-separated keys allowed) is used. The store
   refuses a camera naming an unknown destination (`check_destination_refs`);
   the pipeline only warns and skips it.
+- Secrets are write-only: `POST /api/secrets` (`configstore.set_secret`)
+  writes `NAME=value` into `config/secrets.env` beside the config (backup,
+  atomic replace, 0600 when created) and into `os.environ`, and only for
+  names the saved configuration references (`env_references`). The value is
+  never logged or returned; `describe()` lists the variables under
+  `secrets.variables` with who uses them and whether the process reads them
+  live (Pushover) or at startup (ONVIF).
 - The legacy `/settings` page still uses `/api/settings`; that path is
   unchanged and slated for removal at cutover.
 

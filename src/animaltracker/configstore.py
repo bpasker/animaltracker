@@ -104,6 +104,7 @@ GENERAL_FIELDS: Dict[str, bool] = {
     "clip.thumbnail_cropped": True,
     "clip.post_analysis": True,
     "clip.unified_post_processing": True,
+    "clip.recover_unfinished_clips": True,   # the sweeper reads it before every pass
     "clip.post_analysis_frames": True,
     "clip.post_analysis_confidence": True,
     "clip.post_analysis_generic_confidence": True,

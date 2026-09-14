@@ -280,6 +280,40 @@ class ProcessingSettings:
         )
 
 
+def build_processing_settings(clip_cfg, overrides: Optional[Dict] = None) -> ProcessingSettings:
+    """The post-processor settings the configuration asks for.
+
+    One mapping for every caller — a live event, a reanalysis from the clip
+    page and the recovery sweep — so a clip analysed later comes out the same
+    as it would have at the time. ``clip_cfg`` is ``general.clip`` (any object
+    with those attributes, or None for the defaults); ``overrides`` are
+    ``ProcessingSettings`` field names, as the reanalysis dialog sends them.
+    """
+    def get(name, default):
+        return getattr(clip_cfg, name, default) if clip_cfg is not None else default
+
+    merge_gap = get('track_merge_gap', 120)
+    values = {
+        'sample_rate': get('sample_rate', DEFAULT_SAMPLE_RATE),
+        'confidence_threshold': get('post_analysis_confidence', DEFAULT_CONFIDENCE_THRESHOLD),
+        'generic_confidence': get('post_analysis_generic_confidence', DEFAULT_GENERIC_CONFIDENCE),
+        'tracking_enabled': get('tracking_enabled', True),
+        'merge_enabled': True,
+        'same_species_merge_gap': merge_gap,
+        'spatial_merge_enabled': get('spatial_merge_enabled', True),
+        'spatial_merge_iou': get('spatial_merge_iou', 0.3),
+        'spatial_merge_gap': 30,
+        'spatial_merge_reach': get('spatial_merge_reach', 1.0),
+        'hierarchical_merge_enabled': get('hierarchical_merge_enabled', True),
+        'hierarchical_merge_gap': merge_gap,
+        'single_animal_mode': get('single_animal_mode', False),
+        'thumbnail_cropped': get('thumbnail_cropped', True),
+    }
+    for key, value in (overrides or {}).items():
+        values[key] = value
+    return ProcessingSettings.from_dict(values)
+
+
 @dataclass
 class SpeciesResult:
     """Result of species detection from post-processing."""

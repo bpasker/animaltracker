@@ -9,9 +9,15 @@ touch the file you started from.
     .venv/bin/python scripts/dev_web.py                      # cameras.sample.yml
     .venv/bin/python scripts/dev_web.py config/cameras.yml   # a real config
     .venv/bin/python scripts/dev_web.py --port 8081 --scratch /tmp/at-dev
+    .venv/bin/python scripts/dev_web.py --analyzing cam1/2026/09/14/1789385669_animal.mp4
 
 Then open http://localhost:8081/app/settings. The Claude Code Browser pane
 starts this through .claude/launch.json ("settings-dev").
+
+The archive's analysis states can be exercised too: an ``<epoch>_animal.mp4``
+stub without a ``.log.json`` beside it shows as "Awaiting analysis" (a stand-in
+recovery sweeper reports itself enabled), and ``--analyzing <path>`` marks a
+clip as in flight so it shows as "Analyzing…".
 """
 from __future__ import annotations
 
@@ -28,7 +34,16 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from animaltracker import configstore  # noqa: E402
+from animaltracker.analysis_recovery import ClipAnalysisRegistry  # noqa: E402
 from animaltracker.web import WebServer  # noqa: E402
+
+
+class FakeRecovery:
+    """Stands in for the pipeline's RecoverySweeper: enabled and running."""
+
+    def status(self) -> dict:
+        return {"enabled": True, "running": True, "current": None, "last_sweep_at": None,
+                "last_candidates": 0, "processed": 0, "failed": 0}
 
 
 class FakeWorker:
@@ -54,6 +69,8 @@ def main() -> None:
     ap.add_argument("config", nargs="?", default=str(REPO / "config" / "cameras.sample.yml"))
     ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--scratch", default=None, help="directory for the config copy, storage and logs")
+    ap.add_argument("--analyzing", action="append", default=[], metavar="CLIP",
+                    help="clip path (relative to storage/clips) to show as being analysed; repeatable")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -76,6 +93,10 @@ def main() -> None:
     (scratch / "storage" / "clips").mkdir(parents=True, exist_ok=True)
     workers = {cam.id: FakeWorker(cam, live=(i == 0)) for i, cam in enumerate(runtime.cameras)}
 
+    registry = ClipAnalysisRegistry()
+    for rel in args.analyzing:
+        registry.begin(scratch / "storage" / "clips" / rel, source="demo")
+
     server = WebServer(
         workers,
         storage_root=scratch / "storage",
@@ -83,6 +104,8 @@ def main() -> None:
         port=args.port,
         config_path=cfg_path,
         runtime=runtime,
+        analysis_registry=registry,
+        recovery=FakeRecovery(),
     )
 
     async def run() -> None:

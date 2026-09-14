@@ -131,6 +131,7 @@ def test_automated_clip_fields(server, clips_dir):
         "species",
         "raw_species",
         "thumbnails",
+        "unfinished",
     }
     assert result["path"] == os.path.join("cam1", "2024", "05", "17", "1715900000_deer.mp4")
     assert result["camera"] == "cam1"

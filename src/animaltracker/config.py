@@ -48,6 +48,7 @@ class ClipSettings(BaseModel):
     single_animal_mode: bool = Field(default=False, description="Force merge ALL non-overlapping tracks into one")
     # Unified post-processing (new approach - analyze saved video file instead of in-memory frames)
     unified_post_processing: bool = Field(default=True, description="Use unified post-processor for consistent results (recommended)")
+    recover_unfinished_clips: bool = Field(default=True, description="Shortly after startup and every 30 minutes, finish analysing clips whose post-processing was interrupted (a restart mid-job leaves a clip unclassified with no key frames); runs newest first while no live event needs the post-processor")
     post_analysis_frames: int = Field(default=0, ge=0, description="Number of frames for post-analysis (0=auto-calculate)")
 
 

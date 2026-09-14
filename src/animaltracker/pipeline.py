@@ -24,6 +24,7 @@ from .onvif_client import OnvifClient
 from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
 from .web import WebServer
+from .analysis_recovery import ClipAnalysisRegistry, RecoverySweeper
 
 LOGGER = logging.getLogger(__name__)
 
@@ -389,6 +390,10 @@ class StreamWorker:
     # so two cameras finishing simultaneously don't serialize on the GPU).
     _postprocess_semaphore: threading.Semaphore = None
     _postprocess_limit: int = 2
+    # Every clip analysis in flight in this process (live events, reanalyses,
+    # recoveries) claims its path here; the recovery sweeper and the web UI
+    # read it. See analysis_recovery.py.
+    analysis_registry: ClipAnalysisRegistry = ClipAnalysisRegistry()
 
     @classmethod
     def set_postprocess_limit(cls, limit: int) -> None:
@@ -1757,7 +1762,7 @@ class StreamWorker:
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
         
-        def finalize_event(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
+        def _finalize_event_body(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config, clip_path):
             """Finalize event with optional post-clip species analysis.
 
             Split-model architecture:
@@ -1789,13 +1794,8 @@ class StreamWorker:
                 # default config has ``unified_post_processing=True`` so
                 # SpeciesNet runs on the saved MP4 below instead.
 
-                # Step 2: Build clip path with (potentially refined) species
-                clip_path = self.storage.build_clip_path(
-                    camera_id,
-                    final_species,
-                    start_ts,
-                    clip_format,
-                )
+                # Step 2: ``clip_path`` was built by ``finalize_event`` and
+                # registered as in flight before this job queued for a slot.
 
                 # Step 3: Transcode the streamed MJPG AVI -> browser-friendly MP4
                 if temp_avi is None or not self.storage.transcode_avi_to_mp4(temp_avi, clip_path):
@@ -1819,30 +1819,16 @@ class StreamWorker:
                 # Uses SpeciesNet for accurate species identification (split-model architecture)
                 if use_unified_processor:
                     try:
-                        from .postprocess import ClipPostProcessor, ProcessingSettings
+                        from .postprocess import ClipPostProcessor, build_processing_settings
 
                         # Use cached detector to avoid VRAM leak (was creating new model per clip)
                         postprocess_detector = self._get_postprocess_detector()
                         LOGGER.debug("Post-processing with %s detector (cached)", postprocess_detector.backend_name)
 
-                        # Use settings from config
+                        # Settings from config, by the same mapping a reanalysis
+                        # and the recovery sweep use.
                         clip_cfg = self.runtime.general.clip
-                        settings = ProcessingSettings(
-                            sample_rate=getattr(clip_cfg, 'sample_rate', 3),
-                            confidence_threshold=getattr(clip_cfg, 'post_analysis_confidence', 0.3),
-                            generic_confidence=getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5),
-                            tracking_enabled=getattr(clip_cfg, 'tracking_enabled', True),
-                            merge_enabled=True,
-                            same_species_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
-                            spatial_merge_enabled=getattr(clip_cfg, 'spatial_merge_enabled', True),
-                            spatial_merge_iou=getattr(clip_cfg, 'spatial_merge_iou', 0.3),
-                            spatial_merge_gap=30,
-                            spatial_merge_reach=getattr(clip_cfg, 'spatial_merge_reach', 1.0),
-                            hierarchical_merge_enabled=getattr(clip_cfg, 'hierarchical_merge_enabled', True),
-                            hierarchical_merge_gap=getattr(clip_cfg, 'track_merge_gap', 120),
-                            single_animal_mode=getattr(clip_cfg, 'single_animal_mode', False),
-                            thumbnail_cropped=getattr(clip_cfg, 'thumbnail_cropped', True),
-                        )
+                        settings = build_processing_settings(clip_cfg)
                         processor = ClipPostProcessor(
                             detector=postprocess_detector,
                             storage_root=storage_root,
@@ -2049,6 +2035,30 @@ class StreamWorker:
                 self.notifier.send(ctx, priority=priority, sound=sound, destinations=destinations)
                 LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)",
                            ctx.camera_id, clip_path, final_species, tracks_count)
+
+        def finalize_event(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
+            """Claim the clip path, then run ``_finalize_event_body``.
+
+            The path is registered before the job even waits for a
+            post-processing slot, so the recovery sweeper never picks up a
+            clip a live event is about to analyse and the archive can show
+            it as analysing; the live count makes the sweeper hold back
+            while an event needs the post-processor.
+            """
+            registry = StreamWorker.analysis_registry
+            clip_path = self.storage.build_clip_path(camera_id, ctx_base['species'], start_ts, clip_format)
+            registry.live_begin()
+            claimed = registry.begin(clip_path, source='event')
+            try:
+                _finalize_event_body(
+                    temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base,
+                    priority, sound, destinations, species_key_frames, ptz_decisions,
+                    detector_config, clip_path,
+                )
+            finally:
+                if claimed:
+                    registry.end(clip_path)
+                registry.live_end()
 
         # Use tracked species if available (more accurate than raw detections)
         tracked_species = self.event_state.get_tracked_species_label()
@@ -2668,6 +2678,19 @@ class PipelineOrchestrator:
                         source_id, target_id
                     )
 
+        # Finish the analyses a restart interrupted (see analysis_recovery.py).
+        clip_cfg = self.runtime.general.clip
+        recovery = RecoverySweeper(
+            self.storage.storage_root / "clips",
+            StreamWorker.analysis_registry,
+            functools.partial(self._recover_clip, worker_map),
+            enabled=lambda: bool(
+                getattr(clip_cfg, 'recover_unfinished_clips', True)
+                and getattr(clip_cfg, 'unified_post_processing', False)
+            ),
+        )
+        self.recovery = recovery
+
         # Start web server
         web_server = WebServer(
             worker_map, 
@@ -2676,9 +2699,75 @@ class PipelineOrchestrator:
             port=8080,
             config_path=self.config_path,
             runtime=self.runtime,
+            analysis_registry=StreamWorker.analysis_registry,
+            recovery=recovery,
         )
         
-        await asyncio.gather(
-            web_server.start(),
-            *(worker.run(stop_event) for worker in workers)
-        )
+        recovery.start()
+        try:
+            await asyncio.gather(
+                web_server.start(),
+                *(worker.run(stop_event) for worker in workers)
+            )
+        finally:
+            recovery.stop()
+
+    def _recover_clip(self, worker_map: Dict[str, StreamWorker], clip_path: Path) -> bool:
+        """Run one interrupted clip through post-processing, like a live event would.
+
+        Same detector, same settings and the same concurrency limit as the
+        live path, but no alert and no false-positive deletion: the moment
+        for the alert has passed, and removing a file hours later is not a
+        background job's call. Returns True when the analysis completed.
+        """
+        from .postprocess import ClipPostProcessor, build_processing_settings
+
+        registry = StreamWorker.analysis_registry
+        clips_dir = self.storage.storage_root / "clips"
+        try:
+            camera_id = clip_path.relative_to(clips_dir).parts[0]
+        except (ValueError, IndexError):
+            camera_id = None
+        worker = worker_map.get(camera_id) if camera_id else None
+        if worker is None:
+            # A retired camera's clip: any worker's cached detector will do.
+            worker = next(iter(worker_map.values()), None)
+        if worker is None:
+            LOGGER.warning("Cannot recover %s: no camera worker to run the post-processor", clip_path)
+            return False
+
+        if not registry.begin(clip_path, source='recovery'):
+            return False
+        try:
+            with StreamWorker._ensure_postprocess_semaphore():
+                if not clip_path.exists():
+                    LOGGER.info("Recovery skipped %s: gone before it was analysed", clip_path)
+                    return False
+                LOGGER.info("Recovering interrupted analysis: %s", clip_path)
+                detector = worker._get_postprocess_detector()
+                processor = ClipPostProcessor(
+                    detector=detector,
+                    storage_root=self.storage.storage_root,
+                    settings=build_processing_settings(self.runtime.general.clip),
+                )
+                try:
+                    result = processor.process_clip(
+                        clip_path, update_filename=True, regenerate_thumbnails=True,
+                    )
+                finally:
+                    cleanup_gpu_memory()
+                if not result.success:
+                    LOGGER.warning("Recovery of %s failed: %s", clip_path, result.error)
+                    return False
+                LOGGER.info(
+                    "Recovered analysis for %s: %s (%.1f%%, %d tracks, %d key frames)%s",
+                    clip_path.name, result.new_species, result.confidence * 100,
+                    result.tracks_detected, len(result.thumbnails_saved or []),
+                    f" -> {result.new_path.name}" if result.new_path else "",
+                )
+                return True
+        except Exception:  # noqa: BLE001 - one bad clip must not end the sweep
+            LOGGER.error("Recovery of %s raised", clip_path, exc_info=True)
+            return False
+        finally:
+            registry.end(clip_path)

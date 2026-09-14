@@ -3541,6 +3541,16 @@ body.is-locked{
   background:var(--c-media-scrim-strong);color:var(--c-on-media);
   font-size:var(--t-micro);letter-spacing:var(--ls-wide);white-space:nowrap;
 }
+.frame__errpill{ display:inline-flex;align-items:center;gap:var(--s-1); }
+
+/* Analysis pending: the film stays readable and the pill says what is
+   happening — "Analyzing" pulses, "Awaiting analysis" holds still. */
+.frame--pending .frame__film{ filter:brightness(.75) saturate(.8); }
+.frame--pending .frame__img{ display:none; }
+.frame__errpill--busy{ animation:at-pulse 1.6s var(--ease-inout) infinite; }
+@media (prefers-reduced-motion: reduce){
+  .frame__errpill--busy{ animation:none; }
+}
 
 /* Skeleton media: the identical box, content removed, so the swap is free. */
 .frame--skel{ background:var(--c-skeleton); }

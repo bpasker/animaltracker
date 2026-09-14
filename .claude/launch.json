@@ -4,7 +4,14 @@
     {
       "name": "settings-dev",
       "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["scripts/dev_web.py", "config/cameras.sample.yml", "--port", "8081"],
+      "runtimeArgs": [
+        "scripts/dev_web.py",
+        "config/cameras.sample.yml",
+        "--port",
+        "8081",
+        "--analyzing",
+        "cam1/2026/09/14/1789385669_animal.mp4"
+      ],
       "port": 8081
     }
   ]

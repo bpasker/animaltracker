@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
 from .species_names import get_common_name, get_species_icon
+from .analysis_recovery import is_unclassified_clip, sidecar_path
 from . import configstore
 
 # Server's timezone (configurable or auto-detected)
@@ -401,13 +402,19 @@ _EMPTY_GPU_STATS = {
 
 
 class WebServer:
-    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None, runtime = None):
+    def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None, runtime = None,
+                 analysis_registry=None, recovery=None):
         self.workers = workers
         self.storage_root = storage_root
         self.logs_root = logs_root
         self.port = port
         self.config_path = config_path
         self.runtime = runtime
+        # The pipeline's record of clip analyses in flight and its recovery
+        # sweeper (analysis_recovery.py); both None when the web server runs
+        # without a pipeline, and every clip is then simply "unfinished".
+        self.analysis_registry = analysis_registry
+        self.recovery = recovery
 
         # Configure timezone from config (or auto-detect if not specified)
         configured_tz = None
@@ -1117,7 +1124,8 @@ class WebServer:
                 'size': stat.st_size,
                 'species': 'Manual clip',
                 'raw_species': 'manual',
-                'thumbnails': []
+                'thumbnails': [],
+                'unfinished': False,
             })
 
         # 2. Check for automated clips in subdirectories
@@ -1134,7 +1142,13 @@ class WebServer:
                 
                 # Find associated thumbnails
                 thumbnails = self._get_thumbnails_for_clip(clip_file)
-                
+
+                # Still named by the real-time detector and without the
+                # post-processor's sidecar: its analysis never finished.
+                # Checked by exact path (see _get_thumbnails_for_clip on
+                # stale NFS listings).
+                unfinished = is_unclassified_clip(clip_file) and not sidecar_path(clip_file).exists()
+
                 when = clip_start_time(clip_file, stat)
                 clips.append({
                     'path': str(rel_path),
@@ -1145,7 +1159,8 @@ class WebServer:
                     'size': stat.st_size,
                     'species': species_display,
                     'raw_species': raw_species,
-                    'thumbnails': thumbnails
+                    'thumbnails': thumbnails,
+                    'unfinished': unfinished,
                 })
 
         # Sort by time descending
@@ -1455,6 +1470,9 @@ class WebServer:
                 'thumbnails': day_thumbs,
                 'thumbnail': primary_thumbnail({'species': clip_species, 'thumbnails': day_thumbs}),
             }
+            analysis = self._analysis_state(clip['path'], clip.get('unfinished'))
+            if analysis:
+                clip_data['analysis'] = analysis
             filtered.append(clip_data)
             
             # Update stats
@@ -1504,18 +1522,45 @@ class WebServer:
             out[cam_id] = {'name': str(name), 'location': str(location).strip()}
         return out
 
-    @staticmethod
-    def _clip_to_json(clip: dict, identity: dict = None) -> dict:
+    def _analysis_state(self, rel_path: str, unfinished) -> 'str | None':
+        """What the archive should say about a clip that has no key frames yet.
+
+        ``running``: a job holds the clip right now (a live event, a
+        reanalysis or the recovery sweep). ``queued``: its analysis never
+        finished and the sweeper will get to it. ``unfinished``: never
+        finished and nothing will pick it up (recovery off, or no pipeline
+        behind this server). None for every clip that has been analysed.
+        The registry is consulted per request because a job starts and ends
+        within the archive cache's lifetime.
+        """
+        registry = self.analysis_registry
+        if registry is not None and registry.is_active(self.storage_root / 'clips' / rel_path):
+            return 'running'
+        if not unfinished:
+            return None
+        recovery = self.recovery
+        if recovery is not None:
+            try:
+                status = recovery.status()
+            except Exception:  # noqa: BLE001 - a status hiccup must not break the archive
+                status = {}
+            if status.get('enabled') and status.get('running'):
+                return 'queued'
+        return 'unfinished'
+
+    def _clip_to_json(self, clip: dict, identity: dict = None) -> dict:
         """Serialise a _scan_recordings entry for the API.
 
         `time` is emitted as ISO-8601 with offset so the client never has to guess
         a timezone, alongside the epoch for cheap sorting and relative formatting.
         `camera_name` and `location` come from `identity` (`_camera_identity`);
         a retired camera keeps its id as its name and has no location.
+        `analysis` is present only while there is something to say about a
+        clip's missing key frames (`_analysis_state`).
         """
         when = clip['time']
         meta = (identity or {}).get(clip['camera']) or {}
-        return {
+        payload = {
             'path': clip['path'],
             'filename': clip['filename'],
             'camera': clip['camera'],
@@ -1531,6 +1576,10 @@ class WebServer:
             'thumbnails': clip.get('thumbnails', []),
             'thumbnail': primary_thumbnail(clip),
         }
+        analysis = self._analysis_state(clip['path'], clip.get('unfinished'))
+        if analysis:
+            payload['analysis'] = analysis
+        return payload
 
     def _filter_clips(self, clips: list, query: dict) -> list:
         """Apply camera / location / species / date-range / free-text filters.
@@ -1692,7 +1741,11 @@ class WebServer:
         loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, self._get_clip_detail, rel_path)
         if info is None:
-            return web.json_response({'error': 'Clip not found'}, status=404)
+            renamed_to = await loop.run_in_executor(None, self._renamed_clip, rel_path)
+            body = {'error': 'Clip not found'}
+            if renamed_to:
+                body['renamed_to'] = renamed_to
+            return web.json_response(body, status=404)
 
         payload = dict(info)
         meta = self._camera_identity().get(info.get('camera')) or {}
@@ -1701,7 +1754,11 @@ class WebServer:
         payload['time'] = info['time'].isoformat()
         payload['epoch'] = info['time'].timestamp()
         payload['url'] = f"/clips/{rel_path}"
-        payload['reprocessing'] = rel_path in self.reprocessing_jobs
+        analysis = self._analysis_state(rel_path, info.get('unfinished'))
+        payload['reprocessing'] = rel_path in self.reprocessing_jobs or analysis == 'running'
+        if analysis:
+            payload['analysis'] = analysis
+        payload.pop('unfinished', None)
         return web.json_response(payload)
 
     async def handle_cameras_api(self, request):
@@ -2147,6 +2204,26 @@ class WebServer:
         if not full_path.exists():
             return web.Response(status=404, text="Clip not found")
         
+        # Prevent duplicate processing - check if already in progress, here
+        # or in the pipeline (a live event or the recovery sweep).
+        job_key = clip_path
+        registry = self.analysis_registry
+        if job_key in self.reprocessing_jobs:
+            existing = self.reprocessing_jobs[job_key]
+            LOGGER.warning("Duplicate reprocess request for %s, already started at %s", 
+                          clip_path, existing.get('started'))
+            return web.json_response({
+                'success': False,
+                'error': f"Processing already in progress (started {existing.get('started')})"
+            }, status=409)  # Conflict
+        if registry is not None and not registry.begin(full_path, source='reanalyze'):
+            LOGGER.warning("Reprocess request for %s while the pipeline is analysing it (%s)",
+                           clip_path, registry.source_of(full_path))
+            return web.json_response({
+                'success': False,
+                'error': "The pipeline is already analysing this clip; its result will appear shortly"
+            }, status=409)  # Conflict
+        
         # Create postprocess detector (SpeciesNet for accurate species ID)
         # This uses the split-model architecture: MegaDetector for real-time, SpeciesNet for post-processing
         from .detector import create_postprocess_detector
@@ -2157,20 +2234,11 @@ class WebServer:
         else:
             # Fallback to worker's detector if no config available
             if not self.workers:
+                if registry is not None:
+                    registry.end(full_path)
                 return web.Response(status=500, text="No workers available")
             detector = next(iter(self.workers.values())).detector
             LOGGER.warning("No detector config, falling back to worker detector: %s", detector.backend_name)
-        
-        # Prevent duplicate processing - check if already in progress
-        job_key = clip_path
-        if job_key in self.reprocessing_jobs:
-            existing = self.reprocessing_jobs[job_key]
-            LOGGER.warning("Duplicate reprocess request for %s, already started at %s", 
-                          clip_path, existing.get('started'))
-            return web.json_response({
-                'success': False,
-                'error': f"Processing already in progress (started {existing.get('started')})"
-            }, status=409)  # Conflict
         
         # Track this reprocessing job
         self.reprocessing_jobs[job_key] = {
@@ -2182,35 +2250,11 @@ class WebServer:
         # Run reprocessing in thread pool
         loop = asyncio.get_running_loop()
         
-        # Build ProcessingSettings from defaults + overrides
-        from .postprocess import ProcessingSettings
-        
-        # Start with defaults from runtime config
+        # Settings from config plus the request's overrides, by the same
+        # mapping the live path and the recovery sweep use.
+        from .postprocess import build_processing_settings
         clip_cfg = self.runtime.general.clip if self.runtime else None
-        default_settings = {
-            'sample_rate': getattr(clip_cfg, 'sample_rate', 3) if clip_cfg else 3,
-            'confidence_threshold': getattr(clip_cfg, 'post_analysis_confidence', 0.3) if clip_cfg else 0.3,
-            'generic_confidence': getattr(clip_cfg, 'post_analysis_generic_confidence', 0.5) if clip_cfg else 0.5,
-            'tracking_enabled': getattr(clip_cfg, 'tracking_enabled', True) if clip_cfg else True,
-            'merge_enabled': True,
-            'same_species_merge_gap': getattr(clip_cfg, 'track_merge_gap', 120) if clip_cfg else 120,
-            'spatial_merge_enabled': getattr(clip_cfg, 'spatial_merge_enabled', True) if clip_cfg else True,
-            'spatial_merge_iou': getattr(clip_cfg, 'spatial_merge_iou', 0.3) if clip_cfg else 0.3,
-            'spatial_merge_gap': 30,  # Default gap for spatial matching
-            'spatial_merge_reach': getattr(clip_cfg, 'spatial_merge_reach', 1.0) if clip_cfg else 1.0,
-            'hierarchical_merge_enabled': getattr(clip_cfg, 'hierarchical_merge_enabled', True) if clip_cfg else True,
-            'hierarchical_merge_gap': 120,
-            'min_specific_detections': 2,
-            'lost_track_buffer': 120,
-            'single_animal_mode': getattr(clip_cfg, 'single_animal_mode', False) if clip_cfg else False,
-            'thumbnail_cropped': getattr(clip_cfg, 'thumbnail_cropped', True) if clip_cfg else True,
-        }
-        
-        # Apply overrides from request (allow any key that ProcessingSettings supports)
-        for key, value in settings_override.items():
-            default_settings[key] = value
-        
-        settings = ProcessingSettings.from_dict(default_settings)
+        settings = build_processing_settings(clip_cfg, settings_override)
         
         LOGGER.info("Reprocess settings: spatial_merge_iou=%.2f, spatial_merge_enabled=%s, tracking=%s",
                    settings.spatial_merge_iou, settings.spatial_merge_enabled, settings.tracking_enabled)
@@ -2228,10 +2272,13 @@ class WebServer:
                 regenerate_thumbnails=True,
             )
         
-        result = await loop.run_in_executor(None, do_reprocess)
-        
-        # Remove from active jobs
-        self.reprocessing_jobs.pop(job_key, None)
+        try:
+            result = await loop.run_in_executor(None, do_reprocess)
+        finally:
+            # Remove from active jobs
+            self.reprocessing_jobs.pop(job_key, None)
+            if registry is not None:
+                registry.end(full_path)
         
         if result.success:
             # Log thumbnail paths for debugging
@@ -2419,7 +2466,27 @@ class WebServer:
             'thumbnails': thumbnails,
             'fps': video_fps,
             'global_settings': global_settings,
+            'unfinished': is_unclassified_clip(clip_path) and not sidecar_path(clip_path).exists(),
         }
+
+    def _renamed_clip(self, rel_path: str) -> 'str | None':
+        """Where a clip that is no longer at ``rel_path`` went, if it was renamed.
+
+        Post-processing renames ``<epoch>_animal.mp4`` to the species it
+        found, in place. A page that was watching the old name can follow it
+        when exactly one clip with that epoch remains in the directory.
+        """
+        clip_path = self.storage_root / 'clips' / rel_path
+        if clip_path.suffix.lower() != '.mp4' or not is_unclassified_clip(clip_path):
+            return None
+        epoch = clip_path.stem.split('_', 1)[0]
+        try:
+            matches = [p for p in clip_path.parent.glob(f"{epoch}_*.mp4") if p.name != clip_path.name]
+        except OSError:
+            return None
+        if len(matches) != 1:
+            return None
+        return str(matches[0].relative_to(self.storage_root / 'clips'))
 
     def _monitor_host_stats(self):
         """System, GPU, detector and recent-clip figures for /api/monitor.
@@ -2592,6 +2659,13 @@ class WebServer:
 
         # Active reprocessing jobs
         reprocessing = list(self.reprocessing_jobs.values())
+        analysis_active = self.analysis_registry.active() if self.analysis_registry is not None else []
+        recovery = None
+        if self.recovery is not None:
+            try:
+                recovery = self.recovery.status()
+            except Exception:  # noqa: BLE001 - telemetry is best effort
+                recovery = None
         
         return web.json_response({
             'timestamp': datetime.now(tz=CENTRAL_TZ).isoformat(),
@@ -2601,6 +2675,8 @@ class WebServer:
             'detector': detector_info,
             'recent_clips': recent_clips,
             'reprocessing_jobs': reprocessing,
+            'analysis_active': analysis_active,
+            'recovery': recovery,
         })
 
     async def handle_get_logs(self, request):

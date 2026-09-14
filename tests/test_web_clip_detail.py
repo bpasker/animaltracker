@@ -157,6 +157,7 @@ def test_returned_keys_are_exactly_this_set(server):
         "thumbnails",
         "fps",
         "global_settings",
+        "unfinished",
     }
 
 

@@ -221,6 +221,64 @@ to be transcoded.
 
 ---
 
+## 4. Post-processing runs at ~1 sampled frame/s with three cameras
+
+**Status:** open — found 2026-09-14 while tracing "No frame" cards
+**Area:** `src/animaltracker/postprocess.py` (`_analyze_video`),
+`src/animaltracker/detector.py` (SpeciesNet per-box classification)
+
+### Problem
+
+With cam1 plus the two 2688x1512 Otteson cameras the GTX 1080 sits at ~95%
+on real-time MegaDetector alone, and SpeciesNet post-processing gets what
+is left: the 20 s cam1 clip `1789385669_animal.mp4` took 06:34:55 →
+06:39:58 for 305 sampled frames (673 boxes classified one by one), i.e.
+about one sampled frame per second, against 2–4 frames/s measured on
+2026-09-09 with cam1 alone. A 6-minute Otteson2 clip (5435 frames,
+sample_rate 2) needs ~45 min, during which the archive card shows the
+clip as analysing and a restart loses the whole job (now recovered by
+`analysis_recovery.py`, but the wait remains). Real-time inference also
+slows from ~170 ms to ~330 ms per frame while a job runs.
+
+### Options
+
+- Sub-streams for the Otteson cameras (also fixes the per-event "encoder
+  fell behind capture" drops): far fewer real-time pixels on the GPU.
+- Batch the per-box classifier calls per frame instead of one call per box.
+- A larger `sample_rate` for long clips (post_analysis_frames already
+  auto-scales; the real cost is the per-box classification).
+
+---
+
+## 5. SpeciesNet load races real-time inference through a torch.fx trace
+
+**Status:** open — seen 2026-09-14 06:34:55 on the first clip after a restart
+**Area:** `src/animaltracker/pipeline.py` (`_get_postprocess_detector`),
+`src/animaltracker/detector.py`
+
+### Problem
+
+Loading the post-process SpeciesNet (lazily, on the first clip after each
+start) runs a `torch.fx` symbolic trace, which patches
+`torch.nn.Module.__call__` process-wide for its duration. A real-time
+MegaDetector forward on another thread during that window raises
+`NameError: module is not installed as a submodule` from
+`torch/fx/_symbolic_trace.py` (`path_of_module`); the journal shows it as
+`ERROR animaltracker.pipeline: Inference error for Otteson2` with a
+traceback. One frame is lost and the worker continues, so the cost is one
+scary log line per restart — but it will recur on every first clip, and
+the recovery sweep now triggers that load ~90 s after every start.
+
+### Options
+
+- Load the post-process detector before the camera workers start (no
+  inference is running yet), accepting ~2 s more startup and the VRAM
+  up front; or
+- a process-wide read/write lock: inference takes the read side, model
+  loading the write side.
+
+---
+
 ## Awaiting a decision (not a tracking item)
 
 ### Storage retention has never deleted anything

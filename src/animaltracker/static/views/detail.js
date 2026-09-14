@@ -1102,6 +1102,20 @@ function paintSpeciesPanel() {
   paintJobState();
 }
 
+/** What to say about the analysis when this page did not start one. */
+function idleStatusText(clip) {
+  if (!clip) return '';
+  if (clip.reprocessing) return 'The post-processor is working on this clip right now.';
+  if (clip.analysis === 'queued') {
+    return 'This clip\u2019s analysis was interrupted before it finished. The recovery sweep ' +
+      'will analyse it again in the background; this page follows along.';
+  }
+  if (clip.analysis === 'unfinished') {
+    return 'This clip was never analysed, so it has no species or key frames. Reanalyze it to get them.';
+  }
+  return '';
+}
+
 /** The processing state: an indeterminate meter, an elapsed clock, live text. */
 function paintJobState() {
   var st = S.els.spStatus;
@@ -1110,9 +1124,7 @@ function paintJobState() {
   var meters = S.els.spMeters;
 
   if (!job) {
-    st.textContent = S.clip && S.clip.reprocessing
-      ? 'The post-processor is working on this clip right now.'
-      : '';
+    st.textContent = idleStatusText(S.clip);
     st.hidden = !st.textContent;
     if (S.els.jobMeter && S.els.jobMeter.parentNode) {
       S.els.jobMeter.parentNode.removeChild(S.els.jobMeter);
@@ -1133,8 +1145,7 @@ function paintJobState() {
   var elapsed = Math.max(0, Math.round((Date.now() - job.startedAt) / 1000));
   st.hidden = false;
   st.textContent = (job.adopted
-    ? 'A reanalysis was already running when this page asked for one (started ' +
-      job.startedLabel + ').'
+    ? 'An analysis of this clip was already running (started ' + job.startedLabel + ').'
     : 'Reanalyzing with SpeciesNet.') +
     ' Elapsed ' + durationClock(elapsed) + '. ' +
     (job.note || 'Waiting for the post-processor to write its log.');
@@ -1425,19 +1436,58 @@ function pollJob() {
     if (!S || S.dead) return;
     var wasReprocessing = S.clip && S.clip.reprocessing;
     applyClip(payload);
+    if (!S.job && payload && payload.reprocessing) {
+      /* The recovery sweep (or a live event) picked the clip up while we
+         were waiting for it. */
+      S.job = adoptedJob('Picked up by the post-processor while this page was open.');
+    }
     if (S.job && payload && payload.reprocessing && S.job.note !== 'Running on the server.') {
       S.job.note = 'Running on the server.';
     }
     if (S.job && wasReprocessing && !payload.reprocessing) {
       S.job.note = 'Finishing up — writing thumbnails and the log.';
     }
+    if (!S.job && payload && !payload.reprocessing && payload.analysis !== 'queued') {
+      /* Nothing left to wait for: analysed in place, or no longer queued. */
+      stopJobPolling();
+    }
     paintJobState();
   }, function (err) {
     if (!S || S.dead || api.isAbort(err)) return;
+    if (followRenamedClip(err)) return;
+    if (err && err.status === 404) {
+      /* Gone for good — deleted by the post-processor, most likely. */
+      stopJobPolling();
+      S.job = null;
+      renderError(err);
+      return;
+    }
     if (S.job) S.job.note = 'Progress check failed: ' + api.describe(err);
     paintJobState();
   });
   loadProcessingLog(true);
+}
+
+/** A job this page did not start but is now watching. */
+function adoptedJob(note) {
+  return {
+    startedAt: Date.now(),
+    startedLabel: clockTime(new Date().toISOString()),
+    adopted: true,
+    note: note
+  };
+}
+
+/** Post-processing renames a clip in place; when the server says where the
+    file went, the route goes with it. True when the page is moving on. */
+function followRenamedClip(err) {
+  var to = err && err.status === 404 && err.body && err.body.renamed_to;
+  if (!to || to === S.path) return false;
+  stopJobPolling();
+  S.job = null;
+  toast.info('Analysed · this clip was renamed by the post-processor.');
+  router.navigate(clipHref(to, S.query), { replace: true });
+  return true;
 }
 
 /* --------------------------------------------------------- processing log */
@@ -1930,17 +1980,17 @@ function load() {
     loadNeighbors();
     if (payload && payload.reprocessing && !S.job) {
       /* The server was already busy with this clip when we arrived. */
-      S.job = {
-        startedAt: Date.now(),
-        startedLabel: clockTime(new Date().toISOString()),
-        adopted: true,
-        note: 'Started before this page was opened.'
-      };
+      S.job = adoptedJob('Started before this page was opened.');
+      paintJobState();
+      startJobPolling();
+    } else if (payload && payload.analysis === 'queued' && !S.job) {
+      /* Interrupted analysis awaiting recovery: watch for it to start. */
       paintJobState();
       startJobPolling();
     }
   }, function (err) {
     if (!S || S.dead || api.isAbort(err)) return;
+    if (followRenamedClip(err)) return;
     renderError(err);
     toast.error('Could not load this recording.', {
       detail: api.describe(err),

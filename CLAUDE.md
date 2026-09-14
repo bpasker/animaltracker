@@ -54,6 +54,15 @@ The system uses a two-stage detection approach:
 - `tracker.py` - ByteTrack object tracking with persistent IDs
 - `postprocess.py` - Clip post-analysis, track merging, species finalization
 - `ptz_tracker.py` - PTZ auto-tracking controller, pixel-to-PTZ coordinate mapping
+- `analysis_recovery.py` - `ClipAnalysisRegistry` (every clip analysis in
+  flight: live event, reanalysis, recovery) and `RecoverySweeper`, a daemon
+  thread that finishes the post-processing a restart interrupted: shortly
+  after startup and every 30 min it finds `<epoch>_animal.mp4` clips with
+  no `.log.json` and runs them, newest first, one at a time, only while no
+  live event needs the post-processor; no alert, no false-positive delete.
+  The API reports `analysis: running|queued|unfinished` for such clips and
+  the archive shows "Analyzing…" / "Awaiting analysis" / "Not analyzed"
+  instead of "No frame". `clip.recover_unfinished_clips` switches it off.
 - `ptz_calibration.py` - Auto-calibration via ORB feature matching between wide/zoom frames
 - `onvif_client.py` - ONVIF camera control and discovery
 - `web.py` - aiohttp JSON API, MJPEG/snapshot streams, PTZ control and the shell of the client-side app (which lives in `static/`, served at `/app`)

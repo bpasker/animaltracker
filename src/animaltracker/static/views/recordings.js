@@ -156,6 +156,34 @@ function clipId(path) {
   return 'clip-' + String(path).replace(/[^A-Za-z0-9]+/g, '-');
 }
 
+/** Identity that survives the rename post-processing gives a clip: the
+    camera and the event's start, not the path. A card keyed this way keeps
+    its node — decoded image, focus, checkbox — when "Animal" becomes a
+    species, and a refresh can tell a renamed clip from a new one. */
+function clipKey(clip) {
+  var when = (clip.epoch !== undefined && clip.epoch !== null) ? clip.epoch : clip.time;
+  return (clip.camera || '') + '@' + when;
+}
+
+/** What the media box says when there is no key frame to show. The server
+    reports `analysis` only while there is something to say about it. */
+function frameNotice(clip) {
+  var a = clip && clip.analysis;
+  if (a === 'running') {
+    return { text: 'Analyzing…', cls: 'frame--pending', busy: true,
+      title: 'The post-processor is working on this clip.' };
+  }
+  if (a === 'queued') {
+    return { text: 'Awaiting analysis', cls: 'frame--pending',
+      title: 'Its analysis was interrupted; the recovery sweep will finish it.' };
+  }
+  if (a === 'unfinished') {
+    return { text: 'Not analyzed', cls: 'frame--error',
+      title: 'Post-processing never finished. Reanalyze it from the clip page.' };
+  }
+  return { text: 'No frame', cls: 'frame--error', title: 'The key frame could not be loaded.' };
+}
+
 function clipHref(path) {
   return router.href('/clips/' + api.encodePath(path));
 }
@@ -194,7 +222,8 @@ function normaliseDayClip(raw, date) {
     size_mb: raw.size_mb,
     confidence: raw.confidence,
     thumbnails: raw.thumbnails || [],
-    thumbnail: raw.thumbnail || null
+    thumbnail: raw.thumbnail || null,
+    analysis: raw.analysis || null
   };
 }
 
@@ -356,26 +385,6 @@ function buildCard(clip) {
 
   var media = h('div.clip__media.frame');
   media.appendChild(h('div.frame__film', { 'class': filmClass(clip.time) }));
-
-  var src = thumbUrl(clip);
-  var img = null;
-  if (src) {
-    img = h('img.frame__img', {
-      src: src, alt: '', loading: 'lazy', decoding: 'async'
-    });
-    on(img, 'error', function () {
-      media.classList.add('frame--error');
-      if (!media.querySelector('.frame__errpill')) {
-        media.appendChild(h('span.frame__errpill', icon('image-off', { size: 'sm' }),
-          h('span', 'No frame')));
-      }
-    });
-    media.appendChild(img);
-  } else {
-    media.classList.add('frame--error');
-    media.appendChild(h('span.frame__errpill', icon('image-off', { size: 'sm' }),
-      h('span', 'No frame')));
-  }
   media.appendChild(h('div.frame__scrim'));
 
   var play = h('button.icon-btn.icon-btn--on-media', {
@@ -414,10 +423,53 @@ function buildCard(clip) {
   art.appendChild(h('div.clip__meta', title, sub));
   li.appendChild(art);
 
-  li._parts = { link: link, check: check, art: art, play: play,
-    media: media, title: title.lastChild, dot: title.firstChild,
+  li._parts = { link: link, check: check, checkLabel: checkLabel, art: art, play: play,
+    media: media, img: null, pill: null, src: null,
+    title: title.lastChild, dot: title.firstChild,
     when: sub.querySelector('.clip__when'), cam: sub.querySelector('.clip__cam') };
+  paintFrame(li, clip);
   return li;
+}
+
+/** Put the key frame, or the reason there is none, into the media box.
+    Runs on build and on every refresh, so a card that said "Analyzing…"
+    shows its frame the moment the post-processor writes one. */
+function paintFrame(li, clip) {
+  var p = li._parts;
+  var media = p.media;
+  var src = thumbUrl(clip);
+
+  function showNotice() {
+    var notice = frameNotice(clip);
+    media.classList.remove('frame--error', 'frame--pending');
+    media.classList.add(notice.cls);
+    if (!p.pill) {
+      p.pill = h('span.frame__errpill', icon('image-off', { size: 'sm' }), h('span'));
+      media.appendChild(p.pill);
+    }
+    p.pill.className = 'frame__errpill' + (notice.busy ? ' frame__errpill--busy' : '');
+    p.pill.lastChild.textContent = notice.text;
+    p.pill.title = notice.title || '';
+  }
+
+  if (!src) {
+    if (p.img) { media.removeChild(p.img); p.img = null; p.src = null; }
+    showNotice();
+    return;
+  }
+  if (p.img && p.src === src) return;   /* unchanged: keep the decoded image */
+
+  if (p.pill) { media.removeChild(p.pill); p.pill = null; }
+  media.classList.remove('frame--error', 'frame--pending');
+  if (p.img) { media.removeChild(p.img); p.img = null; }
+  var img = h('img.frame__img', { src: src, alt: '', loading: 'lazy', decoding: 'async' });
+  on(img, 'error', function () {
+    if (p.img !== img) return;   /* superseded by a later paint */
+    showNotice();
+  });
+  media.insertBefore(img, media.querySelector('.frame__scrim'));
+  p.img = img;
+  p.src = src;
 }
 
 function updateCard(li, clip) {
@@ -432,7 +484,20 @@ function updateCard(li, clip) {
     li.className = 'cliptile ' + speciesClass(clip.species);
     p.art.classList.toggle('clip--unclassified', isUnclassified(clip.species));
   }
+  if (p.link.getAttribute('data-path') !== clip.path) {
+    /* Renamed by post-processing: every handle that carries the path moves. */
+    var id = clipId(clip.path);
+    p.link.setAttribute('data-path', clip.path);
+    p.link.setAttribute('href', clipHref(clip.path));
+    p.check.setAttribute('data-path', clip.path);
+    p.check.id = 'sel-' + id;
+    p.checkLabel.setAttribute('for', 'sel-' + id);
+    p.play.setAttribute('data-play', clip.path);
+  }
+  p.play.setAttribute('aria-label', 'Play ' + label + ' without leaving the archive');
+  p.checkLabel.textContent = 'Select ' + label;
   if (p.link.textContent !== label) p.link.textContent = label;
+  paintFrame(li, clip);
   if (p.when) p.when.textContent = timeAgo(clip.time);
   if (p.cam) p.cam.textContent = clip.camera || 'unknown camera';
   var selected = S.selected.has(clip.path);
@@ -644,7 +709,7 @@ function renderGrid() {
         (S.density === 'compact' ? ' clipgrid--compact' : '') +
         (S.selectMode ? ' clipgrid--select' : '');
       keyedList(p.list, g.clips, {
-        key: function (c) { return c.path; },
+        key: clipKey,
         create: buildCard,
         update: updateCard
       });
@@ -774,6 +839,15 @@ function loadUniverse() {
 }
 
 /** A silent refresh: new clips are merged in; scroll, selection and focus stay. */
+/** Selection, focus and the delete queue are keyed by path; a renamed clip
+    keeps its place in them. */
+function followRename(oldPath, newPath) {
+  if (S.selected.has(oldPath)) { S.selected.delete(oldPath); S.selected.add(newPath); }
+  if (S.anchor === oldPath) S.anchor = newPath;
+  if (S.focusKey === oldPath) S.focusKey = newPath;
+  if (S.pendingDelete.has(oldPath)) { S.pendingDelete.delete(oldPath); S.pendingDelete.add(newPath); }
+}
+
 function refreshGrid() {
   if (S.loading || S.loadingMore || !store.get('visible')) return;
   var signal = abortRequest('refresh');
@@ -781,17 +855,39 @@ function refreshGrid() {
     .then(function (data) {
       var incoming = data.clips || [];
       var known = {};
-      for (var i = 0; i < S.clips.length; i++) known[S.clips[i].path] = S.clips[i];
+      for (var i = 0; i < S.clips.length; i++) known[clipKey(S.clips[i])] = S.clips[i];
       var fresh = [];
+      var seen = {};
+      var oldest = Infinity;
       for (var j = 0; j < incoming.length; j++) {
-        if (!known[incoming[j].path]) fresh.push(incoming[j]);
-        else Object.assign(known[incoming[j].path], incoming[j]);
+        var inc = incoming[j];
+        var key = clipKey(inc);
+        seen[key] = true;
+        if (typeof inc.epoch === 'number' && inc.epoch < oldest) oldest = inc.epoch;
+        var cur = known[key];
+        if (!cur) { fresh.push(inc); continue; }
+        if (cur.path !== inc.path) followRename(cur.path, inc.path);
+        Object.assign(cur, inc);
       }
+      /* This page is the newest slice of the archive (or all of it when there
+         is no more), so a known clip inside its window that the server no
+         longer lists is gone: deleted, or a false positive the
+         post-processor removed. Older pages were not refreshed and stay. */
+      var before = S.clips.length;
+      if (S.filters.sort === 'newest' && incoming.length) {
+        var complete = !data.has_more;
+        S.clips = S.clips.filter(function (c) {
+          if (seen[clipKey(c)]) return true;
+          if (complete) return false;
+          return typeof c.epoch === 'number' && c.epoch < oldest;
+        });
+      }
+      var pruned = before - S.clips.length;
       if (fresh.length) {
         if (S.filters.sort === 'newest') S.clips = fresh.concat(S.clips);
         else S.clips = S.clips.concat(fresh);
-        S.offset = S.clips.length;
       }
+      if (fresh.length || pruned) S.offset = S.clips.length;
       S.total = data.total || S.total;
       S.archiveTotal = data.archive_total || S.archiveTotal;
       S.facets = data.facets || S.facets;

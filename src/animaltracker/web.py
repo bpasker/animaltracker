@@ -2450,18 +2450,45 @@ class WebServer:
             }
         }
 
+    def _camera_identity(self) -> Dict[str, Dict[str, str]]:
+        """Camera id -> {'name', 'location'} for every configured camera.
+
+        The running workers come first: the settings page applies a live
+        ``name`` or ``location`` edit to their camera objects. The runtime
+        config then covers a camera that is configured but not running
+        (``run --camera cam1``). Resolved per request rather than at scan
+        time, because the archive scan is cached and identity is not part
+        of the archive. A retired camera whose clips remain is absent here.
+        """
+        out: Dict[str, Dict[str, str]] = {}
+        sources = [getattr(w, 'camera', None) for w in self.workers.values()]
+        sources.extend(getattr(self.runtime, 'cameras', None) or [])
+        for cam in sources:
+            cam_id = getattr(cam, 'id', None)
+            if not cam_id or cam_id in out:
+                continue
+            name = getattr(cam, 'name', None) or cam_id
+            location = getattr(cam, 'location', None) or ''
+            out[cam_id] = {'name': str(name), 'location': str(location).strip()}
+        return out
+
     @staticmethod
-    def _clip_to_json(clip: dict) -> dict:
+    def _clip_to_json(clip: dict, identity: dict = None) -> dict:
         """Serialise a _scan_recordings entry for the API.
 
         `time` is emitted as ISO-8601 with offset so the client never has to guess
         a timezone, alongside the epoch for cheap sorting and relative formatting.
+        `camera_name` and `location` come from `identity` (`_camera_identity`);
+        a retired camera keeps its id as its name and has no location.
         """
         when = clip['time']
+        meta = (identity or {}).get(clip['camera']) or {}
         return {
             'path': clip['path'],
             'filename': clip['filename'],
             'camera': clip['camera'],
+            'camera_name': meta.get('name') or clip['camera'],
+            'location': meta.get('location') or '',
             'species': clip['species'],
             'raw_species': clip.get('raw_species', 'unknown'),
             'date': clip['date'],
@@ -2474,16 +2501,30 @@ class WebServer:
         }
 
     def _filter_clips(self, clips: list, query: dict) -> list:
-        """Apply camera / species / date-range / free-text filters."""
+        """Apply camera / location / species / date-range / free-text filters.
+
+        ``camera`` and ``location`` are one scope: a location stands for every
+        camera configured there, and the two select their union, so
+        ``camera=cam1&location=Otteson`` is cam1 plus the Otteson cameras. A
+        location no camera carries matches nothing. Free text also matches a
+        camera's configured name and location.
+        """
         cameras = {c for c in (query.get('camera') or '').split(',') if c}
+        locations = {loc.strip() for loc in (query.get('location') or '').split(',') if loc.strip()}
         species = {sp for sp in (query.get('species') or '').split(',') if sp}
         date_from = query.get('from') or None
         date_to = query.get('to') or None
         text = (query.get('q') or '').strip().lower()
 
+        identity = self._camera_identity() if (locations or text) else {}
+        scope = set(cameras)
+        if locations:
+            scope.update(cid for cid, meta in identity.items() if meta['location'] in locations)
+        scoped = bool(cameras or locations)
+
         out = []
         for clip in clips:
-            if cameras and clip['camera'] not in cameras:
+            if scoped and clip['camera'] not in scope:
                 continue
             if species and clip['species'] not in species:
                 continue
@@ -2492,10 +2533,14 @@ class WebServer:
                 continue
             if date_to and (clip['date'] == 'Manual' or clip['date'] > date_to):
                 continue
-            if text and text not in (
-                f"{clip['species']} {clip['camera']} {clip['filename']}".lower()
-            ):
-                continue
+            if text:
+                meta = identity.get(clip['camera']) or {}
+                haystack = (
+                    f"{clip['species']} {clip['camera']} {clip['filename']} "
+                    f"{meta.get('name', '')} {meta.get('location', '')}"
+                ).lower()
+                if text not in haystack:
+                    continue
             out.append(clip)
         return out
 
@@ -2567,16 +2612,24 @@ class WebServer:
         # 'newest' is the order _scan_recordings already returns.
 
         # Facets describe the whole match, not the current page, so counts stay
-        # stable while paging.
+        # stable while paging. Each camera carries its configured name and
+        # location so the client can group the chips by place; the location
+        # facet counts only clips from a camera that has one.
+        identity = self._camera_identity()
         cameras: Dict[str, int] = {}
+        locations: Dict[str, int] = {}
         species: Dict[str, int] = {}
         for clip in matched:
-            cameras[clip['camera']] = cameras.get(clip['camera'], 0) + 1
+            cam = clip['camera']
+            cameras[cam] = cameras.get(cam, 0) + 1
             species[clip['species']] = species.get(clip['species'], 0) + 1
+            location = (identity.get(cam) or {}).get('location') or ''
+            if location:
+                locations[location] = locations.get(location, 0) + 1
 
         page = matched[offset:offset + limit]
         return web.json_response({
-            'clips': [self._clip_to_json(c) for c in page],
+            'clips': [self._clip_to_json(c, identity) for c in page],
             'total': len(matched),
             'archive_total': len(clips),
             'offset': offset,
@@ -2584,7 +2637,14 @@ class WebServer:
             'has_more': offset + limit < len(matched),
             'facets': {
                 'cameras': sorted(
-                    ({'value': k, 'count': v} for k, v in cameras.items()),
+                    ({'value': k, 'count': v,
+                      'name': (identity.get(k) or {}).get('name') or k,
+                      'location': (identity.get(k) or {}).get('location') or ''}
+                     for k, v in cameras.items()),
+                    key=lambda x: x['value'],
+                ),
+                'locations': sorted(
+                    ({'value': k, 'count': v} for k, v in locations.items()),
                     key=lambda x: x['value'],
                 ),
                 'species': sorted(
@@ -2603,6 +2663,9 @@ class WebServer:
             return web.json_response({'error': 'Clip not found'}, status=404)
 
         payload = dict(info)
+        meta = self._camera_identity().get(info.get('camera')) or {}
+        payload['camera_name'] = meta.get('name') or info.get('camera')
+        payload['location'] = meta.get('location') or ''
         payload['time'] = info['time'].isoformat()
         payload['epoch'] = info['time'].timestamp()
         payload['url'] = f"/clips/{rel_path}"

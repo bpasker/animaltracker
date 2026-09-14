@@ -237,16 +237,19 @@ class FakeWorker:
 
 
 @pytest.mark.parametrize(
-    "worker,expected",
+    "kwargs,expected",
     [
-        (FakeWorker(age=0.5), "live"),
-        (FakeWorker(age=30.0), "stale"),
-        (FakeWorker(connected=False), "stale"),
-        (FakeWorker(frame=None), "offline"),
+        (dict(age=0.5), "live"),
+        (dict(age=30.0), "stale"),
+        (dict(connected=False), "stale"),
+        (dict(frame=None), "offline"),
     ],
 )
-def test_camera_state_reflects_stream_health(tmp_path, worker, expected):
-    srv = WebServer({"cam1": worker}, tmp_path, tmp_path / "logs", port=0)
+def test_camera_state_reflects_stream_health(tmp_path, kwargs, expected):
+    # Built here, not at collection: a worker made while the file is imported
+    # ages through the rest of the suite, and "live" reads "stale" on a run
+    # that takes longer than the stale threshold to reach this test.
+    srv = WebServer({"cam1": FakeWorker(**kwargs)}, tmp_path, tmp_path / "logs", port=0)
     _, body = call(srv.handle_cameras_api)
     assert body["cameras"][0]["state"] == expected
 
@@ -316,3 +319,141 @@ def test_monitor_survives_a_failing_disk_probe(server, monkeypatch):
     status, body = call(server.handle_get_monitor_data)
     assert status == 200
     assert body["system"]["disk_percent"] == 0 and body["system"]["cpu_percent"] == 0
+
+
+# --------------------------------------------------------------------------
+# Locations: a camera's configured location is a first-class filter
+# --------------------------------------------------------------------------
+
+class LocatedCam:
+    def __init__(self, cid, name, location):
+        self.id, self.name, self.location = cid, name, location
+        self.ptz_tracking = None
+
+
+class LocatedWorker:
+    def __init__(self, cam):
+        self.camera = cam
+        self.latest_frame = object()
+        self.latest_frame_ts = time.time()
+        self.stream_connected = True
+        self.onvif_client = None
+        self.onvif_profile_token = None
+        self.ptz_tracker = None
+
+
+def located_archive(clips):
+    base = time.mktime((2026, 9, 7, 12, 0, 0, 0, 0, -1))
+    make_clip(clips, "cam1", base, "mammalia_artiodactyla_cervidae_odocoileus_virginianus")
+    make_clip(clips, "cam2", base - 3600, "bird_passeriformes_cardinalidae")
+    make_clip(clips, "cam3", base - 7200, "mammalia_carnivora_procyonidae_procyon_lotor")
+    make_clip(clips, "cam9", base - 86400, "mammalia_rodentia_sciuridae")
+
+
+@pytest.fixture
+def located(tmp_path):
+    """Two sites — cam1 and cam2 at Asker, cam3 at Otteson — plus a retired
+    cam9 whose clip remains although it is no longer configured."""
+    workers = {
+        "cam1": LocatedWorker(LocatedCam("cam1", "Front Door", "Asker")),
+        "cam2": LocatedWorker(LocatedCam("cam2", "Bird Feeder", "Asker")),
+        "cam3": LocatedWorker(LocatedCam("cam3", "Backyard", "Otteson")),
+    }
+    srv = WebServer(workers, tmp_path, tmp_path / "logs", port=0)
+    clips = tmp_path / "clips"
+    clips.mkdir(parents=True, exist_ok=True)
+    located_archive(clips)
+    srv._invalidate_scan_cache()
+    return srv
+
+
+def test_filter_by_location_selects_every_camera_there(located):
+    _, body = call(located.handle_recordings_api, query={"location": "Asker"})
+    assert body["total"] == 2
+    assert {c["camera"] for c in body["clips"]} == {"cam1", "cam2"}
+
+
+def test_filter_by_several_locations(located):
+    _, body = call(located.handle_recordings_api, query={"location": "Asker, Otteson"})
+    assert body["total"] == 3
+
+
+def test_camera_and_location_select_their_union(located):
+    """A location is shorthand for its cameras, so a camera picked from
+    elsewhere widens the scope instead of emptying it."""
+    _, body = call(located.handle_recordings_api,
+                   query={"location": "Otteson", "camera": "cam1"})
+    assert {c["camera"] for c in body["clips"]} == {"cam1", "cam3"}
+
+
+def test_unknown_location_matches_nothing(located):
+    _, body = call(located.handle_recordings_api, query={"location": "Moon"})
+    assert body["total"] == 0
+
+
+def test_facets_carry_camera_identity_and_location_counts(located):
+    _, body = call(located.handle_recordings_api)
+    cams = {f["value"]: f for f in body["facets"]["cameras"]}
+    assert cams["cam1"]["name"] == "Front Door" and cams["cam1"]["location"] == "Asker"
+    # A retired camera keeps its id as its name and has no location.
+    assert cams["cam9"]["name"] == "cam9" and cams["cam9"]["location"] == ""
+    assert [(f["value"], f["count"]) for f in body["facets"]["locations"]] == [
+        ("Asker", 2), ("Otteson", 1)]
+
+
+def test_location_facet_narrows_with_the_match(located):
+    _, body = call(located.handle_recordings_api, query={"species": "Raccoon"})
+    assert [f["value"] for f in body["facets"]["locations"]] == ["Otteson"]
+
+
+def test_clip_json_names_its_camera_and_location(located):
+    _, body = call(located.handle_recordings_api, query={"camera": "cam3"})
+    clip = body["clips"][0]
+    assert clip["camera_name"] == "Backyard" and clip["location"] == "Otteson"
+
+    _, retired = call(located.handle_recordings_api, query={"camera": "cam9"})
+    assert retired["clips"][0]["camera_name"] == "cam9"
+    assert retired["clips"][0]["location"] == ""
+
+
+def test_clip_detail_names_its_camera_and_location(located):
+    _, listing = call(located.handle_recordings_api, query={"camera": "cam3"})
+    path = listing["clips"][0]["path"]
+    _, body = call(located.handle_clip_api, match_info={"path": path})
+    assert body["camera_name"] == "Backyard" and body["location"] == "Otteson"
+
+
+def test_search_matches_camera_name_and_location(located):
+    _, by_name = call(located.handle_recordings_api, query={"q": "front door"})
+    assert {c["camera"] for c in by_name["clips"]} == {"cam1"}
+
+    _, by_place = call(located.handle_recordings_api, query={"q": "otteson"})
+    assert {c["camera"] for c in by_place["clips"]} == {"cam3"}
+
+
+def test_identity_follows_a_live_edit(located):
+    """The settings page changes a location on the running worker's camera;
+    the archive must follow without a restart or a rescan."""
+    located.workers["cam3"].camera.location = "Cabin"
+    _, body = call(located.handle_recordings_api, query={"location": "Cabin"})
+    assert body["total"] == 1
+    _, stale = call(located.handle_recordings_api, query={"location": "Otteson"})
+    assert stale["total"] == 0
+
+
+def test_identity_covers_a_configured_camera_that_is_not_running(tmp_path):
+    """`run --camera cam1` starts one worker, but the archive still knows
+    where every configured camera stands."""
+    class Runtime:
+        cameras = [LocatedCam("cam1", "Front Door", "Asker"),
+                   LocatedCam("cam3", "Backyard", "Otteson")]
+
+    srv = WebServer({"cam1": LocatedWorker(Runtime.cameras[0])}, tmp_path,
+                    tmp_path / "logs", port=0, runtime=Runtime())
+    clips = tmp_path / "clips"
+    clips.mkdir(parents=True, exist_ok=True)
+    located_archive(clips)
+    srv._invalidate_scan_cache()
+
+    _, body = call(srv.handle_recordings_api, query={"location": "Otteson"})
+    assert {c["camera"] for c in body["clips"]} == {"cam3"}

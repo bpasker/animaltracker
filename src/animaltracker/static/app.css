@@ -597,9 +597,30 @@ code,.code{
 .chip--tonal{ background:var(--c-surface-inset); border-color:transparent }
 .chip--clear{ color:var(--c-text-3); border-style:dashed }
 
+/* A location chip stands for every camera there. aria-pressed="mixed" is the
+   tree's third state: only some of its cameras are on. */
+.chip--location{ font-weight:var(--w-semi) }
+.chip[aria-pressed="mixed"]{
+  background:var(--c-accent-wash);
+  border-color:var(--c-accent-line);
+  color:var(--c-accent-text);
+}
+
+/* A camera chip reads its configured name; the id rides along in mono so two
+   "Front Door" cameras at different places stay telling apart. */
+.chip__sub{
+  flex:none;
+  font-family:var(--font-mono);
+  font-size:var(--t-micro);
+  opacity:.7;
+}
+
 @media (hover: hover){
   .chip:hover{ border-color:var(--c-line-strong); color:var(--c-text) }
   .chip[aria-pressed="true"]:hover{ background:var(--c-accent-hover); border-color:var(--c-accent-hover) }
+  .chip[aria-pressed="mixed"]:hover{
+    background:var(--c-accent-wash-strong); border-color:var(--c-accent-line); color:var(--c-accent-text)
+  }
 }
 
 /* Species chips carry the dot AND the word. */
@@ -1629,7 +1650,7 @@ code,.code{
    so it never shrinks; in the fixed-width rail cap it and let the label
    ellipsise rather than run past the edge. The count stays fully visible. */
 .rail .chip{ max-width:100% }
-.rail .chip > span:not(.chip__count):not(.chip__dot){
+.rail .chip > span:not(.chip__count):not(.chip__dot):not(.chip__sub){
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
 }
 .spacer    { flex:1 1 auto }
@@ -2221,6 +2242,28 @@ code,.code{
   flex-direction:column;
   gap:var(--s-4);
   padding-inline:var(--s-3);
+}
+
+/* Location groups in the filter rail and sheet: the location chip, then its
+   cameras one step in behind a hairline, so the tree reads without a heading.
+   .locgroup--flat is an archive with no location configured anywhere: the
+   cameras stand alone, as they always did. */
+.locgroups{ display:flex; flex-direction:column; gap:var(--s-2); min-width:0 }
+.locgroup{ display:flex; flex-direction:column; align-items:flex-start; gap:var(--s-1); min-width:0 }
+.locgroup > .locgroup__cams{ align-self:stretch }
+.locgroup__cams{
+  margin-left:var(--s-3);
+  padding-left:var(--s-3);
+  border-left:2px solid var(--c-line-soft);
+}
+.locgroup--flat .locgroup__cams{ margin-left:0; padding-left:0; border-left:0 }
+.locgroup__none{
+  padding:var(--s-1) var(--s-3) 0;
+  font-size:var(--t-micro);
+  font-weight:var(--w-semi);
+  letter-spacing:var(--ls-caps);
+  text-transform:uppercase;
+  color:var(--c-text-3);
 }
 
 /* Collapse toggle — persisted, reclaims the 260px on a small laptop. */

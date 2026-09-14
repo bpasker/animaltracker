@@ -3,6 +3,7 @@
 
    WHAT LIVES IN THE URL (and nowhere else)
      view=grid|month   cameras=cam1,cam2   species=Deer,Raccoon
+     location=Asker,Otteson                (every camera configured there)
      from=YYYY-MM-DD   to=YYYY-MM-DD       date=YYYY-MM-DD
      year=2026         month=9             q=text   sort=newest
      density=compact
@@ -82,6 +83,58 @@ function sameList(a, b) {
   return true;
 }
 
+/* A filter set is always built through these two, so a new key cannot be
+   left out of one of the many places that clear or narrow the filters. */
+function emptyFilters(sort) {
+  return { cameras: [], locations: [], species: [], from: '', to: '', q: '', sort: sort || 'newest' };
+}
+
+function withFilters(f, patch) {
+  var next = { cameras: f.cameras, locations: f.locations, species: f.species,
+    from: f.from, to: f.to, q: f.q, sort: f.sort };
+  for (var k in patch) if (Object.prototype.hasOwnProperty.call(patch, k)) next[k] = patch[k];
+  return next;
+}
+
+function emptyFacets() {
+  return { cameras: [], locations: [], species: [] };
+}
+
+/* --- camera identity ----------------------------------------------------- */
+
+/** What the archive knows about a camera: the name and location it was
+    configured with. Every camera facet entry carries both, which also covers
+    a retired camera the shell no longer lists; the shell's health list covers
+    a configured camera that has no clip yet. */
+function camMeta(id) {
+  var lists = S ? [S.universe.cameras, S.facets.cameras] : [];
+  lists.push(store.get('cameras') || []);
+  for (var i = 0; i < lists.length; i++) {
+    var list = lists[i] || [];
+    for (var j = 0; j < list.length; j++) {
+      var e = list[j];
+      if ((e.value !== undefined ? e.value : e.id) !== id) continue;
+      return { name: e.name || id, location: e.location || '' };
+    }
+  }
+  return { name: id, location: '' };
+}
+
+/** "Front Door (Otteson2)" — the name, with the id when the two differ. */
+function camText(id) {
+  var m = camMeta(id);
+  return m.name === id ? id : m.name + ' (' + id + ')';
+}
+
+/** True when the camera scope — cameras picked singly plus whole locations —
+    admits this camera. No scope at all admits every camera. */
+function inScope(f, id, location) {
+  if (!f.cameras.length && !f.locations.length) return true;
+  if (f.cameras.indexOf(id) >= 0) return true;
+  var loc = location !== undefined ? location : camMeta(id).location;
+  return !!loc && f.locations.indexOf(loc) >= 0;
+}
+
 function todayKey() {
   return keyFromDate(new Date());
 }
@@ -146,14 +199,17 @@ function normaliseDayClip(raw, date) {
 }
 
 function filtersActive(f) {
-  return !!(f.cameras.length || f.species.length || f.from || f.to || f.q);
+  return !!(f.cameras.length || f.locations.length || f.species.length || f.from || f.to || f.q);
 }
 
 function describeFilters(f) {
   var parts = [];
   if (f.q) parts.push('matching “' + f.q + '”');
   if (f.species.length) parts.push(f.species.join(', '));
-  if (f.cameras.length) parts.push('on ' + f.cameras.join(' and '));
+  /* A location and a camera picked singly are one scope, hence "or". */
+  var where = f.locations.slice();
+  f.cameras.forEach(function (v) { where.push(camText(v)); });
+  if (where.length) parts.push('from ' + where.join(' or '));
   if (f.from && f.to && f.from === f.to) parts.push('on ' + longDate(f.from));
   else if (f.from && f.to) parts.push('between ' + longDate(f.from) + ' and ' + longDate(f.to));
   else if (f.from) parts.push('since ' + longDate(f.from));
@@ -191,6 +247,7 @@ function readState(ctx) {
     date: q.date || '',
     filters: {
       cameras: splitList(q.cameras || q.camera),
+      locations: splitList(q.location || q.locations),
       species: splitList(q.species),
       from: from,
       to: to,
@@ -201,13 +258,15 @@ function readState(ctx) {
 }
 
 function sameFilters(a, b) {
-  return sameList(a.cameras, b.cameras) && sameList(a.species, b.species) &&
+  return sameList(a.cameras, b.cameras) && sameList(a.locations, b.locations) &&
+    sameList(a.species, b.species) &&
     a.from === b.from && a.to === b.to && a.q === b.q && a.sort === b.sort;
 }
 
 function apiQuery(f, extra) {
   var query = { sort: f.sort };
   if (f.cameras.length) query.camera = f.cameras.join(',');
+  if (f.locations.length) query.location = f.locations.join(',');
   if (f.species.length) query.species = f.species.join(',');
   if (f.from) query.from = f.from;
   if (f.to) query.to = f.to;
@@ -220,6 +279,7 @@ function apiQuery(f, extra) {
 function applyFilters(next, opts) {
   var patch = {
     cameras: next.cameras.length ? next.cameras.join(',') : null,
+    location: next.locations.length ? next.locations.join(',') : null,
     species: next.species.length ? next.species.join(',') : null,
     from: next.from || null,
     to: next.to || null,
@@ -415,7 +475,7 @@ function staleCause(f) {
   var cams = store.get('cameras') || [];
   for (var i = 0; i < cams.length; i++) {
     var c = cams[i];
-    if (f.cameras.length && f.cameras.indexOf(c.id) < 0) continue;
+    if (!inScope(f, c.id, c.location || '')) continue;
     if (c.state === 'offline') {
       return (c.name || c.id) + ' is offline, which may be why nothing new has landed.';
     }
@@ -445,7 +505,7 @@ function gridEmpty() {
       title: 'No clips on disk yet',
       body: 'The detector writes a clip only when it sees something. Nothing has been ' +
             'recorded since this archive was created.',
-      cause: staleCause({ cameras: [] }) || undefined,
+      cause: staleCause(emptyFilters()) || undefined,
       actions: [
         { label: 'Open Live', variant: 'primary', onClick: function () { router.go('/live', {}); } },
         { label: 'Open Monitor', onClick: function () { router.go('/monitor', {}); } }
@@ -455,22 +515,24 @@ function gridEmpty() {
 
   var actions = [{
     label: 'Clear filters', variant: 'primary',
-    onClick: function () { applyFilters({ cameras: [], species: [], from: '', to: '', q: '', sort: f.sort }); }
+    onClick: function () { applyFilters(emptyFilters(f.sort)); }
   }];
   if (f.from || f.to) {
     actions.push({
       label: 'Widen to 30 days',
-      onClick: function () {
-        applyFilters({ cameras: f.cameras, species: f.species, from: shiftDays(30), to: '', q: f.q, sort: f.sort });
-      }
+      onClick: function () { applyFilters(withFilters(f, { from: shiftDays(30), to: '' })); }
+    });
+  }
+  if (f.cameras.length || f.locations.length) {
+    actions.push({
+      label: 'Every camera',
+      onClick: function () { applyFilters(withFilters(f, { cameras: [], locations: [] })); }
     });
   }
   if (f.species.length) {
     actions.push({
       label: 'Any species',
-      onClick: function () {
-        applyFilters({ cameras: f.cameras, species: [], from: f.from, to: f.to, q: f.q, sort: f.sort });
-      }
+      onClick: function () { applyFilters(withFilters(f, { species: [] })); }
     });
   }
 
@@ -652,7 +714,7 @@ function loadGrid(force) {
     S.archiveTotal = data.archive_total || 0;
     S.hasMore = !!data.has_more;
     S.offset = S.clips.length;
-    S.facets = data.facets || { cameras: [], species: [] };
+    S.facets = data.facets || emptyFacets();
     renderGrid();
     renderFilterUI();
     loadUniverse();
@@ -691,17 +753,16 @@ function loadMore() {
 }
 
 /**
- * The facet universe: counts for every camera and species AVAILABLE under the
- * non-category filters. The main response's facets narrow to what is selected,
- * which would make a chip disappear the moment you picked it.
+ * The facet universe: counts for every camera, location and species AVAILABLE
+ * under the non-category filters. The main response's facets narrow to what is
+ * selected, which would make a chip disappear the moment you picked it.
  */
 function loadUniverse() {
   var signal = abortRequest('universe');
-  var base = { from: S.filters.from, to: S.filters.to, q: S.filters.q,
-    cameras: [], species: [], sort: S.filters.sort };
+  var base = withFilters(S.filters, { cameras: [], locations: [], species: [] });
   api.recordings(apiQuery(base, { limit: 1, offset: 0 }), { signal: signal })
     .then(function (data) {
-      S.universe = data.facets || { cameras: [], species: [] };
+      S.universe = data.facets || emptyFacets();
       renderFilterUI();
       renderCount();
     }).catch(function (err) {
@@ -1044,7 +1105,7 @@ function facetRows(list, selected) {
   var counts = {};
   (list || []).forEach(function (f) { counts[f.value] = f.count; });
   var rows = (list || []).map(function (f) {
-    return { value: f.value, count: f.count };
+    return { value: f.value, count: f.count, name: f.name, location: f.location };
   });
   /* A selected value the current universe no longer contains still needs its
      chip, or the user cannot switch it off. */
@@ -1059,16 +1120,16 @@ function facetRows(list, selected) {
  * mode.live === false -> changes mutate a draft; the caller applies on Show
  */
 function buildFilterFields(mode) {
-  var draft = mode.live ? null : {
+  var draft = mode.live ? null : withFilters(S.filters, {
     cameras: S.filters.cameras.slice(),
-    species: S.filters.species.slice(),
-    from: S.filters.from, to: S.filters.to, q: S.filters.q, sort: S.filters.sort
-  };
+    locations: S.filters.locations.slice(),
+    species: S.filters.species.slice()
+  });
   function current() { return mode.live ? S.filters : draft; }
   function commit(next, opts) {
     if (mode.live) applyFilters(next, opts || { replace: false });
     else {
-      draft.cameras = next.cameras; draft.species = next.species;
+      draft.cameras = next.cameras; draft.locations = next.locations; draft.species = next.species;
       draft.from = next.from; draft.to = next.to; draft.q = next.q; draft.sort = next.sort;
       if (mode.onDraft) mode.onDraft(draft);
       paint();
@@ -1078,6 +1139,7 @@ function buildFilterFields(mode) {
     var c = current();
     var next = {
       cameras: part.cameras || c.cameras.slice(),
+      locations: part.locations || c.locations.slice(),
       species: part.species || c.species.slice(),
       from: part.from !== undefined ? part.from : c.from,
       to: part.to !== undefined ? part.to : c.to,
@@ -1092,7 +1154,7 @@ function buildFilterFields(mode) {
   /* --- search --- */
   var searchInput = h('input.search__input', {
     type: 'search', autocomplete: 'off', spellcheck: 'false',
-    placeholder: 'Species, camera or filename',
+    placeholder: 'Species, camera or location',
     value: current().q
   });
   searchInput.setAttribute('aria-label', 'Search this archive');
@@ -1132,9 +1194,157 @@ function buildFilterFields(mode) {
       h('label.field', h('span.field__label', 'To'), toInput)));
   wrap.appendChild(whenSection);
 
-  /* --- cameras --- */
-  var camRow = h('div.chip-row.chip-row--wrap', { role: 'group', 'aria-label': 'Cameras' });
-  wrap.appendChild(h('div.rail__section', h('div.rail__label', 'Cameras'), camRow));
+  /* --- location: every camera, standing under the place it was configured
+     with. The location chip is the parent of a tree: it is on when every
+     camera there is on, and the URL then names the location itself, so a
+     camera added there later joins the filter on its own. --- */
+  var locLabel = h('div.rail__label', 'Location');
+  var locHost = h('div.locgroups', { role: 'group', 'aria-label': 'Location and cameras' });
+  wrap.appendChild(h('div.rail__section', locLabel, locHost));
+
+  /** The universe's cameras grouped by location. A selected location that no
+      camera in the universe carries keeps a chip, or it could not be switched
+      off. Named places A-Z; cameras with no location last, so they never read
+      as a place called nothing. */
+  function locationGroups(c) {
+    var groups = {};
+    var order = [];
+    facetRows(S.universe.cameras, c.cameras).forEach(function (r) {
+      var meta = r.name !== undefined ? r : camMeta(r.value);
+      var loc = meta.location || '';
+      if (!groups[loc]) { groups[loc] = { key: 'g' + loc, location: loc, cameras: [], count: 0 }; order.push(loc); }
+      groups[loc].cameras.push({ value: r.value, count: r.count, name: meta.name || r.value });
+      if (r.count !== null) groups[loc].count += r.count;
+    });
+    c.locations.forEach(function (loc) {
+      if (!groups[loc]) { groups[loc] = { key: 'g' + loc, location: loc, cameras: [], count: null }; order.push(loc); }
+    });
+    order.sort(function (a, b) {
+      if (!a !== !b) return a ? -1 : 1;
+      return a.localeCompare(b);
+    });
+    return order.map(function (loc) {
+      groups[loc].cameras.sort(function (a, b) {
+        return a.name.localeCompare(b.name) || a.value.localeCompare(b.value);
+      });
+      return groups[loc];
+    });
+  }
+
+  function groupIds(g) { return g.cameras.map(function (x) { return x.value; }); }
+
+  /** 'true' when the location is on, as itself or as every camera there;
+      'mixed' when only some of its cameras are on. */
+  function locState(g, c) {
+    if (c.locations.indexOf(g.location) >= 0) return 'true';
+    var ids = groupIds(g);
+    var on = ids.filter(function (id) { return c.cameras.indexOf(id) >= 0; }).length;
+    if (ids.length && on === ids.length) return 'true';
+    return on ? 'mixed' : 'false';
+  }
+
+  function toggleLocation(g) {
+    var c = current();
+    var ids = groupIds(g);
+    var locs = c.locations.filter(function (l) { return l !== g.location; });
+    var cams = c.cameras.filter(function (id) { return ids.indexOf(id) < 0; });
+    if (locState(g, c) !== 'true') locs.push(g.location);
+    patch({ cameras: cams, locations: locs });
+  }
+
+  function toggleCamera(g, id) {
+    var c = current();
+    var ids = groupIds(g);
+    var locs = c.locations.slice();
+    var cams = c.cameras.slice();
+    var at = g.location ? locs.indexOf(g.location) : -1;
+    if (at >= 0) {
+      /* On through its location: switching it off keeps the others there,
+         now listed singly. */
+      locs.splice(at, 1);
+      ids.forEach(function (m) { if (m !== id && cams.indexOf(m) < 0) cams.push(m); });
+    } else if (cams.indexOf(id) >= 0) {
+      cams.splice(cams.indexOf(id), 1);
+    } else {
+      cams.push(id);
+      /* Every camera at a place, on singly, is the place itself. */
+      if (g.location && ids.every(function (m) { return cams.indexOf(m) >= 0; })) {
+        cams = cams.filter(function (m) { return ids.indexOf(m) < 0; });
+        locs.push(g.location);
+      }
+    }
+    patch({ cameras: cams, locations: locs });
+  }
+
+  function paintLocations(c) {
+    var groups = locationGroups(c);
+    var named = 0;
+    groups.forEach(function (g) { if (g.location) named++; });
+    /* With no location configured anywhere this is the plain camera list. */
+    locLabel.textContent = named ? 'Location' : 'Cameras';
+
+    keyedList(locHost, groups, {
+      key: function (g) { return g.key; },
+      create: function (g) {
+        var el = h('div.locgroup');
+        var head;
+        if (g.location) {
+          head = chipButton({
+            value: g.location, label: g.location, count: g.count, active: false,
+            onClick: function () { toggleLocation(el._group); }
+          });
+          head.classList.add('chip--location');
+        } else {
+          head = h('span.locgroup__none', { text: 'No location' });
+        }
+        var cams = h('div.chip-row.chip-row--wrap.locgroup__cams', { role: 'group' });
+        el.appendChild(head);
+        el.appendChild(cams);
+        el._parts = { head: head, cams: cams };
+        return el;
+      },
+      update: function (el, g) {
+        el._group = g;
+        var p = el._parts;
+        var cc = current();
+        if (g.location) {
+          p.head.setAttribute('aria-pressed', locState(g, cc));
+          p.head.setAttribute('aria-label', g.location + ', every camera there');
+          var cnt = p.head.querySelector('.chip__count');
+          if (cnt) cnt.textContent = g.count === null ? '0' : String(g.count);
+        } else {
+          p.head.hidden = !named;
+        }
+        el.classList.toggle('locgroup--flat', !g.location && !named);
+        p.cams.setAttribute('aria-label', g.location ? 'Cameras at ' + g.location : 'Cameras with no location');
+
+        keyedList(p.cams, g.cameras, {
+          key: function (f) { return 'c' + f.value; },
+          create: function (f) {
+            var chip = chipButton({
+              value: f.value, label: f.name, count: f.count, active: false,
+              onClick: function () { toggleCamera(el._group, f.value); }
+            });
+            chip._label = chip.querySelector('span:not(.chip__count)');
+            chip._sub = h('span.chip__sub');
+            chip.insertBefore(chip._sub, chip.querySelector('.chip__count'));
+            return chip;
+          },
+          update: function (chip, f) {
+            var on = cc.cameras.indexOf(f.value) >= 0 ||
+              (!!g.location && cc.locations.indexOf(g.location) >= 0);
+            chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+            chip.setAttribute('aria-label', f.name === f.value ? f.value : f.name + ', ' + f.value);
+            if (chip._label) chip._label.textContent = f.name;
+            chip._sub.textContent = f.name === f.value ? '' : f.value;
+            chip._sub.hidden = f.name === f.value;
+            var cnt = chip.querySelector('.chip__count');
+            if (cnt) cnt.textContent = f.count === null ? '0' : String(f.count);
+          }
+        });
+      }
+    });
+  }
 
   /* --- species --- */
   var spRow = h('div.chip-row.chip-row--wrap', { role: 'group', 'aria-label': 'Species' });
@@ -1154,7 +1364,7 @@ function buildFilterFields(mode) {
   var reset = h('button.btn.btn--ghost.btn--block', { type: 'button' },
     h('span.btn__label', 'Reset every filter'));
   on(reset, 'click', function () {
-    commit({ cameras: [], species: [], from: '', to: '', q: '', sort: 'newest' });
+    commit(emptyFilters());
     if (mode.live) return;
     searchInput.value = ''; fromInput.value = ''; toInput.value = '';
   });
@@ -1189,26 +1399,7 @@ function buildFilterFields(mode) {
       }
     });
 
-    keyedList(camRow, facetRows(S.universe.cameras, c.cameras), {
-      key: function (f) { return 'c' + f.value; },
-      create: function (f) {
-        return chipButton({
-          value: f.value, label: f.value, count: f.count,
-          active: c.cameras.indexOf(f.value) >= 0,
-          onClick: function () {
-            var list = current().cameras.slice();
-            var i = list.indexOf(f.value);
-            if (i >= 0) list.splice(i, 1); else list.push(f.value);
-            patch({ cameras: list });
-          }
-        });
-      },
-      update: function (el, f) {
-        el.setAttribute('aria-pressed', current().cameras.indexOf(f.value) >= 0 ? 'true' : 'false');
-        var cnt = el.querySelector('.chip__count');
-        if (cnt) cnt.textContent = f.count === null ? '0' : String(f.count);
-      }
-    });
+    paintLocations(c);
 
     keyedList(spRow, facetRows(S.universe.species, c.species), {
       key: function (f) { return 's' + f.value; },
@@ -1249,7 +1440,8 @@ function renderFilterUI() {
 function renderActiveChips() {
   var f = S.filters;
   var chips = [];
-  f.cameras.forEach(function (v) { chips.push({ key: 'c' + v, label: v, kind: 'camera', value: v }); });
+  f.locations.forEach(function (v) { chips.push({ key: 'l' + v, label: v, kind: 'location', value: v }); });
+  f.cameras.forEach(function (v) { chips.push({ key: 'c' + v, label: camText(v), kind: 'camera', value: v }); });
   f.species.forEach(function (v) { chips.push({ key: 's' + v, label: v, kind: 'species', value: v, dot: speciesClass(v) }); });
   if (f.from || f.to) {
     chips.push({ key: 'date', kind: 'date',
@@ -1268,9 +1460,7 @@ function renderActiveChips() {
       if (c.kind === 'clear') {
         var clearChip = h('button.chip.chip--clear', { type: 'button' },
           h('span', { text: 'Clear all' }));
-        on(clearChip, 'click', function () {
-          applyFilters({ cameras: [], species: [], from: '', to: '', q: '', sort: S.filters.sort });
-        });
+        on(clearChip, 'click', function () { applyFilters(emptyFilters(S.filters.sort)); });
         return clearChip;
       }
       var chip = h('button.chip.chip--tonal', { type: 'button' });
@@ -1280,18 +1470,12 @@ function renderActiveChips() {
       chip.setAttribute('aria-label', 'Remove filter ' + c.label);
       on(chip, 'click', function () {
         var f2 = S.filters;
-        if (c.kind === 'camera') {
-          applyFilters({ cameras: f2.cameras.filter(function (v) { return v !== c.value; }),
-            species: f2.species, from: f2.from, to: f2.to, q: f2.q, sort: f2.sort });
-        } else if (c.kind === 'species') {
-          applyFilters({ cameras: f2.cameras,
-            species: f2.species.filter(function (v) { return v !== c.value; }),
-            from: f2.from, to: f2.to, q: f2.q, sort: f2.sort });
-        } else if (c.kind === 'date') {
-          applyFilters({ cameras: f2.cameras, species: f2.species, from: '', to: '', q: f2.q, sort: f2.sort });
-        } else if (c.kind === 'q') {
-          applyFilters({ cameras: f2.cameras, species: f2.species, from: f2.from, to: f2.to, q: '', sort: f2.sort });
-        }
+        function without(list) { return list.filter(function (v) { return v !== c.value; }); }
+        if (c.kind === 'camera') applyFilters(withFilters(f2, { cameras: without(f2.cameras) }));
+        else if (c.kind === 'location') applyFilters(withFilters(f2, { locations: without(f2.locations) }));
+        else if (c.kind === 'species') applyFilters(withFilters(f2, { species: without(f2.species) }));
+        else if (c.kind === 'date') applyFilters(withFilters(f2, { from: '', to: '' }));
+        else if (c.kind === 'q') applyFilters(withFilters(f2, { q: '' }));
       });
       return chip;
     },
@@ -1332,7 +1516,7 @@ function openFilterSheet() {
     handle.close(null);
   });
   on(resetBtn, 'click', function () {
-    applyFilters({ cameras: [], species: [], from: '', to: '', q: '', sort: 'newest' });
+    applyFilters(emptyFilters());
     handle.close(null);
   });
 }
@@ -1400,11 +1584,11 @@ function loadMonth(force) {
 
   var signal = abortRequest('month');
   var f = S.filters;
-  var q = apiQuery({
-    cameras: f.cameras, species: f.species, q: f.q, sort: 'oldest',
+  var q = apiQuery(withFilters(f, {
+    sort: 'oldest',
     from: f.from && f.from > b.from ? f.from : b.from,
     to: f.to && f.to < b.to ? f.to : b.to
-  }, { limit: MAX_PAGE, offset: 0 });
+  }), { limit: MAX_PAGE, offset: 0 });
 
   api.recordings(q, { signal: signal }).then(function (data) {
     S.monthLoading = false;
@@ -1567,9 +1751,8 @@ function renderMonth() {
           : 'Nothing was recorded in this month.',
         cause: filtered ? staleCause(S.filters) || undefined : undefined,
         actions: filtered ? [
-          { label: 'Clear filters', variant: 'primary', onClick: function () {
-            applyFilters({ cameras: [], species: [], from: '', to: '', q: '', sort: S.filters.sort });
-          } },
+          { label: 'Clear filters', variant: 'primary',
+            onClick: function () { applyFilters(emptyFilters(S.filters.sort)); } },
           { label: 'Previous month', onClick: function () { stepMonth(-1); } }
         ] : [
           { label: 'Previous month', variant: 'primary', onClick: function () { stepMonth(-1); } }
@@ -1635,7 +1818,7 @@ function loadDay(date) {
   var q = {};
   /* The server matches one value per key and species as a substring, so a
      multi-select is narrowed here rather than half-applied there. */
-  if (f.cameras.length === 1) q.camera = f.cameras[0];
+  if (f.cameras.length === 1 && !f.locations.length) q.camera = f.cameras[0];
   if (f.species.length === 1) q.species = f.species[0];
 
   api.day(date, q, { signal: signal }).then(function (data) {
@@ -1643,10 +1826,11 @@ function loadDay(date) {
     /* THE FIX: the old UI ignored the active filters here, so filtering to
        Deer and opening a day showed everything. */
     clips = clips.filter(function (c) {
-      if (f.cameras.length && f.cameras.indexOf(c.camera) < 0) return false;
+      if (!inScope(f, c.camera)) return false;
       if (f.species.length && f.species.indexOf(c.species) < 0) return false;
       if (f.q) {
-        var hay = ((c.species || '') + ' ' + (c.camera || '') + ' ' + (c.filename || '')).toLowerCase();
+        var meta = camMeta(c.camera);
+        var hay = [c.species, c.camera, c.filename, meta.name, meta.location].join(' ').toLowerCase();
         if (hay.indexOf(f.q.toLowerCase()) < 0) return false;
       }
       return true;
@@ -1724,9 +1908,8 @@ function renderDayPanelInto(panel) {
         ? 'You are filtered to ' + describeFilters(S.filters) + '. The day itself may still hold clips.'
         : 'No clip was recorded on ' + (d.date ? longDate(d.date) : 'this day') + '.',
       actions: filtersActive(S.filters) ? [{
-        label: 'Clear filters', variant: 'primary', onClick: function () {
-          applyFilters({ cameras: [], species: [], from: '', to: '', q: '', sort: S.filters.sort });
-        }
+        label: 'Clear filters', variant: 'primary',
+        onClick: function () { applyFilters(emptyFilters(S.filters.sort)); }
       }] : []
     }));
     return;
@@ -1913,8 +2096,8 @@ function gridKeydown(ev) {
 
 function renderChromeActions() {
   var filterBtn = S.els.filterBtn;
-  var activeCount = S.filters.cameras.length + S.filters.species.length +
-    (S.filters.from || S.filters.to ? 1 : 0) + (S.filters.q ? 1 : 0);
+  var activeCount = S.filters.cameras.length + S.filters.locations.length +
+    S.filters.species.length + (S.filters.from || S.filters.to ? 1 : 0) + (S.filters.q ? 1 : 0);
   var badge = filterBtn.querySelector('.btn__count');
   if (activeCount) {
     if (!badge) { badge = h('span.btn__count'); filterBtn.appendChild(badge); }
@@ -2252,7 +2435,7 @@ export const view = {
       unmounting: false,
       pendingMonthFocus: null,
 
-      filters: { cameras: [], species: [], from: '', to: '', q: '', sort: 'newest' },
+      filters: emptyFilters(),
       view: 'grid',
       density: 'comfortable',
       year: new Date().getFullYear(),
@@ -2267,8 +2450,8 @@ export const view = {
       loading: true,
       loadingMore: false,
       error: null,
-      facets: { cameras: [], species: [] },
-      universe: { cameras: [], species: [] },
+      facets: emptyFacets(),
+      universe: emptyFacets(),
 
       collapsed: new Set(),
       collapsing: new Set(),

@@ -129,22 +129,31 @@ function labelledButton(opts) {
   return btn;
 }
 
-/* Camera state -> the three redundant channels: dot class, word, sub-line. */
+/* Camera state -> the three redundant channels: dot class, word, sub-line.
+   The sub-line leads with the location, because two cameras can share a
+   name ("Front Door" at each site) and only the place tells them apart. */
 function cameraWords(cam) {
   var state = cam.state || 'unknown';
+  var who = (cam.location ? cam.location + ' · ' : '') + cam.id;
   if (state === 'live') {
-    return { dot: 'live', word: 'Live', meta: cam.id + ' · live' };
+    return { dot: 'live', word: 'Live', meta: who + ' · live' };
   }
   if (state === 'stale') {
     return {
       dot: 'stale', word: 'Stale',
-      meta: cam.id + ' · stale ' + shortAgo(cam.frame_age)
+      meta: who + ' · stale ' + shortAgo(cam.frame_age)
     };
   }
   if (state === 'offline') {
-    return { dot: 'offline', word: 'Offline', meta: cam.id + ' · no frames' };
+    return { dot: 'offline', word: 'Offline', meta: who + ' · no frames' };
   }
-  return { dot: 'offline', word: 'Unknown', meta: cam.id };
+  return { dot: 'offline', word: 'Unknown', meta: who };
+}
+
+/** "Front Door (Otteson)" — a camera's name, placed when it has a location. */
+function cameraTitle(cam) {
+  var name = cam.name || cam.id;
+  return cam.location ? name + ' (' + cam.location + ')' : name;
 }
 
 /* ==========================================================================
@@ -440,7 +449,7 @@ function loadSavedViews() {
 function currentFilterQuery() {
   var q = (router.current && router.current.query) || {};
   var out = {};
-  ['cameras', 'species', 'from', 'to', 'q', 'sort'].forEach(function (k) {
+  ['cameras', 'location', 'species', 'from', 'to', 'q', 'sort'].forEach(function (k) {
     if (q[k]) out[k] = q[k];
   });
   return out;
@@ -604,16 +613,25 @@ function paletteItems() {
       run: function () { applyTheme(mode); }
     });
   });
+  var places = [];
   (store.get('cameras') || []).forEach(function (c) {
     items.push({
-      name: 'Save the last 30 s from ' + (c.name || c.id), group: 'Cameras',
+      name: 'Save the last 30 s from ' + cameraTitle(c), group: 'Cameras',
       icon: 'film', scope: c.id,
       run: function () { saveClipFrom(c); }
     });
     items.push({
-      name: 'Show only ' + (c.name || c.id) + ' recordings', group: 'Cameras',
+      name: 'Show only ' + cameraTitle(c) + ' recordings', group: 'Cameras',
       icon: 'filter', scope: c.id,
       run: function () { router.go('/recordings', { cameras: c.id }); }
+    });
+    if (c.location && places.indexOf(c.location) < 0) places.push(c.location);
+  });
+  places.forEach(function (loc) {
+    items.push({
+      name: 'Show only ' + loc + ' recordings', group: 'Locations',
+      icon: 'filter', scope: loc,
+      run: function () { router.go('/recordings', { location: loc }); }
     });
   });
   (store.get('savedViews') || []).forEach(function (v) {

@@ -300,7 +300,8 @@ cameras:
 
 ### Editing settings from the web UI
 
-Open `http://<host>:8080/app/settings`. The page edits `config/cameras.yml`
+The web UI is at `http://<host>:8080/` (Live, Recordings, Monitor and
+Settings). Open `http://<host>:8080/app/settings`. The page edits `config/cameras.yml`
 in place, so it is the everyday way to tune the system and to add cameras
 without a shell:
 

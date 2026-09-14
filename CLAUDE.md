@@ -56,7 +56,7 @@ The system uses a two-stage detection approach:
 - `ptz_tracker.py` - PTZ auto-tracking controller, pixel-to-PTZ coordinate mapping
 - `ptz_calibration.py` - Auto-calibration via ORB feature matching between wide/zoom frames
 - `onvif_client.py` - ONVIF camera control and discovery
-- `web.py` - aiohttp web UI and JSON API (the client-side app lives in `static/`)
+- `web.py` - aiohttp JSON API, MJPEG/snapshot streams, PTZ control and the shell of the client-side app (which lives in `static/`, served at `/app`)
 - `configstore.py` - the settings editor's transaction on `config/cameras.yml`:
   read + validate, deep-merge the managed keys, back up, atomic write, apply
   live-safe fields to the running process, diff file vs. runtime for the
@@ -141,8 +141,10 @@ backed by `configstore.py`). Rules that keep it safe:
   never logged or returned; `describe()` lists the variables under
   `secrets.variables` with who uses them and whether the process reads them
   live (Pushover) or at startup (ONVIF).
-- The legacy `/settings` page still uses `/api/settings`; that path is
-  unchanged and slated for removal at cutover.
+- The server-rendered pages are gone: `/`, `/live`, `/recordings`,
+  `/recording/<path>`, `/monitor` and `/settings` redirect into the app
+  (`/app/...`), query string intact, so old bookmarks and alert links
+  still land on the right screen. `/api/settings` went with them.
 
 PTZ calibration parameters in cameras.yml:
 ```yaml

@@ -997,37 +997,6 @@ function openShortcuts() {
   });
 }
 
-/* --------------------------------------------------------------------------
-   PLACEHOLDER VIEWS
-   Live, Monitor, Settings and Clip detail are written against this core in
-   the phases that follow. Until then the tab lands somewhere honest rather
-   than on a blank page.
-   ------------------------------------------------------------------------ */
-function placeholderView(title, iconName) {
-  return {
-    mount: function (root, ctx) {
-      store.setChrome({
-        title: title, subtitle: '', actions: [], toolbar: null,
-        rail: null, norail: title === 'Live' || title === 'Settings',
-        selbar: null, mods: title === 'Live' ? ['no-blur'] : []
-      });
-      root.appendChild(h('h1.visually-hidden', { tabIndex: -1, text: title }));
-      root.appendChild(h('div.empty',
-        h('div.empty__art', icon(iconName, { size: 'lg' })),
-        h('h2.empty__title', { text: title + ' is not built yet' }),
-        h('p.empty__body',
-          'This surface arrives in a later phase of the rewrite. The old page is ' +
-          'still served and still works.'),
-        h('div.empty__actions',
-          h('a.btn.btn--primary', { href: ctx.path },
-            h('span.btn__label', 'Open the old ' + title + ' page')),
-          h('a.btn.btn--secondary', { href: router.href('/recordings') },
-            h('span.btn__label', 'Back to Recordings')))));
-    },
-    unmount: function () {}
-  };
-}
-
 function notFoundView() {
   return {
     mount: function (root, ctx) {

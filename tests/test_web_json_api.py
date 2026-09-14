@@ -23,9 +23,10 @@ from animaltracker.web import WebServer
 class FakeRequest:
     """Just enough of aiohttp's Request for these handlers."""
 
-    def __init__(self, query=None, match_info=None):
+    def __init__(self, query=None, match_info=None, query_string=""):
         self.query = query or {}
         self.match_info = match_info or {}
+        self.query_string = query_string
 
 
 def call(handler, **kw):
@@ -457,3 +458,45 @@ def test_identity_covers_a_configured_camera_that_is_not_running(tmp_path):
 
     _, body = call(srv.handle_recordings_api, query={"location": "Otteson"})
     assert {c["camera"] for c in body["clips"]} == {"cam3"}
+
+
+# --------------------------------------------------------------------------
+# The old page paths redirect into the app
+# --------------------------------------------------------------------------
+
+def redirect_of(handler, **kw):
+    """Where a handler that answers with a redirect sends the request."""
+    from aiohttp import web
+    with pytest.raises(web.HTTPFound) as info:
+        asyncio.run(handler(FakeRequest(**kw)))
+    return info.value.headers["Location"]
+
+
+def test_root_lands_in_the_archive(server):
+    assert redirect_of(server.handle_root_redirect) == "/app/recordings"
+
+
+@pytest.mark.parametrize("path,target", [
+    ("/live", "/app/live"),
+    ("/recordings", "/app/recordings"),
+    ("/monitor", "/app/monitor"),
+    ("/settings", "/app/settings"),
+])
+def test_old_page_paths_redirect_into_the_app(server, path, target):
+    handler = server._redirect_to(target)
+    assert redirect_of(handler) == target
+
+
+def test_redirect_keeps_the_bookmarked_query(server):
+    """The old recordings page's ?cameras=&species=&date= were the only thing
+    anyone bookmarked, and the app reads the same parameters."""
+    handler = server._redirect_to("/app/recordings")
+    assert redirect_of(handler, query_string="cameras=cam1&view=calendar") == \
+        "/app/recordings?cameras=cam1&view=calendar"
+
+
+def test_old_clip_page_redirects_to_the_detail_view(server):
+    """match_info is decoded, so a space in the filename is re-encoded."""
+    where = redirect_of(server.handle_recording_redirect,
+                        match_info={"path": "cam1/2026/09/07/1789000000_deer x.mp4"})
+    assert where == "/app/clips/cam1/2026/09/07/1789000000_deer%20x.mp4"

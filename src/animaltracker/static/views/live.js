@@ -2237,13 +2237,15 @@ export const view = {
     S.toolbar = h('div.row.row--between', { role: 'group', 'aria-label': 'Live controls' },
       h('span.overline.overline--strong', { text: 'Cameras' }),
       h('div.row', S.layoutBtn, S.streamsBtn));
-    root.appendChild(S.toolbar);
 
     S.wall = h('div.camwall');
     S.operator = h('div.stack', { role: 'group', 'aria-label': 'Operator controls' });
     S.strip = h('div.camstrip', { role: 'group', 'aria-label': 'Other cameras' });
     S.strip.hidden = true;
-    root.appendChild(S.wall);
+    /* A stack, as on Recordings: <main> is a plain block, so without one the
+       wall starts on the toolbar's bottom edge and Grid and Streams sit on the
+       operator column's readouts (or on the first card, on a phone). */
+    root.appendChild(h('div.stack', S.toolbar, S.wall));
 
     reg(delegate(S.strip, 'click', '.camstrip__item', function (ev, node) {
       var id = node.getAttribute('data-key');

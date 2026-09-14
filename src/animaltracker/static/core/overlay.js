@@ -294,8 +294,15 @@ export function sheet(opts) {
   var resolveResult;
   var result = new Promise(function (res) { resolveResult = res; });
 
+  /* A mobile-only sheet opened at desktop width would be hidden by the
+     stylesheet from its first frame while its scrim, scroll lock and inert
+     shell stayed: a gray page with nothing on it to dismiss. The desktop
+     surface is a dialog, and a caller reachable there should open one; one
+     that does not still gets a sheet the user can see and close. */
+  var mobileOnly = o.mobileOnly !== false &&
+    !(window.matchMedia && window.matchMedia(DESKTOP).matches);
   var host = h('div.sheet-host');
-  if (o.mobileOnly !== false) host.classList.add('sheet-host--mobile-only');
+  if (mobileOnly) host.classList.add('sheet-host--mobile-only');
 
   var el = h('div.sheet', {
     role: 'dialog',
@@ -387,7 +394,7 @@ export function sheet(opts) {
     else if (viewport.removeListener) viewport.removeListener(onViewport);
     viewport = null;
   }
-  if (o.mobileOnly !== false && window.matchMedia) {
+  if (mobileOnly && window.matchMedia) {
     viewport = window.matchMedia(DESKTOP);
     onViewport = function (ev) { if (ev.matches) finish(null); };
     if (viewport.addEventListener) viewport.addEventListener('change', onViewport);

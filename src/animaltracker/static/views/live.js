@@ -359,6 +359,7 @@ function newState() {
     fallbackEl: null, fallbackKind: null, fallbackBody: null,
     liveRegion: null,
     layoutBtn: null, streamsBtn: null,
+    streams: null,         /* the open Streams panel: { handle, list, empty } */
     mq: null, mqOff: null,
     camsError: null,
     unreachable: false,    /* the camera poll got no answer at all (timeout or network) */
@@ -1383,6 +1384,18 @@ function reconnectNow(card) {
   attachStream(card);
 }
 
+/* The pill and the word for every state, read by the cards and by the
+   Streams panel alike, so the two can never name one camera's state
+   differently. */
+var STATE_PILL = {
+  live: { kind: 'live', word: 'Live' },
+  stale: { kind: 'stale', word: 'Stale' },
+  reconnecting: { kind: 'reconnecting', word: 'Reconnecting' },
+  connecting: { kind: 'unknown', word: 'Connecting' },
+  offline: { kind: 'offline', word: 'Offline' },
+  unknown: { kind: 'unknown', word: 'Unknown' }
+};
+
 /** The single source of truth for how a card looks. Cheap; called every tick. */
 function paintCard(card) {
   var cam = card.cam || {};
@@ -1408,18 +1421,9 @@ function paintCard(card) {
   toggleClass(card.el, 'cam--no-route', serverState === 'offline' && !card.attempt);
 
   var ageText = age === null ? null : shortAgo(age);
-  var word = state === 'live' ? 'Live'
-    : state === 'stale' ? 'Stale'
-      : state === 'reconnecting' ? 'Reconnecting'
-        : state === 'connecting' ? 'Connecting'
-          : 'Offline';
-  var pillKind = state === 'live' ? 'live'
-    : state === 'stale' ? 'stale'
-      : state === 'reconnecting' ? 'reconnecting'
-        : state === 'connecting' ? 'unknown'
-          : 'offline';
-  card.headStatus.set(pillKind, word, state === 'live' ? null : ageText);
-  card.mediaStatus.set(pillKind, word, null);
+  var pill = STATE_PILL[state];
+  card.headStatus.set(pill.kind, pill.word, state === 'live' ? null : ageText);
+  card.mediaStatus.set(pill.kind, pill.word, null);
 
   /* The on-media age pill — the thing that stops a frozen frame reading as
      live even when the operator only glances at the picture. */
@@ -1978,13 +1982,29 @@ function setPrimary(id) {
 }
 
 /* ========================================================================
-   Chrome, summary and the streams sheet
+   Chrome, summary and the Streams panel
    ===================================================================== */
+
+/**
+ * A camera's stream state as the summary and the Streams panel report it.
+ * A camera on a stage holds a socket, so the watchdog's card state is the
+ * answer. One parked in the desktop filmstrip holds none, and its card reads
+ * "connecting" for as long as it sits there, so the server's verdict is all
+ * there is, as the strip's own dot shows it.
+ */
+function streamState(card) {
+  if (cardWantsStream(card)) return card.state;
+  var cam = card.cam || {};
+  var age = num(cam.frame_age);
+  if (cam.state === 'offline' || (age !== null && age >= DEAD_AGE)) return 'offline';
+  if (cam.state === 'stale' || (age !== null && age >= STALE_AGE)) return 'stale';
+  return cam.state === 'live' ? 'live' : 'unknown';
+}
 
 function summarise() {
   var counts = { live: 0, stale: 0, offline: 0 };
   S.cards.forEach(function (card) {
-    var st = card.state;
+    var st = streamState(card);
     if (st === 'live') counts.live += 1;
     else if (st === 'stale') counts.stale += 1;
     else if (st === 'offline' || st === 'reconnecting') counts.offline += 1;
@@ -2015,44 +2035,94 @@ function renderSummary() {
   }
 }
 
-function openStreamsSheet() {
-  var body = h('div.stack');
-  sheet({
-    title: 'Streams',
-    snap: 'half',
-    content: function (host) {
-      host.appendChild(body);
-    }
-  });
-  var rows = S.cams;
-  rows.forEach(function (cam) {
-    var card = S.cards.get(cam.id);
-    if (!card) return;
-    var age = num(cam.frame_age);
-    var pill = makeStatusPill(false);
-    var word = card.state === 'live' ? 'Live'
-      : card.state === 'stale' ? 'Stale'
-        : card.state === 'reconnecting' ? 'Reconnecting' : 'Offline';
-    pill.set(card.state === 'live' ? 'live'
-      : card.state === 'stale' ? 'stale'
-        : card.state === 'reconnecting' ? 'reconnecting' : 'offline',
-      word, age === null ? null : shortAgo(age));
-    var btn = h('button.btn.btn--secondary.btn--sm', { type: 'button' },
-      icon('refresh', { size: 'sm', 'class': 'btn__icon' }),
-      h('span.btn__label', 'Reconnect'));
-    btn.addEventListener('click', function () { reconnectNow(card); });
-    body.appendChild(h('div.row.row--between',
-      h('div.stack.stack--tight',
-        h('span', { text: cam.name || cam.id }),
-        h('span.t-xs.t-3', {
-          text: (cam.location ? cam.location + ' · ' : '') +
-            (age === null ? 'no frame age reported' : 'last frame ' + shortAgo(age) + ' ago')
-        })),
-      h('div.row', pill.el, btn)));
-  });
-  if (!rows.length) {
-    body.appendChild(h('p.t-sm.t-3', { text: 'The server reported no cameras.' }));
+/**
+ * The Streams panel: every camera's feed on this page, and a way to reopen
+ * one. A bottom sheet is a phone surface (app.css hides it from 1024px up,
+ * where this button is still on the page), so the desktop gets the same rows
+ * in a dialog. The rows are repainted every tick while it is open, so a
+ * Reconnect pressed here shows its outcome here.
+ */
+function openStreams() {
+  if (S.streams) return;
+  var intro = 'The video each camera sends to this page. Reconnect reopens a ' +
+    'feed in this browser only; detection and recording carry on either way.';
+  var list = h('div.stack');
+  var empty = h('p.t-sm.t-3', { text: 'The server reported no cameras.' });
+
+  var handle;
+  if (S.mq && S.mq.matches) {
+    handle = dialog({
+      role: 'dialog',
+      title: 'Streams',
+      body: intro,
+      width: 560,
+      content: h('div.stack', { style: { marginTop: 'var(--s-4)' } }, list, empty),
+      actions: [{ label: 'Close', variant: 'secondary', value: null, focus: true }]
+    });
+  } else {
+    handle = sheet({
+      title: 'Streams',
+      snap: 'half',
+      content: h('div.stack', h('p.t-sm.t-3', { text: intro }), list, empty)
+    });
   }
+
+  S.streams = { handle: handle, list: list, empty: empty };
+  handle.result.then(function () {
+    if (S && S.streams && S.streams.handle === handle) S.streams = null;
+  });
+  paintStreams();
+}
+
+function paintStreams() {
+  var panel = S.streams;
+  if (!panel) return;
+  var rows = S.cams.filter(function (cam) { return S.cards.has(cam.id); });
+  keyedList(panel.list, rows, {
+    key: function (cam) { return cam.id; },
+    create: function (cam) { return buildStreamRow(cam.id); },
+    update: function (el, cam) { paintStreamRow(el, S.cards.get(cam.id)); }
+  });
+  panel.empty.hidden = rows.length > 0;
+}
+
+function buildStreamRow(id) {
+  var pill = makeStatusPill(false);
+  var nameEl = h('span');
+  var metaEl = h('span.t-xs.t-3');
+  var btn = h('button.btn.btn--secondary.btn--sm', { type: 'button' },
+    icon('refresh', { size: 'sm', 'class': 'btn__icon' }),
+    h('span.btn__label', 'Reconnect'));
+  btn.addEventListener('click', function () {
+    var card = S && S.cards.get(id);
+    if (!card) return;
+    reconnectNow(card);
+    paintStreams();
+  });
+  var el = h('div.row.row--between',
+    h('div.stack.stack--tight', nameEl, metaEl),
+    h('div.row', { style: { flex: 'none' } }, pill.el, btn));
+  el._pill = pill;
+  el._name = nameEl;
+  el._meta = metaEl;
+  el._btn = btn;
+  return el;
+}
+
+function paintStreamRow(el, card) {
+  var cam = card.cam || {};
+  var age = num(cam.frame_age);
+  var state = streamState(card);
+  var pill = STATE_PILL[state];
+  /* A filmstrip camera has no socket here, so Reconnect would do nothing.
+     The button keeps its space, so the pills stay in one column. */
+  var streamed = cardWantsStream(card);
+  el._pill.set(pill.kind, pill.word, null);
+  setText(el._name, cam.name || card.id);
+  setText(el._meta, (cam.location ? cam.location + ' · ' : '') +
+    (age === null ? 'no frame age reported' : 'last frame ' + shortAgo(age) + ' ago') +
+    (streamed ? '' : ' · snapshot in the filmstrip'));
+  el._btn.style.visibility = streamed ? '' : 'hidden';
 }
 
 /* ========================================================================
@@ -2112,6 +2182,7 @@ function tick() {
     }
   });
   renderSummary();
+  paintStreams();
 }
 
 /* ========================================================================
@@ -2140,7 +2211,7 @@ export const view = {
     S.streamsBtn = h('button.btn.btn--secondary.btn--sm', { type: 'button' },
       icon('live', { size: 'sm', 'class': 'btn__icon' }),
       h('span.btn__label', 'Streams'));
-    S.streamsBtn.addEventListener('click', openStreamsSheet);
+    S.streamsBtn.addEventListener('click', openStreams);
 
     /* The buttons live in the view, not in chrome.actions: .topbar is
        display:none from 1024px up, and Grid is a desktop-only affordance —
@@ -2257,6 +2328,8 @@ export const view = {
     stopJog();
     stopPolling();
     cancel(S.tickTimer);
+    /* The panel lives on <body>, so leaving the route does not remove it. */
+    if (S.streams) S.streams.handle.close(null);
 
     S.cards.forEach(function (card) {
       cancel(card.retryTimer);

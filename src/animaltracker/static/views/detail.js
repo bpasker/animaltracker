@@ -1221,62 +1221,95 @@ function openSettingsSheet(anchor) {
     if (base[f.key] !== undefined) draft[f.key] = base[f.key];
   }
 
-  var handle = sheet({
-    title: 'Analysis settings',
-    snap: 'full',
-    content: function (body) {
-      body.appendChild(h('p.t-sm', {
-        style: { margin: '0 0 var(--s-4)', color: 'var(--c-text-2)' },
-        text: 'These are the pipeline defaults this clip was processed with. ' +
-          'Changing them here does not touch cameras.yml — they are sent as ' +
-          'overrides for one reanalysis of this clip.'
-      }));
-      var form = h('div.stack');
-      for (var k = 0; k < SETTING_FIELDS.length; k++) {
-        (function (field) {
-          var value = draft[field.key];
-          if (field.type === 'switch') {
-            var state = h('span.switch-row__state', { text: value ? 'ON' : 'OFF' });
-            var row = h('button.switch-row', {
-              type: 'button', role: 'switch',
-              'aria-checked': value ? 'true' : 'false'
-            },
-              h('span.switch-row__text',
-                h('span.switch-row__title', { text: field.label }),
-                h('span.switch-row__hint', { text: field.hint })),
-              state,
-              h('span.switch', h('span.switch__knob')));
-            row.addEventListener('click', function () {
-              var next = row.getAttribute('aria-checked') !== 'true';
-              row.setAttribute('aria-checked', next ? 'true' : 'false');
-              state.textContent = next ? 'ON' : 'OFF';
-              draft[field.key] = next;
-            });
-            form.appendChild(row);
-            return;
-          }
-          var id = 'at-set-' + field.key;
-          var input = h('input.input.input--mono#' + id, {
-            type: 'number',
-            min: String(field.min), max: String(field.max), step: String(field.step),
-            value: value === undefined ? '' : String(value),
-            'aria-describedby': id + '-hint'
+  function buildForm(body) {
+    body.appendChild(h('p.t-sm', {
+      style: { margin: '0 0 var(--s-4)', color: 'var(--c-text-2)' },
+      text: 'These are the pipeline defaults this clip was processed with. ' +
+        'Changing them here does not touch cameras.yml — they are sent as ' +
+        'overrides for one reanalysis of this clip.'
+    }));
+    var form = h('div.stack');
+    for (var k = 0; k < SETTING_FIELDS.length; k++) {
+      (function (field) {
+        var value = draft[field.key];
+        if (field.type === 'switch') {
+          var state = h('span.switch-row__state', { text: value ? 'ON' : 'OFF' });
+          var row = h('button.switch-row', {
+            type: 'button', role: 'switch',
+            'aria-checked': value ? 'true' : 'false'
+          },
+            h('span.switch-row__text',
+              h('span.switch-row__title', { text: field.label }),
+              h('span.switch-row__hint', { text: field.hint })),
+            state,
+            h('span.switch', h('span.switch__knob')));
+          row.addEventListener('click', function () {
+            var next = row.getAttribute('aria-checked') !== 'true';
+            row.setAttribute('aria-checked', next ? 'true' : 'false');
+            state.textContent = next ? 'ON' : 'OFF';
+            draft[field.key] = next;
           });
-          input.addEventListener('input', function () {
-            var n = Number(input.value);
-            if (input.value === '' || !isFinite(n)) { delete draft[field.key]; return; }
-            draft[field.key] = n;
-          });
-          form.appendChild(h('div.field',
-            h('label.field__label', { 'for': id, text: field.label }),
-            input,
-            h('span.field__hint#' + id + '-hint', { text: field.hint })));
-        }(SETTING_FIELDS[k]));
-      }
-      body.appendChild(form);
-    },
-    onClose: function () { if (anchor && anchor.isConnected) anchor.focus(); }
-  });
+          form.appendChild(row);
+          return;
+        }
+        var id = 'at-set-' + field.key;
+        var input = h('input.input.input--mono#' + id, {
+          type: 'number',
+          min: String(field.min), max: String(field.max), step: String(field.step),
+          value: value === undefined ? '' : String(value),
+          'aria-describedby': id + '-hint'
+        });
+        input.addEventListener('input', function () {
+          var n = Number(input.value);
+          if (input.value === '' || !isFinite(n)) { delete draft[field.key]; return; }
+          draft[field.key] = n;
+        });
+        form.appendChild(h('div.field',
+          h('label.field__label', { 'for': id, text: field.label }),
+          input,
+          h('span.field__hint#' + id + '-hint', { text: field.hint })));
+      }(SETTING_FIELDS[k]));
+    }
+    body.appendChild(form);
+  }
+
+  function refocus() { if (anchor && anchor.isConnected) anchor.focus(); }
+
+  /* A bottom sheet is a phone surface (app.css hides it from 1024px up), and
+     this button is on the page at every width, so the desktop gets the same
+     form in a dialog. */
+  var handle;
+  if (S.mq && S.mq.matches) {
+    handle = dialog({
+      role: 'dialog',
+      title: 'Analysis settings',
+      width: 560,
+      content: buildForm,
+      actions: [
+        { label: 'Cancel', variant: 'secondary', value: null },
+        { label: 'Reanalyze with these', variant: 'primary', value: 'run', onSelect: function () {
+          startReanalyze(draft);
+        } }
+      ],
+      onClose: refocus
+    });
+  } else {
+    handle = sheet({
+      title: 'Analysis settings',
+      snap: 'full',
+      content: buildForm,
+      onClose: refocus
+    });
+    var foot = h('div.sheet__foot.sheet__foot--filter',
+      btn('Cancel', { variant: 'secondary', onClick: function () { handle.close(null); } }),
+      btn('Reanalyze with these', { variant: 'primary', icon: 'refresh', onClick: function () {
+        handle.close('run');
+        startReanalyze(draft);
+      } }));
+    foot.firstChild.classList.add('sheet__reset');
+    foot.lastChild.classList.add('sheet__apply');
+    handle.el.appendChild(foot);
+  }
 
   S.overlays.push(handle);
   handle.result.then(function () {
@@ -1284,16 +1317,6 @@ function openSettingsSheet(anchor) {
     var oi = S.overlays.indexOf(handle);
     if (oi >= 0) S.overlays.splice(oi, 1);
   });
-
-  var foot = h('div.sheet__foot.sheet__foot--filter',
-    btn('Cancel', { variant: 'secondary', onClick: function () { handle.close(null); } }),
-    btn('Reanalyze with these', { variant: 'primary', icon: 'refresh', onClick: function () {
-      handle.close('run');
-      startReanalyze(draft);
-    } }));
-  foot.firstChild.classList.add('sheet__reset');
-  foot.lastChild.classList.add('sheet__apply');
-  handle.el.appendChild(foot);
 }
 
 /* ------------------------------------------------------------- reanalyze */

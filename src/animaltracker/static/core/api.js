@@ -316,8 +316,9 @@ export var api = {
         Object.assign({ body: { presets: tokens } }, opts || {}));
     },
     gotoPreset: function (id, token, opts) {
+      /* The server reads `preset_token`; this sent `token`, so every recall was a 400. */
       return request('POST', '/ptz/' + encodeURIComponent(id) + '/goto_preset',
-        Object.assign({ body: { token: token } }, opts || {}));
+        Object.assign({ body: { preset_token: token } }, opts || {}));
     },
     savePreset: function (id, name, opts) {
       return request('POST', '/ptz/' + encodeURIComponent(id) + '/save_preset',

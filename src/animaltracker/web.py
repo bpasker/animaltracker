@@ -850,7 +850,11 @@ class WebServer:
         
         try:
             data = await request.json()
-            preset_token = data.get('preset_token')
+            # ``token`` is what the app sent from the day it replaced the
+            # server-rendered page (20e3343), which had sent ``preset_token``:
+            # every recall answered 400. The app sends ``preset_token`` now;
+            # both are read, so a tab still running the old script works too.
+            preset_token = data.get('preset_token') or data.get('token')
             
             if not preset_token:
                 return web.Response(status=400, text="Missing preset_token")

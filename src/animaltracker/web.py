@@ -2187,6 +2187,44 @@ class WebServer:
             'results': results
         })
 
+    def _postprocess_detector_for(self, clip_path: Path):
+        """The detector a reanalysis of ``clip_path`` runs on. Executor threads only.
+
+        The pipeline's own cached post-processing detector: the clip's camera
+        worker's, or any worker's for a retired camera, as the recovery sweep
+        does. A reanalysis used to build a SpeciesNet of its own, on the
+        event loop, for every request. The load froze every camera, stream
+        and request in the process for as long as it took, and each one put
+        another model next to the pipeline's on a GPU that has no room to
+        spare, which is how a run of reanalyses ends in the CUDA
+        out-of-memory errors that fail live clips.
+
+        Only a server with no pipeline behind it (the dev harness, tests)
+        builds one from the configuration; the last resort is a worker's
+        real-time detector, as before.
+        """
+        camera_id = None
+        try:
+            camera_id = clip_path.relative_to(self.storage_root / 'clips').parts[0]
+        except (ValueError, IndexError):
+            pass
+        worker = self.workers.get(camera_id) if camera_id else None
+        if worker is None:
+            worker = next(iter(self.workers.values()), None)
+
+        cached = getattr(worker, '_get_postprocess_detector', None)
+        if callable(cached):
+            return cached()
+
+        detector_cfg = self.runtime.general.detector if self.runtime else None
+        if detector_cfg is not None:
+            from .detector import create_postprocess_detector
+            return create_postprocess_detector(detector_cfg)
+        if worker is not None and getattr(worker, 'detector', None) is not None:
+            LOGGER.warning("No detector config, falling back to worker detector: %s", worker.detector.backend_name)
+            return worker.detector
+        raise RuntimeError("No detector available for reanalysis")
+
     async def handle_reprocess(self, request):
         """Reprocess a clip to improve species classification.
         
@@ -2225,6 +2263,21 @@ class WebServer:
         if not await loop.run_in_executor(None, full_path.is_file):
             return web.Response(status=404, text="Clip not found")
         
+        # Settings from config plus the request's overrides, by the same
+        # mapping the live path and the recovery sweep use. Built before the
+        # clip is claimed: nothing below this point may fail without
+        # releasing the claim.
+        if settings_override is None:
+            settings_override = {}
+        if not isinstance(settings_override, dict):
+            return web.Response(status=400, text="'settings' must be an object")
+        from .postprocess import build_processing_settings
+        clip_cfg = self.runtime.general.clip if self.runtime else None
+        try:
+            settings = build_processing_settings(clip_cfg, settings_override)
+        except Exception as e:  # noqa: BLE001 - whatever a bad value raises is a bad request
+            return web.Response(status=400, text=f"Invalid settings: {e}")
+
         # Prevent duplicate processing - check if already in progress, here
         # or in the pipeline (a live event or the recovery sweep).
         job_key = clip_path
@@ -2244,44 +2297,29 @@ class WebServer:
                 'success': False,
                 'error': "The pipeline is already analysing this clip; its result will appear shortly"
             }, status=409)  # Conflict
-        
-        # Create postprocess detector (SpeciesNet for accurate species ID)
-        # This uses the split-model architecture: MegaDetector for real-time, SpeciesNet for post-processing
-        from .detector import create_postprocess_detector
-        detector_cfg = self.runtime.general.detector if self.runtime else None
-        if detector_cfg:
-            detector = create_postprocess_detector(detector_cfg)
-            LOGGER.info("Reprocess using %s detector (postprocess_backend)", detector.backend_name)
-        else:
-            # Fallback to worker's detector if no config available
-            if not self.workers:
-                if registry is not None:
-                    registry.end(full_path)
-                return web.Response(status=500, text="No workers available")
-            detector = next(iter(self.workers.values())).detector
-            LOGGER.warning("No detector config, falling back to worker detector: %s", detector.backend_name)
-        
-        # Track this reprocessing job
+
+        # From here to the ``finally`` the clip is claimed. The claim used to
+        # be taken before the detector was built and the settings parsed,
+        # outside the try: a detector that would not load (CUDA out of
+        # memory, missing Kaggle credentials) or a ``settings`` that was not
+        # an object left the clip "Analyzing..." until the next restart, every
+        # further reanalysis answered 409 and the recovery sweep skipped it.
         self.reprocessing_jobs[job_key] = {
             'started': datetime.now(tz=CENTRAL_TZ).isoformat(),
             'clip_name': full_path.stem,
             'camera': full_path.parent.name,
         }
-        
-        # Run reprocessing in thread pool
-        loop = asyncio.get_running_loop()
-        
-        # Settings from config plus the request's overrides, by the same
-        # mapping the live path and the recovery sweep use.
-        from .postprocess import build_processing_settings
-        clip_cfg = self.runtime.general.clip if self.runtime else None
-        settings = build_processing_settings(clip_cfg, settings_override)
-        
+
         LOGGER.info("Reprocess settings: spatial_merge_iou=%.2f, spatial_merge_enabled=%s, tracking=%s",
                    settings.spatial_merge_iou, settings.spatial_merge_enabled, settings.tracking_enabled)
-        
+
         def do_reprocess():
             from .postprocess import ClipPostProcessor
+            # On this executor thread, never on the event loop: the first
+            # use after a restart loads SpeciesNet, which takes long enough
+            # to stall every camera, stream and PTZ dead-man behind it.
+            detector = self._postprocess_detector_for(full_path)
+            LOGGER.info("Reprocess using %s detector", detector.backend_name)
             processor = ClipPostProcessor(
                 detector=detector,
                 storage_root=self.storage_root,
@@ -2292,9 +2330,12 @@ class WebServer:
                 update_filename=True,
                 regenerate_thumbnails=True,
             )
-        
+
         try:
             result = await loop.run_in_executor(None, do_reprocess)
+        except Exception as e:  # noqa: BLE001 - reported to the page, not left as a bare 500
+            LOGGER.error("Reprocess of %s failed: %s", clip_path, e, exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
         finally:
             # Remove from active jobs
             self.reprocessing_jobs.pop(job_key, None)

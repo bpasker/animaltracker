@@ -93,6 +93,11 @@ The system uses a two-stage detection approach:
   `_confined_clip_path`, which refuses anything that leaves `clips/` (an
   absolute path, a climbing `..`, a symlink out); never join a request path
   onto the clips directory directly or test it for the substring `..`.
+  A reanalysis (`POST /recordings/reprocess`) runs on the pipeline's cached
+  post-processing detector (`_postprocess_detector_for`), fetched on the
+  executor thread; never build a detector in a handler, the model load
+  stalls every camera. It claims the clip in the analysis registry only once
+  nothing before the `try` can fail.
 - `configstore.py` - the settings editor's transaction on `config/cameras.yml`:
   read + validate, deep-merge the managed keys, back up, atomic write, apply
   live-safe fields to the running process, diff file vs. runtime for the

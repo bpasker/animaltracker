@@ -64,6 +64,39 @@ def sidecar_path(clip_path: Path) -> Path:
     return clip_path.with_name(clip_path.stem + SIDECAR_SUFFIX)
 
 
+# The pipeline also parks an event's PTZ decisions in the clip's sidecar
+# (pipeline.py, step 5.5). When the analysis failed, those are all the file
+# holds: ``{"clip": ..., "ptz_decisions": [...]}``. An analysis sidecar opens
+# with its timestamp and settings block, and decisions merged into one are
+# appended at the very end, so the first few hundred bytes tell the two apart
+# without parsing a file that can run to megabytes.
+_SIDECAR_HEAD_BYTES = 512
+
+
+def has_analysis_sidecar(clip_path: Path) -> bool:
+    """True when the clip's sidecar records a finished analysis.
+
+    "There is a sidecar" used to be the test. A failed analysis on a PTZ
+    camera still left one, holding nothing but the PTZ decisions, so the
+    sweep took the clip for finished and it stayed ``<epoch>_animal.mp4``
+    with a "No frame" card for good. Opened by exact path, not found in a
+    listing: on the NFS archive a listing can be stale while the file opens
+    fine. A sidecar that exists but cannot be read counts as an analysis;
+    when in doubt the clip is left alone.
+    """
+    try:
+        with open(sidecar_path(clip_path), "rb") as fh:
+            head = fh.read(_SIDECAR_HEAD_BYTES)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    decisions_at = head.find(b'"ptz_decisions"')
+    if decisions_at < 0:
+        return True
+    return any(head.find(key, 0, decisions_at) >= 0 for key in (b'"timestamp"', b'"settings"'))
+
+
 def is_unclassified_clip(clip_path: Path) -> bool:
     """True when the clip still carries the real-time detector's generic label.
 
@@ -88,10 +121,10 @@ def find_unfinished_clips(
 ) -> List[Path]:
     """Clips under ``clips_dir/<camera>/`` whose post-processing never finished.
 
-    A finished job always writes the sidecar, whether or not it renamed the
-    clip, so "unclassified name and no sidecar" is exactly "never finished".
-    The sidecar is checked by exact path, not from a listing: on the NFS
-    archive a directory listing can be stale while the file opens fine.
+    A finished job always writes its sidecar, whether or not it renamed the
+    clip, so "unclassified name and no analysis sidecar" is exactly "never
+    finished" (``has_analysis_sidecar``: a sidecar holding only PTZ decisions
+    is what a failed analysis leaves behind, and does not count).
     Manual clips in the root of ``clips_dir`` are not post-processed and are
     skipped. Newest first, so the clip someone is waiting for comes first.
     """
@@ -111,7 +144,7 @@ def find_unfinished_clips(
                 continue
             if now - mtime < min_age_s:
                 continue
-            if sidecar_path(clip).exists():
+            if has_analysis_sidecar(clip):
                 continue
             found.append((mtime, clip))
     found.sort(key=lambda item: item[0], reverse=True)
@@ -342,6 +375,7 @@ __all__ = [
     "ClipAnalysisRegistry",
     "RecoverySweeper",
     "find_unfinished_clips",
+    "has_analysis_sidecar",
     "is_unclassified_clip",
     "sidecar_path",
 ]

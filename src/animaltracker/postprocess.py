@@ -357,6 +357,9 @@ class PostProcessResult:
     tracking_summary: Optional[Dict] = None  # Track consolidation info
     settings_used: Optional[ProcessingSettings] = None  # Settings that produced this result
     tracks_detected: int = 0  # Number of unique animals/tracks
+    # Sampled frames on which the detector raised. A result with any of these
+    # is no proof that the clip is empty: the caller must not delete on it.
+    inference_errors: int = 0
     success: bool = True
     error: Optional[str] = None
 
@@ -493,6 +496,46 @@ class ClipPostProcessor:
             
         finally:
             cap.release()
+
+        # A frame the detector raised on says nothing about what was in it.
+        # When that is most of the clip the analysis has not happened: report
+        # it as failed and touch nothing, so the clip keeps its name and its
+        # old key frames, no sidecar claims it is finished, and the recovery
+        # sweep tries it again. This used to come back as a successful "no
+        # animal", which the live path acts on by deleting the clip: choosing
+        # YOLO as the post-processing detector did it to every event, and a
+        # CUDA out-of-memory error did it to whichever clip it hit.
+        inference_errors = int(video_metadata.get("inference_errors", 0) or 0)
+        frames_inferred = int(video_metadata.get("frames_inferred", 0) or 0)
+        if inference_errors and inference_errors * 2 >= frames_inferred:
+            error = (
+                f"the detector failed on {inference_errors} of {frames_inferred} sampled frames"
+                f" ({video_metadata.get('first_inference_error', 'unknown error')})"
+            )
+            LOGGER.error("Post-processing of %s failed: %s", clip_path.name, error)
+            return PostProcessResult(
+                original_path=clip_path,
+                new_path=None,
+                original_species=original_species,
+                new_species=original_species,
+                confidence=0.0,
+                species_results={},
+                thumbnails_saved=[],
+                frames_analyzed=frames_inferred,
+                total_frames=total_frames,
+                processing_log=processing_log,
+                settings_used=self.settings,
+                inference_errors=inference_errors,
+                success=False,
+                error=error,
+            )
+        if inference_errors:
+            LOGGER.warning(
+                "Post-processing of %s: the detector failed on %d of %d sampled frames (%s); "
+                "the result stands on the rest",
+                clip_path.name, inference_errors, frames_inferred,
+                video_metadata.get("first_inference_error", "unknown error"),
+            )
         
         # Count how many frames had no animal detected (blank frames)
         blank_frame_count = sum(1 for entry in processing_log 
@@ -509,6 +552,12 @@ class ClipPostProcessor:
                 raw_detection_count, filtered_count, len(species_results)
             )
         
+        # PTZ decisions the pipeline parked in a sidecar of this clip (a
+        # failed first analysis leaves nothing else there; a reanalysis finds
+        # them at the end of the old log). Read before any rename: they are
+        # under the old name.
+        carried_ptz_decisions = self._read_ptz_decisions(clip_path)
+
         # Determine best species classification
         new_species, confidence = self._select_best_species(species_results)
         
@@ -545,7 +594,17 @@ class ClipPostProcessor:
         self._save_processing_log(
             working_path, processing_log, tracking_summary, video_metadata,
             thumbnails=thumbnails_saved if regenerate_thumbnails else None,
+            ptz_decisions=carried_ptz_decisions,
         )
+        # The clip was renamed: the log under its old name describes a file
+        # that no longer exists and everything in it has been carried over.
+        old_log = clip_path.with_suffix('.log.json')
+        new_log = working_path.with_suffix('.log.json')
+        if working_path != clip_path and new_log.exists():
+            try:
+                old_log.unlink(missing_ok=True)
+            except OSError as e:
+                LOGGER.warning("Failed to remove superseded processing log %s: %s", old_log, e)
         _drop_directory_cache(working_path.parent)
         
         # Count unique tracks (animals) detected
@@ -577,9 +636,24 @@ class ClipPostProcessor:
             tracking_summary=tracking_summary,
             settings_used=self.settings,
             tracks_detected=tracks_detected,
+            inference_errors=inference_errors,
             success=True,
         )
     
+    @staticmethod
+    def _read_ptz_decisions(clip_path: Path) -> Optional[list]:
+        """The PTZ decisions recorded in the clip's current sidecar, if any."""
+        import json
+
+        log_path = clip_path.with_suffix('.log.json')
+        try:
+            with open(log_path, 'r') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return None
+        decisions = data.get('ptz_decisions') if isinstance(data, dict) else None
+        return decisions if isinstance(decisions, list) and decisions else None
+
     def _save_processing_log(
         self,
         clip_path: Path,
@@ -587,12 +661,16 @@ class ClipPostProcessor:
         tracking_summary: Optional[Dict],
         video_metadata: Optional[Dict] = None,
         thumbnails: Optional[List[Path]] = None,
+        ptz_decisions: Optional[list] = None,
     ) -> None:
         """Save processing log as JSON file alongside clip.
 
         ``thumbnails`` are the files written for this clip in this run; their
         names go into the log's ``thumbnails`` list. ``None`` (thumbnails not
         regenerated) leaves the key out so a stale list is never recorded.
+        ``ptz_decisions`` are the event's PTZ decisions from an earlier
+        sidecar; they go last, where the pipeline appends them, so writing
+        the log again does not lose them.
         """
         import json
         from dataclasses import asdict
@@ -638,6 +716,8 @@ class ClipPostProcessor:
             if thumbnails is not None:
                 log_data["thumbnails"] = [{"file": Path(p).name} for p in thumbnails]
             log_data["log_entries"] = [asdict(entry) for entry in processing_log]
+            if ptz_decisions:
+                log_data["ptz_decisions"] = ptz_decisions
             
             def _do_write():
                 with open(log_path, 'w') as f:
@@ -716,6 +796,9 @@ class ClipPostProcessor:
         filtered_count = 0
         processing_log: List[ProcessingLogEntry] = []
         non_animal_boxes = NonAnimalBoxes()  # person/vehicle boxes, for the shadow test
+        frames_inferred = 0   # sampled frames handed to the detector
+        inference_errors = 0  # ...on which it raised
+        first_error: Optional[str] = None
         
         while True:
             ret, frame = cap.read()
@@ -724,6 +807,7 @@ class ClipPostProcessor:
             
             # Only process every Nth frame (using smart sample rate)
             if frame_idx % actual_sample_rate == 0:
+                frames_inferred += 1
                 try:
                     # Request filtered detections to log them
                     infer_result = self.detector.infer(
@@ -786,7 +870,14 @@ class ClipPostProcessor:
                     processing_log.extend(filter_log)
                     
                 except Exception as e:
-                    LOGGER.warning("Detection failed on frame %d: %s", frame_idx, e)
+                    # Counted, not just logged: a frame the detector could not
+                    # judge is not a frame without an animal (see process_clip).
+                    inference_errors += 1
+                    if first_error is None:
+                        first_error = f"{type(e).__name__}: {e}"
+                        LOGGER.warning("Detection failed on frame %d: %s", frame_idx, e, exc_info=True)
+                    else:
+                        LOGGER.warning("Detection failed on frame %d: %s", frame_idx, e)
                     processing_log.append(ProcessingLogEntry(
                         frame_idx=frame_idx,
                         event="error",
@@ -796,6 +887,11 @@ class ClipPostProcessor:
                     ))
             
             frame_idx += 1
+
+        video_metadata["frames_inferred"] = frames_inferred
+        video_metadata["inference_errors"] = inference_errors
+        if first_error is not None:
+            video_metadata["first_inference_error"] = first_error
         
         # Build tracking summary
         tracking_summary = None

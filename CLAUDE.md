@@ -58,8 +58,14 @@ The system uses a two-stage detection approach:
   flight: live event, reanalysis, recovery) and `RecoverySweeper`, a daemon
   thread that finishes the post-processing a restart interrupted: shortly
   after startup and every 30 min it finds `<epoch>_animal.mp4` clips with
-  no `.log.json` and runs them, newest first, one at a time, only while no
-  live event needs the post-processor; no alert, no false-positive delete.
+  no analysis sidecar and runs them, newest first, one at a time, only while
+  no live event needs the post-processor; no alert, no false-positive delete.
+  "No analysis sidecar" is `has_analysis_sidecar`: no `.log.json`, or one
+  holding only the PTZ decisions the pipeline parks there, which is what a
+  failed analysis leaves on a PTZ camera. A job whose detector raised on half
+  or more of the sampled frames returns `success=False` and writes nothing,
+  so it lands here; a result with any `inference_errors` is never grounds
+  for the false-positive delete.
   The API reports `analysis: running|queued|unfinished` for such clips and
   the archive shows "Analyzing…" / "Awaiting analysis" / "Not analyzed"
   instead of "No frame". `clip.recover_unfinished_clips` switches it off.

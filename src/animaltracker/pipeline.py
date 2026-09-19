@@ -1910,7 +1910,15 @@ class StreamWorker:
                                 and result.frames_analyzed >= min_reptile_detection_frames
                             )
                             no_animal_found = no_species or too_few_detections or too_few_reptile_detections
-                            if delete_if_no_animal and no_animal_found:
+                            if delete_if_no_animal and no_animal_found and result.inference_errors:
+                                # The detector raised on some sampled frames,
+                                # so "nothing found" is not "nothing there".
+                                LOGGER.warning(
+                                    "Keeping clip %s for %s: post-processing found no animal, but the detector "
+                                    "failed on %d of %d sampled frames",
+                                    clip_path.name, camera_id, result.inference_errors, result.frames_analyzed,
+                                )
+                            elif delete_if_no_animal and no_animal_found:
                                 LOGGER.info(
                                     "FALSE POSITIVE CLEANUP: Post-processing found no real animal in clip for %s "
                                     "(species_results=%d, tracks=%d, person_shadow_tracks=%d, species=%s, detection_frames=%d/%d, min_required=%d, reptile_min_required=%d, raw_detections=%d) - deleting clip and skipping notification",
@@ -1975,6 +1983,11 @@ class StreamWorker:
                                         len(cleaned), camera_id,
                                     )
                                 return  # Skip notification - no animal detected
+                        else:
+                            # The clip is kept under its real-time label and
+                            # alerts as that; with no sidecar written, the
+                            # recovery sweep gives the analysis another go.
+                            LOGGER.error("Post-processing of %s failed: %s", clip_path.name, result.error)
                     except Exception as e:
                         LOGGER.error("Unified post-processing failed: %s", e, exc_info=True)
                     finally:

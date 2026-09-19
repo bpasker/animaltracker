@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
 from .species_names import get_common_name, get_species_icon
-from .analysis_recovery import is_unclassified_clip, sidecar_path
+from .analysis_recovery import has_analysis_sidecar, is_unclassified_clip
 from . import configstore
 
 # Server's timezone (configurable or auto-detected)
@@ -1146,8 +1146,9 @@ class WebServer:
                 # Still named by the real-time detector and without the
                 # post-processor's sidecar: its analysis never finished.
                 # Checked by exact path (see _get_thumbnails_for_clip on
-                # stale NFS listings).
-                unfinished = is_unclassified_clip(clip_file) and not sidecar_path(clip_file).exists()
+                # stale NFS listings); a sidecar holding only PTZ decisions
+                # is what a failed analysis leaves and does not count.
+                unfinished = is_unclassified_clip(clip_file) and not has_analysis_sidecar(clip_file)
 
                 when = clip_start_time(clip_file, stat)
                 clips.append({
@@ -2466,7 +2467,7 @@ class WebServer:
             'thumbnails': thumbnails,
             'fps': video_fps,
             'global_settings': global_settings,
-            'unfinished': is_unclassified_clip(clip_path) and not sidecar_path(clip_path).exists(),
+            'unfinished': is_unclassified_clip(clip_path) and not has_analysis_sidecar(clip_path),
         }
 
     def _renamed_clip(self, rel_path: str) -> 'str | None':

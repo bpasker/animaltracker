@@ -77,6 +77,24 @@ def test_scan_marks_a_clip_whose_analysis_never_finished(tmp_path, base):
     assert by_name[f"{int(base + 20)}_mammalia_carnivora_canidae.mp4"]["unfinished"] is False
 
 
+def test_a_sidecar_with_only_ptz_decisions_is_still_unfinished(tmp_path, base):
+    """What a failed analysis leaves on a PTZ camera: the pipeline parked the
+    event's PTZ decisions in the sidecar and there was no analysis to add them
+    to. It used to read as analysed, a "No frame" card nothing would fix."""
+    server = make_server(tmp_path, recovery=FakeRecovery())
+    clips = tmp_path / "clips"
+    clip = make_clip(clips, "cam2", base, "animal")
+    clip.with_name(f"{int(base)}_animal.log.json").write_text(json.dumps(
+        {"clip": clip.name, "ptz_decisions": [{"timestamp": base + 1, "event": "move"}]}, indent=2))
+
+    (scanned,) = server._scan_recordings()
+    assert scanned["unfinished"] is True
+
+    rel = str(clip.relative_to(clips))
+    status, detail = call(server.handle_clip_api, match_info={"path": rel})
+    assert status == 200 and detail["analysis"] == "queued"
+
+
 def test_manual_clips_are_never_unfinished(tmp_path):
     server = make_server(tmp_path)
     clips = tmp_path / "clips"

@@ -118,8 +118,21 @@ class BaseDetector(ABC):
         return lock
 
     @abstractmethod
-    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5) -> List[Detection]:
-        """Run inference on a single frame."""
+    def infer(
+        self,
+        frame: np.ndarray,
+        conf_threshold: float = 0.5,
+        generic_confidence: Optional[float] = None,
+        return_filtered: bool = False,
+    ):
+        """Run inference on a single frame.
+
+        Every backend takes all four arguments, because the post-processor
+        passes them to whichever backend the configuration names. With
+        ``return_filtered`` the result is ``(detections, filtered)``, where
+        ``filtered`` lists what the backend itself rejected, for the clip's
+        log; a backend that rejects nothing returns an empty list.
+        """
         pass
     
     @property
@@ -185,13 +198,24 @@ class YoloDetector(BaseDetector):
     def backend_name(self) -> str:
         return "yolo"
 
-    def infer(self, frame: np.ndarray, conf_threshold: float = 0.5, generic_confidence: float = None) -> List[Detection]:
+    def infer(
+        self,
+        frame: np.ndarray,
+        conf_threshold: float = 0.5,
+        generic_confidence: float = None,
+        return_filtered: bool = False,
+    ):
         """Run YOLO inference on a frame.
         
         Args:
             frame: Input image as numpy array
             conf_threshold: Minimum confidence threshold
             generic_confidence: Ignored for YOLO (only used by SpeciesNet)
+            return_filtered: Also return the detections the backend rejected.
+                YOLO rejects nothing itself, so that list is always empty.
+                The post-processor passes this to every backend; without the
+                parameter each sampled frame raised TypeError, the clip came
+                back as "no animal" and the live path deleted it.
             
         Returns:
             List of Detection objects (animal classes only if animal_only=True)
@@ -220,6 +244,8 @@ class YoloDetector(BaseDetector):
                     bbox=bbox
                 ))
         
+        if return_filtered:
+            return detections, []
         return detections
 
 

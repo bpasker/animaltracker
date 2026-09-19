@@ -713,7 +713,6 @@ class ClipPostProcessor:
         frame_idx = 0
         raw_detection_count = 0
         filtered_count = 0
-        all_frames_data: List[Tuple[int, any, List[Detection]]] = []  # For tracking
         processing_log: List[ProcessingLogEntry] = []
         non_animal_boxes = NonAnimalBoxes()  # person/vehicle boxes, for the shadow test
         
@@ -763,8 +762,9 @@ class ClipPostProcessor:
                         # Without this, blank frames don't advance the counter,
                         # corrupting track association for subsequent detections.
                         tracked = tracker.update(detections, frame, frame_idx=frame_idx)
-                        if detections:
-                            all_frames_data.append((frame_idx, frame.copy(), detections))
+                        # No copy of the frame is kept here: TrackInfo already
+                        # holds each track's best frames, and a list of every
+                        # sampled frame grew to tens of GB on a long clip.
                         
                         # Log tracking assignments
                         for track_id, det in tracked.items():
@@ -820,7 +820,7 @@ class ClipPostProcessor:
             processing_log.extend(self._merge_tracks(tracker))
 
             tracked_results, track_log, tracking_summary = self._build_tracked_species_results_with_log(
-                tracker, all_frames_data
+                tracker
             )
             processing_log.extend(track_log)
             
@@ -957,7 +957,6 @@ class ClipPostProcessor:
     def _build_tracked_species_results(
         self,
         tracker: ObjectTracker,
-        frames_data: List[Tuple[int, any, List[Detection]]],
     ) -> Dict[str, SpeciesResult]:
         """Build species results from tracked objects.
         
@@ -1019,7 +1018,6 @@ class ClipPostProcessor:
     def _build_tracked_species_results_with_log(
         self,
         tracker: ObjectTracker,
-        frames_data: List[Tuple[int, any, List[Detection]]],
     ) -> Tuple[Dict[str, SpeciesResult], List[ProcessingLogEntry], Dict]:
         """Build species results from tracked objects with detailed logging."""
         species_results: Dict[str, SpeciesResult] = {}

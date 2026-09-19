@@ -3,6 +3,7 @@ import hashlib
 import logging
 import logging.handlers
 import cv2
+import glob
 import json
 import re
 import numpy as np
@@ -2147,12 +2148,47 @@ class WebServer:
             return False, "Invalid path"
         try:
             if file_path.exists() and file_path.is_file():
+                companions = self._clip_companion_files(file_path)
                 file_path.unlink()
+                self._remove_companion_files(companions)
+                # Again, now that the file is gone: a scan that was already
+                # walking the archive may have cached it in the meantime.
+                self._invalidate_scan_cache()
                 return True, f"Deleted {rel_path}"
             else:
                 return False, "File not found"
         except Exception as e:
             return False, f"Error deleting file: {e}"
+
+    def _clip_companion_files(self, clip_path: Path) -> list:
+        """The key frames and processing log that belong to ``clip_path``.
+
+        Deleting a clip from the archive used to remove the video alone. The
+        archive lists videos only, so its key frames and its log stayed on
+        the NAS for good, where nothing shows them and nothing prunes them.
+        Thumbnails are taken from the log's own list as well as from a
+        listing: on the NFS archive a listing can be stale and hide files
+        that open fine by name (see ``_get_thumbnails_for_clip``). Collected
+        before the video goes, while the log can still be matched to it.
+        """
+        if clip_path.suffix.lower() != '.mp4':
+            return []
+        log_path = clip_path.with_suffix('.log.json')
+        names = set(self._sidecar_thumbnail_names(self._read_sidecar(clip_path), clip_path))
+        try:
+            pattern = f"{glob.escape(clip_path.stem)}_thumb*.jpg"
+            names.update(p.name for p in clip_path.parent.glob(pattern))
+        except OSError:
+            pass
+        return [clip_path.parent / name for name in sorted(names)] + [log_path]
+
+    @staticmethod
+    def _remove_companion_files(paths: list) -> None:
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                LOGGER.warning("Deleted the clip but could not remove %s: %s", path.name, e)
 
     async def handle_delete_recording(self, request):
         rel_path = request.query.get('path')

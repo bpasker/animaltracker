@@ -766,11 +766,13 @@ class StreamWorker:
                     if not cap.isOpened():
                         self._log_rtsp_open_failure()
                         self.stream_connected = False
+                        await self._close_event_left_open_offline()
                         await asyncio.sleep(5)
                         continue
                 else:
                     self._log_rtsp_open_failure()
                     self.stream_connected = False
+                    await self._close_event_left_open_offline()
                     await asyncio.sleep(5)
                     continue
 
@@ -895,7 +897,25 @@ class StreamWorker:
                 self.stream_connected = False
             
             if not stop_event.is_set():
+                await self._close_event_left_open_offline()
                 await asyncio.sleep(1)  # Brief pause before reconnect
+
+    async def _close_event_left_open_offline(self) -> None:
+        """Close an event the stream dropped out from under, once it has gone idle.
+
+        An event is closed from the frame path: by ``_process_frame`` when it
+        has been idle for ``post_seconds``, by the read loop when it exceeds
+        its maximum length. Neither runs without frames, so an event open
+        when the RTSP stream dropped stayed open for the whole outage: no
+        clip and no alert until the camera came back, however many hours
+        later, and then a clip that cut straight from the animal to whatever
+        was in front of the camera at reconnection. Called wherever the
+        worker finds itself without a stream. The usual idle rule applies, so
+        a stream that is back within ``post_seconds`` carries on with the
+        same event.
+        """
+        if self.event_state is not None:
+            await self._maybe_close_event(time.time())
 
     def _maybe_log_perf_stats(self) -> None:
         """Periodically log realtime processing latency / backpressure stats.

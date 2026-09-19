@@ -63,6 +63,14 @@ The system uses a two-stage detection approach:
   The API reports `analysis: running|queued|unfinished` for such clips and
   the archive shows "Analyzing…" / "Awaiting analysis" / "Not analyzed"
   instead of "No frame". `clip.recover_unfinished_clips` switches it off.
+- `species_names.py` - display names, and the one specificity scale:
+  `species_lineage` / `species_rank` read a label's taxonomy depth (0 animal,
+  1 class, 2 order, 3 family) and `pick_species_by_lineage` is the vote every
+  species choice goes through: a specific label beats its own generic
+  ancestors, labels that contradict each other are settled by their votes.
+  `TrackInfo`, `ObjectTracker` and the post-processor all rank through these;
+  never add a keyword list of families or orders, an unlisted family then
+  scores differently from a listed one at the same level.
 - `ptz_calibration.py` - Auto-calibration via ORB feature matching between wide/zoom frames
 - `onvif_client.py` - ONVIF camera control and discovery
 - `web.py` - aiohttp JSON API, MJPEG/snapshot streams, PTZ control and the shell of the client-side app (which lives in `static/`, served at `/app`)

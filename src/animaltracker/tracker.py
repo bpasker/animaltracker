@@ -20,6 +20,7 @@ except ImportError:
     SUPERVISION_AVAILABLE = False
 
 from .detector import Detection
+from .species_names import pick_species_by_lineage, species_lineage, species_rank
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,10 +85,14 @@ class TrackInfo:
     
     def get_best_species(self) -> Tuple[str, float, Optional[str]]:
         """Determine the best species based on accumulated classifications.
-        
-        Uses a hierarchy: specific species > bird/mammal > animal.
-        More specific classifications are preferred even at lower confidence.
-        
+
+        The votes are read as a walk down the taxonomy (see
+        ``species_names.pick_species_by_lineage``): a specific label beats its
+        own generic ancestors even on a handful of frames at lower confidence
+        (canidae > carnivorous mammal > mammal > animal), while labels that
+        contradict each other are settled by their votes. Ranking on
+        specificity alone let one misread frame rename a track of forty.
+
         Returns:
             (species, confidence, taxonomy) tuple
         """
@@ -118,30 +123,19 @@ class TrackInfo:
         candidates_str = [f"{s}({d['max_confidence']:.1%})" for s, d in species_data.items()]
         LOGGER.debug("Track %d candidates: %s", self.track_id, candidates_str)
         
-        # Find most specific candidates (highest specificity score)
-        max_specificity = max(d['specificity'] for d in species_data.values())
-        best_candidates = {
-            s: d for s, d in species_data.items() 
-            if d['specificity'] == max_specificity
-        }
-        
-        # Among equally-specific candidates, pick by count then confidence
-        best_species = max(
-            best_candidates.keys(),
-            key=lambda s: (
-                best_candidates[s]['count'],
-                best_candidates[s]['max_confidence']
-            )
-        )
-        
+        # Walk down the taxonomy by votes: count first, then confidence.
+        best_species = pick_species_by_lineage({
+            s: (d['count'], d['max_confidence']) for s, d in species_data.items()
+        })
+
         LOGGER.debug("Track %d selected '%s' (specificity=%d) from %d candidates: %s",
-                    self.track_id, best_species, max_specificity, len(species_data), 
-                    list(species_data.keys()))
-        
+                    self.track_id, best_species, species_data[best_species]['specificity'],
+                    len(species_data), list(species_data.keys()))
+
         return (
-            best_species, 
-            best_candidates[best_species]['max_confidence'],
-            best_candidates[best_species]['taxonomy']
+            best_species,
+            species_data[best_species]['max_confidence'],
+            species_data[best_species]['taxonomy']
         )
     
     def get_best_frame(self) -> Optional[Tuple[np.ndarray, float, List[float]]]:
@@ -178,73 +172,14 @@ class TrackInfo:
         return None
     
     def _calculate_specificity(self, species: str) -> int:
-        """Calculate how specific a species name is.
-        
-        Taxonomy levels (higher = more specific):
-        - 0: "animal" (most generic)
-        - 1: Class level: "mammal", "bird", "reptile"
-        - 2: Order level: "rodent", "carnivora", "passeriformes"
-        - 3: Family level: "sciuridae", "canidae", "felidae", "corvidae"
-        - 4+: Genus/species level: specific species names
-        
-        This ensures family-level IDs (sciuridae) beat order-level (rodent),
-        which beats class-level (mammal), which beats generic (animal).
+        """How specific a species name is: its taxonomy depth.
+
+        0 "animal", 1 class ("mammalia_mammal", "bird"), 2 order
+        ("mammalia_rodentia_rodent"), 3 family ("mammalia_rodentia_sciuridae"),
+        4+ below family. Every label at one level gets the same score; see
+        ``species_names.species_rank``.
         """
-        species_lower = species.lower().replace('-', '_').strip()
-        
-        # Most generic - just "animal"
-        if species_lower in {'animal', 'unknown'}:
-            return 0
-        
-        # Class level (specificity 1)
-        if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal',
-                             'reptile', 'reptilia', 'reptilia_reptile',
-                             'amphibian', 'amphibia', 'amphibia_amphibian'}:
-            return 1
-        
-        # Family level keywords (specificity 3) - FAMILIES are more specific than orders
-        family_keywords = {
-            # Mammal families
-            'sciuridae', 'canidae', 'felidae', 'cervidae', 'ursidae', 'mustelidae',
-            'procyonidae', 'leporidae', 'muridae', 'cricetidae', 'didelphidae',
-            'myocastoridae', 'castoridae', 'mephitidae',
-            # Bird families  
-            'corvidae', 'accipitridae', 'strigidae', 'anatidae', 'columbidae',
-            'picidae', 'trochilidae', 'turdidae', 'fringillidae', 'passeridae',
-            'paridae', 'sittidae', 'certhiidae', 'tyrannidae', 'vireonidae',
-        }
-        
-        # Order level keywords (specificity 2)
-        order_keywords = {
-            # Mammal orders
-            'rodent', 'rodentia', 'carnivora', 'carnivore', 'carnivorous', 
-            'artiodactyla', 'lagomorpha', 'chiroptera', 'didelphimorphia',
-            # Bird orders
-            'passeriformes', 'passerine', 'accipitriformes', 'strigiformes',
-            'anseriformes', 'columbiformes', 'piciformes', 'apodiformes',
-        }
-        
-        # Check for family-level match (specificity 3)
-        for family in family_keywords:
-            if family in species_lower:
-                # Add bonus for additional taxonomy depth (e.g., genus_species)
-                underscore_count = species_lower.count('_')
-                return 3 + max(0, underscore_count - 2)  # Base 3 + extra depth
-        
-        # Check for order-level match (specificity 2)
-        for order in order_keywords:
-            if order in species_lower:
-                underscore_count = species_lower.count('_')
-                return 2 + max(0, underscore_count - 2)  # Base 2 + extra depth
-        
-        # Fallback: count underscores as proxy for taxonomy depth
-        underscore_count = species_lower.count('_')
-        if underscore_count >= 3:
-            return 4 + underscore_count  # Likely genus_species or more specific
-        elif underscore_count >= 1:
-            return 2 + underscore_count
-        
-        return 1  # Single unknown word
+        return species_rank(species)
 
 
 class ObjectTracker:
@@ -474,90 +409,29 @@ class ObjectTracker:
     
     def _get_species_hierarchy(self, species: str) -> tuple:
         """Get the hierarchy category and specificity of a species.
-        
+
         Returns:
-            (category, specificity) where category is 'bird', 'mammal', 'animal', etc.
-            and specificity is how specific the identification is (higher = more specific).
-            
-        Taxonomy levels (higher = more specific):
-            0 = "animal" (most generic)
-            1 = Class level: "mammal", "bird", "reptile"
-            2 = Order level: "rodent", "carnivora", "passeriformes"
-            3 = Family level: "sciuridae", "canidae", "felidae", "corvidae"
-            4+ = Genus/species level: specific species names
+            (category, specificity) where category is 'bird', 'mammal',
+            'reptile', 'amphibian' or 'animal' (no class known), and
+            specificity is the label's taxonomy depth, on the scale
+            ``TrackInfo`` and the post-processor use
+            (``species_names.species_rank``): 0 "animal", 1 class, 2 order,
+            3 family, 4+ below family.
+
+        The scale used to come from keyword lists of its own, which scored a
+        listed family (felidae) above an unlisted one at the same level
+        (mephitidae, bovidae). ``merge_hierarchical_tracks`` absorbs the less
+        specific of two tracks, so it folded a skunk into a cat and a
+        twenty-detection cow into a four-detection deer.
         """
-        species_lower = species.lower().replace('-', '_').strip()
-        
-        # Most generic
-        if species_lower in {'animal', 'unknown'}:
-            return ('animal', 0)
-        
-        # Class level (specificity 1)
-        if species_lower in {'bird', 'aves', 'mammal', 'mammalia', 'mammalia_mammal',
-                             'reptile', 'reptilia', 'reptilia_reptile',
-                             'amphibian', 'amphibia', 'amphibia_amphibian'}:
-            if 'mammal' in species_lower or species_lower == 'mammalia':
-                return ('mammal', 1)
-            elif species_lower in {'bird', 'aves'}:
-                return ('bird', 1)
-            elif species_lower in {'reptile', 'reptilia', 'reptilia_reptile'}:
-                return ('reptile', 1)
-            elif species_lower in {'amphibian', 'amphibia', 'amphibia_amphibian'}:
-                return ('amphibian', 1)
-            return ('animal', 1)
-        
-        # Determine category from taxonomy string
-        category = 'animal'
-        if 'mammalia' in species_lower or 'mammal' in species_lower:
-            category = 'mammal'
-        elif 'aves' in species_lower or 'bird' in species_lower:
-            category = 'bird'
-        elif 'reptilia' in species_lower or 'reptile' in species_lower:
-            category = 'reptile'
-        elif 'amphibia' in species_lower or 'amphibian' in species_lower:
-            category = 'amphibian'
-        
-        # Family level keywords (specificity 3) - FAMILIES are more specific than orders
-        family_keywords = {
-            # Mammal families
-            'sciuridae', 'canidae', 'felidae', 'cervidae', 'ursidae', 'mustelidae',
-            'procyonidae', 'leporidae', 'muridae', 'cricetidae', 'didelphidae',
-            # Bird families  
-            'corvidae', 'accipitridae', 'strigidae', 'anatidae', 'columbidae',
-            'picidae', 'trochilidae', 'turdidae', 'fringillidae', 'passeridae',
+        lineage = species_lineage(species)
+        categories = {
+            'mammalia': 'mammal', 'bird': 'bird',
+            'reptile': 'reptile', 'amphibian': 'amphibian',
         }
-        
-        # Order level keywords (specificity 2)
-        order_keywords = {
-            # Mammal orders
-            'rodent', 'rodentia', 'carnivora', 'carnivore', 'artiodactyla', 
-            'lagomorpha', 'chiroptera', 'didelphimorphia',
-            # Bird orders
-            'passeriformes', 'passerine', 'accipitriformes', 'strigiformes',
-            'anseriformes', 'columbiformes', 'piciformes', 'apodiformes',
-        }
-        
-        # Check for family-level match (specificity 3)
-        for family in family_keywords:
-            if family in species_lower:
-                # Add bonus for additional taxonomy depth
-                return (category, 3 + species_lower.count('_'))
-        
-        # Check for order-level match (specificity 2)
-        for order in order_keywords:
-            if order in species_lower:
-                return (category, 2 + max(0, species_lower.count('_') - 1))
-        
-        # Fallback: count underscores as proxy for taxonomy depth
-        underscore_count = species_lower.count('_')
-        if underscore_count >= 3:
-            # Likely genus_species or more specific
-            return (category, 4 + underscore_count)
-        elif underscore_count >= 1:
-            return (category, 2 + underscore_count)
-        
-        return (category, 1)
-    
+        category = categories.get(lineage[0], 'animal') if lineage else 'animal'
+        return (category, species_rank(species))
+
     def _species_compatible(self, species1: str, species2: str) -> bool:
         """Check if two species are compatible for merging.
         

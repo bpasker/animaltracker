@@ -20,6 +20,7 @@ from typing import List, Optional, Dict, Tuple
 
 from .detector import BaseDetector, Detection, create_detector, cleanup_gpu_memory, NON_ANIMAL_REASON_PREFIX
 from .tracker import ObjectTracker, create_tracker
+from .species_names import pick_species_by_lineage, species_rank
 
 LOGGER = logging.getLogger(__name__)
 
@@ -954,6 +955,27 @@ class ClipPostProcessor:
 
         return log
 
+    @staticmethod
+    def _tracked_species_votes(tracker: ObjectTracker) -> Dict[str, Tuple[int, float]]:
+        """``{species: (detections, best confidence)}`` over the tracks.
+
+        Each track resolves to one species (``TrackInfo.get_best_species``)
+        and brings all of its detections to it, so two dog tracks of 40 and
+        36 detections are 76 detections of a dog. The count used to come from
+        ``get_unique_species()``, which has already folded the tracks into
+        one entry per species: every count was 1, and the clip's species fell
+        to whichever track had the single most confident frame, a
+        two-detection misread included.
+        """
+        votes: Dict[str, Tuple[int, float]] = {}
+        for track_info in tracker.tracks.values():
+            species, confidence, _ = track_info.get_best_species()
+            if not species:
+                continue
+            count, best = votes.get(species, (0, 0.0))
+            votes[species] = (count + len(track_info.classifications), max(best, confidence))
+        return votes
+
     def _build_tracked_species_results(
         self,
         tracker: ObjectTracker,
@@ -965,10 +987,9 @@ class ClipPostProcessor:
         """
         species_results: Dict[str, SpeciesResult] = {}
         
-        # Get unique species from all tracked objects (one per track)
-        tracked_species = tracker.get_unique_species()
-        
-        for species, confidence in tracked_species:
+        # One entry per species the tracks resolved to, with the detections
+        # behind it (see _tracked_species_votes).
+        for species, (count, confidence) in self._tracked_species_votes(tracker).items():
             # Filter invalid species
             species_lower = species.lower()
             if species_lower in self.invalid_terms:
@@ -978,23 +999,14 @@ class ClipPostProcessor:
             if len(species) > 30 and species.count('-') >= 3:
                 continue
             
-            specificity = self._calculate_specificity(species)
-            
-            if species not in species_results:
-                species_results[species] = SpeciesResult(
-                    species=species,
-                    confidence=confidence,
-                    count=1,
-                    specificity=specificity,
-                    taxonomy=None,
-                    key_frames=[],
-                )
-            else:
-                # Multiple tracks with same species - aggregate
-                species_results[species].count += 1
-                species_results[species].confidence = max(
-                    species_results[species].confidence, confidence
-                )
+            species_results[species] = SpeciesResult(
+                species=species,
+                confidence=confidence,
+                count=count,
+                specificity=self._calculate_specificity(species),
+                taxonomy=None,
+                key_frames=[],
+            )
         
         # Get key frames for each tracked species
         for track_id, track_info in tracker.tracks.items():
@@ -1029,10 +1041,9 @@ class ClipPostProcessor:
             "tracks": [],
         }
         
-        # Get unique species from all tracked objects (one per track)
-        tracked_species = tracker.get_unique_species()
-        
-        for species, confidence in tracked_species:
+        # One entry per species the tracks resolved to, with the detections
+        # behind it (see _tracked_species_votes).
+        for species, (count, confidence) in self._tracked_species_votes(tracker).items():
             # Filter invalid species
             species_lower = species.lower()
             if species_lower in self.invalid_terms:
@@ -1054,22 +1065,14 @@ class ClipPostProcessor:
                 ))
                 continue
             
-            specificity = self._calculate_specificity(species)
-            
-            if species not in species_results:
-                species_results[species] = SpeciesResult(
-                    species=species,
-                    confidence=confidence,
-                    count=1,
-                    specificity=specificity,
-                    taxonomy=None,
-                    key_frames=[],
-                )
-            else:
-                species_results[species].count += 1
-                species_results[species].confidence = max(
-                    species_results[species].confidence, confidence
-                )
+            species_results[species] = SpeciesResult(
+                species=species,
+                confidence=confidence,
+                count=count,
+                specificity=self._calculate_specificity(species),
+                taxonomy=None,
+                key_frames=[],
+            )
         
         # Get key frames and build track details
         animal_tracks = 0
@@ -1372,85 +1375,44 @@ class ClipPostProcessor:
             result.key_frames = frames[:MAX_KEY_FRAMES_PER_SPECIES]
     
     def _calculate_specificity(self, species: str) -> int:
-        """Calculate specificity score for a species name.
-        
-        Hierarchy (higher = more specific):
-        - 0: "animal" (most generic)
-        - 1: "bird", "mammal" (class-level)
-        - 2: "hawk", "sparrow", "deer" (family/order level)
-        - 3+: "red-tailed_hawk", "white-tailed_deer" (species level)
-        
-        This ensures "bird" beats "animal", and specific species beat generic labels.
+        """Specificity score for a species name: its taxonomy depth.
+
+        0 "animal", 1 class ("bird", "mammalia_mammal"), 2 order
+        ("mammalia_rodentia_rodent"), 3 family ("mammalia_carnivora_canidae"),
+        4+ below family. The same scale the tracker uses
+        (``species_names.species_rank``); this one used to count the words in
+        the label, which put an order rollup level with a family.
         """
-        species_lower = species.lower().replace('-', '_').strip()
-        
-        # Most generic - just "animal"
-        if species_lower in {'animal', 'unknown'}:
-            return 0
-        
-        # Class level - we know what type of animal
-        class_level = {'bird', 'mammal', 'aves', 'mammalia', 'mammalia_mammal',
-                   'reptile', 'reptilia', 'reptilia_reptile',
-                   'amphibian', 'amphibia', 'amphibia_amphibian', 'fish'}
-        if species_lower in class_level:
-            return 1
-        
-        # Order/family level - more specific groupings
-        order_level = {'hawk', 'owl', 'eagle', 'falcon', 'duck', 'goose', 'songbird',
-                       'sparrow', 'finch', 'warbler', 'woodpecker', 'heron', 'gull',
-                       'crow', 'jay', 'dove', 'pigeon', 'hummingbird', 'cardinal',
-                       'chickadee', 'nuthatch', 'titmouse', 'wren', 'robin', 'bluebird',
-                       'deer', 'bear', 'cat', 'dog', 'fox', 'coyote', 'wolf',
-                       'rabbit', 'squirrel', 'mouse', 'rat', 'raccoon', 'skunk',
-                       'rodent', 'carnivore', 'ungulate'}
-        if species_lower in order_level:
-            return 2
-        
-        # Species level - has underscore suggesting binomial or compound name
-        words = species_lower.split('_')
-        if len(words) >= 2:
-            # Binomial names (genus_species) or compound common names
-            return 3 + len(words)  # More parts = more specific
-        
-        # Single word that's not in our known categories - likely a common name
-        return 2
+        return species_rank(species)
     
     def _select_best_species(
         self, 
         species_results: Dict[str, SpeciesResult]
     ) -> Tuple[str, float]:
         """Select the best species classification from results.
-        
-        Prioritizes:
-        1. Specificity (more specific names are better - bird > animal)
-        2. Detection count (more detections = more reliable)
-        3. Confidence (higher confidence = more certain)
-        
+
+        The results vote with their detection counts, and the votes are read
+        as a walk down the taxonomy (``species_names.pick_species_by_lineage``):
+
+        1. a specific label beats its own generic ancestors (canidae > mammal
+           > animal), however few detections it has;
+        2. labels that contradict each other are settled by detection count,
+           then confidence: a deer seen in thirty frames beats a lid read as
+           a duck in four, whatever the duck's confidence.
+
         Returns (species_name, confidence).
         """
         if not species_results:
             return "", 0.0
-        
-        # Find the maximum specificity among all candidates
-        max_specificity = max(r.specificity for r in species_results.values())
-        
-        # Only consider candidates at the highest specificity level
-        best_candidates = {
-            name: result for name, result in species_results.items()
-            if result.specificity == max_specificity
-        }
-        
-        if not best_candidates:
+
+        best_species = pick_species_by_lineage({
+            name: (result.count, result.confidence)
+            for name, result in species_results.items()
+        })
+        if not best_species:
             return "", 0.0
-        
-        # Among equally-specific candidates, score by count then confidence
-        def score_species(name: str) -> Tuple[int, float]:
-            result = best_candidates[name]
-            return (result.count, result.confidence)
-        
-        best_species = max(best_candidates.keys(), key=score_species)
-        best_result = best_candidates[best_species]
-        
+        best_result = species_results[best_species]
+
         LOGGER.debug("Selected '%s' (specificity=%d, count=%d, conf=%.2f) from %d candidates",
                     best_species, best_result.specificity, best_result.count, 
                     best_result.confidence, len(species_results))

@@ -4,7 +4,7 @@ This module provides human-readable common names for species detected by Species
 The mapping is hierarchical - it checks for full matches first, then partial matches.
 """
 
-from typing import Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 import re
 
 # Labels SpeciesNet emits for things that are not wildlife. They are never a
@@ -12,6 +12,141 @@ import re
 # their boxes so that an animal label sitting exactly where a person was seen
 # a moment earlier can be recognised as that person (see postprocess.py).
 NON_ANIMAL_LABELS = frozenset({"person", "human", "vehicle"})
+
+# --- How specific a label is, and which labels agree -------------------------
+#
+# The detector names an animal by the taxonomy levels SpeciesNet was sure of,
+# joined with "_": class, order, family ("mammalia_carnivora_canidae"). A
+# rollup stops early and ends with its common name instead
+# ("mammalia_carnivora_carnivorous mammal", "mammalia_mammal", "bird"), and
+# "animal" names no taxon at all. How specific a label is, and whether two
+# labels agree, follow from that path alone. Every consumer ranks labels
+# through the functions below rather than from keyword lists: a list scores
+# the families it happens to name differently from the ones it forgot, and a
+# forgotten family then outranks, or loses to, a label at the very same level
+# (cardinalidae scored 2, corvidae 3 and phasianidae 4, so one stray crow
+# frame beat forty cardinal frames).
+
+# Labels that name no taxon.
+_UNRANKED_LABELS = frozenset({"", "animal", "unknown", "blank", "empty"})
+
+# The class level arrives under two spellings, the taxon ("mammalia") and the
+# rollup's common name ("mammal"); "aves" is already mapped to "bird" by the
+# detector. One token per class keeps a rollup and its families on one branch.
+_CLASS_TOKENS = {
+    "mammalia": "mammalia", "mammal": "mammalia",
+    "aves": "bird", "bird": "bird",
+    "reptilia": "reptile", "reptile": "reptile",
+    "amphibia": "amphibian", "amphibian": "amphibian",
+    "fish": "fish",
+}
+
+# Every zoological family name ends this way (ICZN), and no common name does.
+_FAMILY_SUFFIX = "idae"
+
+
+def species_lineage(species: str) -> Tuple[str, ...]:
+    """The taxonomy path a species label names, most general level first.
+
+    ``"mammalia_carnivora_canidae"`` is ``("mammalia", "carnivora", "canidae")``;
+    the order rollup ``"mammalia_carnivora_carnivorous mammal"`` is
+    ``("mammalia", "carnivora")``; ``"mammalia_mammal"`` and ``"mammal"`` are
+    ``("mammalia",)``; ``"animal"`` is ``()``. A label is an ancestor of
+    another exactly when its lineage is a prefix of the other's, and two
+    labels contradict each other when neither is.
+
+    The levels are read by position: class, then order, then a family, which
+    is recognised by its suffix. Whatever sits where a taxon should but is
+    not one is the rollup's common name and is dropped, so a label with its
+    common name and the same label without it have the same lineage. A word
+    with no taxonomy at all (YOLO's ``"dog"``) is a branch of its own.
+    """
+    label = (species or "").strip().lower()
+    if "+" in label:
+        # Several detections joined into one name: rank it by the first.
+        label = label.split("+", 1)[0].strip()
+    if label in _UNRANKED_LABELS:
+        return ()
+    tokens = [t.strip() for t in label.split("_") if t.strip()]
+    if not tokens:
+        return ()
+
+    head = _CLASS_TOKENS.get(tokens[0], tokens[0])
+    lineage: List[str] = [head]
+    rest = tokens[1:]
+    if not rest or head.endswith(_FAMILY_SUFFIX):
+        return tuple(lineage)
+
+    # Order, unless the slot holds the class's own common name
+    # ("mammalia_mammal") or the order is missing and a family follows.
+    if rest[0].endswith(_FAMILY_SUFFIX):
+        lineage.append(rest[0])
+        lineage.extend(rest[1:])
+        return tuple(lineage)
+    if _CLASS_TOKENS.get(rest[0]) == head:
+        return tuple(lineage)
+    lineage.append(rest[0])
+
+    # Family, or the order rollup's common name ("..._rodentia_rodent").
+    if len(rest) > 1 and rest[1].endswith(_FAMILY_SUFFIX):
+        lineage.append(rest[1])
+        lineage.extend(rest[2:])  # genus, species: not produced today
+    return tuple(lineage)
+
+
+def species_rank(species: str) -> int:
+    """How specific a label is: 0 animal, 1 class, 2 order, 3 family, 4+ below.
+
+    Labels at the same taxonomic level always get the same rank, whatever
+    family or order they name.
+    """
+    lineage = species_lineage(species)
+    if not lineage:
+        return 0
+    if len(lineage) < 3 and lineage[-1].endswith(_FAMILY_SUFFIX):
+        return 3  # a family named without its class or order
+    return len(lineage)
+
+
+def pick_species_by_lineage(votes: Mapping[str, Tuple[float, float]]) -> str:
+    """The label a set of votes agrees on, found by walking down the taxonomy.
+
+    ``votes`` maps each label to ``(count, confidence)``. From the root, the
+    walk takes the branch with the most votes (count first, then the best
+    confidence) and keeps going while any label lies further down. Two
+    things follow:
+
+    * a specific label beats its own generic ancestors however few votes it
+      has, because they do not contradict it: five "cervidae" frames among
+      fifty "animal" frames are a deer;
+    * labels that contradict each other are settled by their votes, at the
+      level where they part: forty "cardinalidae" frames beat one "corvidae"
+      frame, and forty dog frames beat one turkey frame, whatever the
+      confidence of the stray.
+
+    Returns ``""`` for no votes. Exact ties go to the label seen first.
+    """
+    if not votes:
+        return ""
+    lineages: Dict[str, Tuple[str, ...]] = {label: species_lineage(label) for label in votes}
+    prefix: Tuple[str, ...] = ()
+    while True:
+        depth = len(prefix)
+        branches: Dict[str, List[float]] = {}
+        for label, lineage in lineages.items():
+            if len(lineage) <= depth or lineage[:depth] != prefix:
+                continue
+            count, confidence = votes[label]
+            branch = branches.setdefault(lineage[depth], [0.0, 0.0])
+            branch[0] += count
+            branch[1] = max(branch[1], confidence)
+        if not branches:
+            break
+        best = max(branches, key=lambda token: (branches[token][0], branches[token][1]))
+        prefix = prefix + (best,)
+    at_node = [label for label, lineage in lineages.items() if lineage == prefix]
+    return max(at_node, key=lambda label: (votes[label][0], votes[label][1]))
+
 
 # Mapping from technical names to common names
 # Format: lowercase key -> display name

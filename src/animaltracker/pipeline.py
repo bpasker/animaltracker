@@ -453,6 +453,10 @@ class StreamWorker:
     # One worker per post-processing slot; the semaphore stays the limit the
     # recovery sweep shares.
     _analysis_workers: AnalysisWorkers = AnalysisWorkers()
+    # The one post-processing detector of this process (see
+    # ``_get_postprocess_detector``), shared by every camera.
+    _shared_postprocess_detector: Optional[BaseDetector] = None
+    _shared_postprocess_detector_lock: threading.Lock = threading.Lock()
     # Every clip analysis in flight in this process (live events, reanalyses,
     # recoveries) claims its path here; the recovery sweeper and the web UI
     # read it. See analysis_recovery.py.
@@ -556,8 +560,6 @@ class StreamWorker:
 
         # Cached post-process detector (lazy initialization to avoid loading if not needed)
         # This prevents creating a new SpeciesNet model for every clip (VRAM leak fix)
-        self._postprocess_detector: Optional[BaseDetector] = None
-        self._postprocess_detector_lock = threading.Lock()
         
         if camera.onvif and camera.onvif.host:
             user, password = camera.onvif.credentials()
@@ -661,21 +663,34 @@ class StreamWorker:
             return self.storage.transcode_avi_to_mp4(temp_avi, clip_path)
 
     def _get_postprocess_detector(self) -> BaseDetector:
-        """Get or create the cached post-process detector (thread-safe).
+        """Get or create the process's post-processing detector (thread-safe).
 
-        This lazily initializes a SpeciesNet detector for post-processing clips.
-        The detector is cached to avoid loading a new model for every clip,
-        which would cause VRAM accumulation/leak on GPU.
+        One SpeciesNet for the whole process, loaded on first use and shared
+        by every camera's events, the recovery sweep and web reanalyses. It
+        used to be cached per worker, so with three cameras three copies of
+        the model sat on the 8 GB GPU and in host memory although at most
+        ``max_concurrent_postprocess`` jobs ever run. Each camera's first clip
+        after a restart also paid a load of its own, which delayed its alert
+        and reopened the window in which a model load breaks a real-time
+        forward pass on another thread (BUGS.md item 5), three times per
+        restart instead of once.
+
+        The detector settings are general, not per camera, and only read at
+        startup, so whichever worker asks first builds the instance all of
+        them would have built. Concurrent jobs share it safely: each backend
+        serialises its own forward pass (``BaseDetector.model_lock``).
         """
-        if self._postprocess_detector is None:
-            with self._postprocess_detector_lock:
+        cls = StreamWorker
+        if cls._shared_postprocess_detector is None:
+            with cls._shared_postprocess_detector_lock:
                 # Double-check after acquiring lock
-                if self._postprocess_detector is None:
+                if cls._shared_postprocess_detector is None:
                     detector_cfg = self.runtime.general.detector
-                    LOGGER.info("Initializing cached post-process detector for %s", self.camera.id)
-                    self._postprocess_detector = create_postprocess_detector(detector_cfg)
-                    LOGGER.info("Post-process detector ready: %s", self._postprocess_detector.backend_name)
-        return self._postprocess_detector
+                    LOGGER.info("Initializing the post-process detector (first used for %s)", self.camera.id)
+                    detector = create_postprocess_detector(detector_cfg)
+                    LOGGER.info("Post-process detector ready: %s", detector.backend_name)
+                    cls._shared_postprocess_detector = detector
+        return cls._shared_postprocess_detector
 
     def save_manual_clip(self) -> Optional[str]:
         """Save the last 30 seconds of video buffer as a manual clip."""

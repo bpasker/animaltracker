@@ -19,6 +19,7 @@ touches nothing, and what a previous run left behind is turned into
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import threading
 import time
 from pathlib import Path
@@ -34,7 +35,7 @@ from animaltracker.analysis_recovery import (
     find_unfinished_clips,
     is_unclassified_clip,
 )
-from animaltracker.pipeline import EventState, PipelineOrchestrator, StreamWorker
+from animaltracker.pipeline import AnalysisWorkers, EventState, PipelineOrchestrator, StreamWorker
 from animaltracker.storage import StorageManager
 
 EVENT_TS = 1789000000  # 2026-09-10 in any zone a test host is likely to use
@@ -266,9 +267,10 @@ class FakeNotifier:
         self.sent.append(ctx)
 
 
-def _closing_worker(storage: StorageManager, temp_avi: Path, notifier: FakeNotifier) -> StreamWorker:
+def _closing_worker(storage: StorageManager, temp_avi: Path, notifier: FakeNotifier,
+                    camera_id: str = "cam1") -> StreamWorker:
     camera = SimpleNamespace(
-        id="cam1", name="Cam 1", exclude_species=[],
+        id=camera_id, name=camera_id.title(), exclude_species=[],
         notification=SimpleNamespace(priority=0, sound=None, destinations=None),
     )
     clip_cfg = SimpleNamespace(
@@ -452,3 +454,104 @@ def test_an_event_with_no_recording_is_dropped_without_waiting_for_a_slot(tmp_pa
     worker.event_state.clip_writer = None
 
     assert worker._save_event_clip(None, storage.build_clip_path("cam1", "animal", EVENT_TS)) is False
+
+
+# --- a waiting analysis is a queue entry, not a thread ---------------------------
+
+def test_events_that_close_while_every_slot_is_busy_do_not_use_up_the_shared_executor(
+        tmp_path, monkeypatch, one_busy_slot):
+    """Analysis jobs used to wait for their slot inside a thread of the event
+    loop's default executor, the pool every camera read and inference call
+    needs. Two threads stand in for it here: four queued events would have
+    pinned both, the last two recordings would never even have been saved,
+    and nothing else could have run."""
+    storage = _storage(tmp_path)
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode([]))
+    notifier = FakeNotifier()
+    cameras = ["cam1", "cam2", "otteson1", "otteson2"]
+    workers = [
+        _closing_worker(storage, _temp(storage, f"{cam}_{EVENT_TS}_0a1b2c3d.temp.avi"), notifier, camera_id=cam)
+        for cam in cameras
+    ]
+    clips = [storage.build_clip_path(cam, "animal", EVENT_TS) for cam in cameras]
+    registry = StreamWorker.analysis_registry
+
+    async def close_events() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=2))
+        try:
+            for worker in workers:
+                await worker._maybe_close_event(float(EVENT_TS + 30), force=True)
+
+            # Every clip is saved although no analysis can start...
+            saved = await asyncio.wait_for(
+                loop.run_in_executor(None, _wait_for, lambda: all(c.exists() for c in clips)), timeout=10)
+            assert saved
+            # ...and the shared pool is free again: this would never be scheduled otherwise.
+            assert await asyncio.wait_for(loop.run_in_executor(None, lambda: "a camera read"), timeout=2) == "a camera read"
+            assert all(registry.is_active(c) for c in clips) and registry.live_busy()
+            assert notifier.sent == []
+        finally:
+            one_busy_slot()
+        assert await loop.run_in_executor(None, _wait_for, lambda: len(notifier.sent) == 4)
+
+    asyncio.run(close_events())
+
+    assert sorted(ctx.camera_id for ctx in notifier.sent) == sorted(cameras)
+    assert _wait_for(lambda: not registry.live_busy() and not any(registry.is_active(c) for c in clips))
+
+
+def test_an_analysis_that_raises_still_releases_its_clip(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode([]))
+
+    class ExplodingNotifier(FakeNotifier):
+        def send(self, ctx, **kwargs) -> None:
+            super().send(ctx, **kwargs)
+            raise RuntimeError("pushover is down")
+
+    notifier = ExplodingNotifier()
+    worker = _closing_worker(storage, _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi"), notifier)
+    clip = storage.build_clip_path("cam1", "animal", EVENT_TS)
+    registry = StreamWorker.analysis_registry
+
+    async def close_event() -> None:
+        await worker._maybe_close_event(float(EVENT_TS + 30), force=True)
+        loop = asyncio.get_running_loop()
+        assert await loop.run_in_executor(None, _wait_for, lambda: len(notifier.sent) == 1)
+
+    asyncio.run(close_event())
+
+    assert _wait_for(lambda: not registry.is_active(clip) and not registry.live_busy())
+    assert clip.exists()
+
+
+def test_analysis_workers_run_every_job_survive_a_bad_one_and_never_block_exit():
+    pool = AnalysisWorkers(name="test-analysis")
+    pool.ensure(2)
+    done: list = []
+    gate = threading.Event()
+
+    def slow() -> None:
+        gate.wait(5)
+        done.append("slow")
+
+    def bad() -> None:
+        raise ValueError("a job that blows up")
+
+    assert pool.submit(slow) == 0
+    assert pool.submit(slow) in (0, 1)
+    pool.submit(bad)
+    queued_behind = pool.submit(lambda: done.append("after the bad one"))
+    assert queued_behind >= 1                      # both workers are busy: it waits, as a queue entry
+    assert done == []
+
+    gate.set()
+    assert _wait_for(lambda: sorted(done) == ["after the bad one", "slow", "slow"])
+    assert pool.waiting == 0
+
+    pool.ensure(1)                                 # never shrinks, never doubles up
+    pool.ensure(3)
+    names = sorted(t.name for t in pool._threads)
+    assert names == ["test-analysis-1", "test-analysis-2", "test-analysis-3"]
+    assert all(t.daemon for t in pool._threads)    # a restart does not wait for an hour-long job

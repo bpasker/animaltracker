@@ -78,6 +78,11 @@ The system uses a two-stage detection approach:
   that closes the event must never wait for it, because it runs inside the
   camera's inference task and the read loop drops every frame until that
   task ends.
+  Once the clip is saved, the analysis and the alert are queued on
+  `StreamWorker._analysis_workers` (`AnalysisWorkers`: daemon threads, one
+  per post-processing slot). Never leave a job waiting for a slot on the
+  event loop's default executor: that pool is `cpu_count + 4` threads and
+  every camera read, inference call and web request needs one.
   Building a `StorageManager` touches nothing there (the `cleanup` command
   builds one next to the running service). At startup the pipeline turns
   whatever a previous run left behind into `<epoch>_animal.mp4` clips

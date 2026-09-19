@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
 import threading
 import time
 import functools
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import Callable, List, Optional, Dict
 
 import cv2
 import numpy as np
@@ -383,6 +384,60 @@ class EventState:
         return self.last_detection_ts - self.start_ts
 
 
+class AnalysisWorkers:
+    """Daemon threads that work through the clip analyses events have queued.
+
+    Analysis jobs used to run on the event loop's default executor and wait
+    there, inside their thread, for a post-processing slot. That pool is only
+    ``cpu_count + 4`` threads and every camera read, inference call, tracker
+    and PTZ update, MJPEG frame and web request needs one. A SpeciesNet job on
+    a long clip holds a slot for most of an hour, and every event that closed
+    meanwhile parked one more thread: enough of them and no camera could read
+    a frame until a job ended, on exactly the busiest days.
+
+    Here a waiting job is an entry in a queue, not a thread. The threads are
+    daemons: a restart abandons a running analysis instead of waiting for it.
+    The clip is already saved by then, so the recovery sweep redoes the
+    analysis after the restart, as it does for any analysis a restart
+    interrupts.
+    """
+
+    def __init__(self, name: str = "clip-analysis") -> None:
+        self._name = name
+        self._jobs: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
+        self._threads: List[threading.Thread] = []
+        self._lock = threading.Lock()
+
+    def ensure(self, count: int) -> None:
+        """Have at least ``count`` workers running."""
+        with self._lock:
+            self._threads = [t for t in self._threads if t.is_alive()]
+            while len(self._threads) < count:
+                thread = threading.Thread(
+                    target=self._run, name=f"{self._name}-{len(self._threads) + 1}", daemon=True,
+                )
+                thread.start()
+                self._threads.append(thread)
+
+    def submit(self, job: Callable[[], None]) -> int:
+        """Queue ``job``; returns how many jobs were already waiting for a worker."""
+        waiting = self._jobs.qsize()
+        self._jobs.put(job)
+        return waiting
+
+    @property
+    def waiting(self) -> int:
+        return self._jobs.qsize()
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            try:
+                job()
+            except Exception:  # noqa: BLE001 - a bad job must not take its worker with it
+                LOGGER.exception("Clip analysis job failed")
+
+
 class StreamWorker:
     # Class-level semaphore to limit concurrent post-processing across ALL cameras
     # This prevents RAM explosion when multiple clips finish simultaneously
@@ -394,6 +449,10 @@ class StreamWorker:
     # every core, so two at once only slow each other and the capture threads;
     # the job is seconds to a couple of minutes, so the queue stays short.
     _transcode_lock: threading.Lock = threading.Lock()
+    # Where a closed event's analysis and alert run (see AnalysisWorkers).
+    # One worker per post-processing slot; the semaphore stays the limit the
+    # recovery sweep shares.
+    _analysis_workers: AnalysisWorkers = AnalysisWorkers()
     # Every clip analysis in flight in this process (live events, reanalyses,
     # recoveries) claims its path here; the recovery sweeper and the web UI
     # read it. See analysis_recovery.py.
@@ -404,7 +463,14 @@ class StreamWorker:
         """Set the maximum concurrent post-processing jobs (called by PipelineOrchestrator)."""
         cls._postprocess_limit = max(1, min(8, limit))
         cls._postprocess_semaphore = threading.Semaphore(cls._postprocess_limit)
+        cls._analysis_workers.ensure(cls._postprocess_limit)
         LOGGER.info("Post-processing concurrency limit set to %d", cls._postprocess_limit)
+
+    @classmethod
+    def _submit_analysis(cls, job: Callable[[], None]) -> int:
+        """Queue a clip's analysis job; returns how many were already waiting."""
+        cls._analysis_workers.ensure(cls._postprocess_limit)
+        return cls._analysis_workers.submit(job)
 
     @classmethod
     def _ensure_postprocess_semaphore(cls) -> threading.Semaphore:
@@ -1785,8 +1851,8 @@ class StreamWorker:
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
         
-        def _finalize_event_body(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config, clip_path):
-            """Finalize event with optional post-clip species analysis.
+        def _finalize_event_body(frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config, clip_path):
+            """Analyse the saved clip, then alert. Runs on an analysis worker.
 
             Split-model architecture:
             - Real-time: YOLO was used for fast detection/PTZ tracking
@@ -1795,22 +1861,11 @@ class StreamWorker:
             Uses class-level semaphore to limit concurrent post-processing and prevent
             RAM explosion when multiple clips finish simultaneously.
 
-            ``temp_avi`` is the streaming MJPG file already written
-            frame-by-frame by ``StreamingClipWriter`` during the event.
-            We transcode it once here and then immediately delete it; no
-            full-resolution frame buffer is ever held in RAM.
+            ``clip_path`` is already on disk: ``finalize_event`` transcoded the
+            streamed recording before it queued this job, so nothing here
+            depends on the temp AVI and no full-resolution frame buffer is
+            ever held in RAM.
             """
-            # Step 1: save the clip before waiting for anything (see
-            # ``_save_event_clip``). ``clip_path`` was built by
-            # ``finalize_event`` and is already registered as in flight, so
-            # the archive shows it as analysing and the sweeper leaves it be.
-            if not self._save_event_clip(temp_avi, clip_path):
-                LOGGER.error(
-                    "No clip file produced for %s event @ %s; skipping post-processing",
-                    camera_id, start_ts,
-                )
-                return
-
             # Acquire semaphore to limit concurrent post-processing (prevents RAM explosion)
             # This will block if too many clips are already being processed
             with StreamWorker._ensure_postprocess_semaphore():
@@ -2076,21 +2131,32 @@ class StreamWorker:
                            ctx.camera_id, clip_path, final_species, tracks_count)
 
         def finalize_event(writer, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
-            """Claim the clip path, drain the writer, then run ``_finalize_event_body``.
+            """Save the event's clip now, then queue its analysis and alert.
 
-            The path is registered before the job even waits for a
-            post-processing slot, so the recovery sweeper never picks up a
-            clip a live event is about to analyse and the archive can show
-            it as analysing; the live count makes the sweeper hold back
-            while an event needs the post-processor.
+            This half runs on the default executor and is short: claim the
+            clip path, drain the writer, transcode. The path is registered
+            before anything waits, so the recovery sweeper never picks up a
+            clip a live event is about to analyse and the archive can show it
+            as analysing; the live count makes the sweeper hold back while an
+            event needs the post-processor.
 
-            The writer is drained here, on this job's thread, not by the
-            coroutine that closed the event: see ``_maybe_close_event``.
+            The analysis itself can wait most of an hour for a slot, so it is
+            queued on ``StreamWorker._analysis_workers`` rather than left
+            waiting on a thread of this pool (see ``AnalysisWorkers``). The
+            claim and the live count travel with the job and are released
+            when it ends, or here if it never gets that far.
             """
             registry = StreamWorker.analysis_registry
             clip_path = self.storage.build_clip_path(camera_id, ctx_base['species'], start_ts, clip_format)
             registry.live_begin()
             claimed = registry.begin(clip_path, source='event')
+
+            def release() -> None:
+                if claimed:
+                    registry.end(clip_path)
+                registry.live_end()
+
+            handed_over = False
             try:
                 # ``close()`` joins the writer thread, which first encodes
                 # whatever is still queued. The thread owns the cv2 handle
@@ -2098,15 +2164,36 @@ class StreamWorker:
                 # by the time this returns.
                 temp_avi = writer.close() if writer is not None else None
                 frame_count = writer.frame_count if writer is not None else 0
-                _finalize_event_body(
-                    temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base,
-                    priority, sound, destinations, species_key_frames, ptz_decisions,
-                    detector_config, clip_path,
-                )
+
+                # Save the clip before waiting for anything (see
+                # ``_save_event_clip``): until then the temp AVI is the only
+                # copy of the event.
+                if not self._save_event_clip(temp_avi, clip_path):
+                    LOGGER.error(
+                        "No clip file produced for %s event @ %s; skipping post-processing",
+                        camera_id, start_ts,
+                    )
+                    return
+
+                def analyse() -> None:
+                    try:
+                        _finalize_event_body(
+                            frame_count, camera_id, start_ts, clip_format, ctx_base,
+                            priority, sound, destinations, species_key_frames, ptz_decisions,
+                            detector_config, clip_path,
+                        )
+                    finally:
+                        release()
+
+                waiting = StreamWorker._submit_analysis(analyse)
+                handed_over = True
+                if waiting:
+                    LOGGER.info(
+                        "Post-processing of %s queued behind %d other clip(s)", clip_path.name, waiting,
+                    )
             finally:
-                if claimed:
-                    registry.end(clip_path)
-                registry.live_end()
+                if not handed_over:
+                    release()
 
         # Use tracked species if available (more accurate than raw detections)
         tracked_species = self.event_state.get_tracked_species_label()

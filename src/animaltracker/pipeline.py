@@ -2478,7 +2478,7 @@ class PipelineOrchestrator:
     def __init__(
         self,
         runtime: RuntimeConfig,
-        model_path: str = "yolov8n.pt",
+        model_path: Optional[str] = None,
         camera_filter: Optional[List[str]] = None,
         config_path: Optional[Path] = None,
     ) -> None:

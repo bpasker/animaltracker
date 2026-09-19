@@ -432,7 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run_cmd = sub.add_parser("run", help="Run streaming pipeline")
-    run_cmd.add_argument("--model", default="yolov8n.pt", help="YOLO model path")
+    # No default: the model comes from detector.model_path in the config. A
+    # default here was always truthy, so it overrode the configured path on
+    # every start and left the settings page's restart banner permanently on.
+    run_cmd.add_argument("--model", default=None,
+                         help="YOLO model path (overrides detector.model_path from the config)")
     run_cmd.add_argument(
         "--camera",
         action="append",

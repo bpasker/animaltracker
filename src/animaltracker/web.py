@@ -2105,17 +2105,36 @@ class WebServer:
             
         return web.Response(text=f"Clip saved: {filename}")
 
+    def _confined_clip_path(self, rel_path) -> 'Path | None':
+        """The file ``rel_path`` names inside the clips directory, or None.
+
+        Every endpoint that takes a clip path from a request goes through
+        this. The path is resolved and must stay inside the resolved clips
+        directory, so an absolute path, a ``..`` that climbs out and a symlink
+        that points out are all refused. A substring test for ``'..'``, which
+        three endpoints used, does neither job: it lets ``/etc/x.mp4``
+        through (joining an absolute path onto a directory yields the absolute
+        path) and refuses a legitimate name that merely contains two dots.
+
+        What comes back is the clips directory as the server names it plus
+        the normalised tail, not the resolved path: the analysis registry
+        keys on that spelling, and with a symlinked storage root the resolved
+        one would let a second analysis of the same clip start.
+        """
+        if not isinstance(rel_path, str) or not rel_path:
+            return None
+        clips_dir = self.storage_root / 'clips'
+        try:
+            clips_root = clips_dir.resolve()
+            relative = (clips_root / rel_path).resolve().relative_to(clips_root)
+        except (ValueError, OSError):
+            return None
+        return clips_dir / relative
+
     def _delete_file(self, rel_path: str) -> tuple[bool, str]:
         self._invalidate_scan_cache()
-        # Resolve and require containment in the clips directory. A substring test for
-        # '..' both misses encodings it should catch and rejects legitimate names that
-        # merely contain two dots. Both sides are resolved so a symlinked storage root
-        # (e.g. an SSD mount) compares correctly.
-        clips_root = (self.storage_root / 'clips').resolve()
-        try:
-            file_path = (clips_root / rel_path).resolve()
-            file_path.relative_to(clips_root)
-        except (ValueError, OSError):
+        file_path = self._confined_clip_path(rel_path)
+        if file_path is None:
             return False, "Invalid path"
         try:
             if file_path.exists() and file_path.is_file():
@@ -2197,12 +2216,13 @@ class WebServer:
         if not clip_path:
             return web.Response(status=400, text="Missing 'path' parameter")
         
-        # Security check
-        if '..' in clip_path:
+        # The post-processor renames the file it is given and writes key
+        # frames and a log beside it, so the path must stay in the archive.
+        loop = asyncio.get_running_loop()
+        full_path = await loop.run_in_executor(None, self._confined_clip_path, clip_path)
+        if full_path is None:
             return web.Response(status=403, text="Invalid path")
-        
-        full_path = self.storage_root / 'clips' / clip_path
-        if not full_path.exists():
+        if not await loop.run_in_executor(None, full_path.is_file):
             return web.Response(status=404, text="Clip not found")
         
         # Prevent duplicate processing - check if already in progress, here
@@ -2312,48 +2332,44 @@ class WebServer:
     async def handle_get_processing_log(self, request):
         """Get processing log JSON for a recording."""
         rel_path = request.match_info['path']
-        
-        # Security check
-        if '..' in rel_path:
-            return web.Response(status=403, text="Invalid path")
-        
-        # Construct the log file path (replace .mp4 with .log.json)
-        clip_path = self.storage_root / 'clips' / rel_path
+        loop = asyncio.get_running_loop()
+        # Off the event loop: the log can run to megabytes and sits on NFS.
+        status, payload = await loop.run_in_executor(None, self._read_processing_log, rel_path)
+        if isinstance(payload, str):
+            return web.Response(status=status, text=payload)
+        return web.json_response(payload, status=status)
+
+    def _read_processing_log(self, rel_path: str) -> tuple:
+        """``(status, body)`` for the processing-log endpoint; a str body is plain text."""
+        clip_path = self._confined_clip_path(rel_path)
+        if clip_path is None:
+            return 403, "Invalid path"
         if not clip_path.exists():
-            return web.Response(status=404, text="Clip not found")
-        
+            return 404, "Clip not found"
+
         log_path = clip_path.with_suffix('.log.json')
-        
         if not log_path.exists():
-            return web.json_response({
+            return 200, {
                 'exists': False,
                 'message': 'No processing log available. Reanalyze the recording to generate one.'
-            })
-        
+            }
+
         try:
-            import json
             with open(log_path, 'r') as f:
                 log_data = json.load(f)
-            
-            return web.json_response({
-                'exists': True,
-                'data': log_data
-            })
+            return 200, {'exists': True, 'data': log_data}
         except Exception as e:
             LOGGER.warning("Failed to read processing log: %s", e)
-            return web.json_response({
-                'exists': False,
-                'message': f'Error reading log: {str(e)}'
-            }, status=500)
+            return 500, {'exists': False, 'message': f'Error reading log: {str(e)}'}
 
     def _get_clip_detail(self, rel_path: str) -> dict | None:
         """Get detailed information about a specific clip."""
         import json
         
         clips_dir = self.storage_root / 'clips'
-        clip_path = clips_dir / rel_path
+        clip_path = self._confined_clip_path(rel_path)
         
-        if not clip_path.exists() or not clip_path.is_file():
+        if clip_path is None or not clip_path.exists() or not clip_path.is_file():
             return None
         
         stat = clip_path.stat()
@@ -2477,8 +2493,8 @@ class WebServer:
         found, in place. A page that was watching the old name can follow it
         when exactly one clip with that epoch remains in the directory.
         """
-        clip_path = self.storage_root / 'clips' / rel_path
-        if clip_path.suffix.lower() != '.mp4' or not is_unclassified_clip(clip_path):
+        clip_path = self._confined_clip_path(rel_path)
+        if clip_path is None or clip_path.suffix.lower() != '.mp4' or not is_unclassified_clip(clip_path):
             return None
         epoch = clip_path.stem.split('_', 1)[0]
         try:

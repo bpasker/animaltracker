@@ -89,6 +89,10 @@ The system uses a two-stage detection approach:
 - `ptz_calibration.py` - Auto-calibration via ORB feature matching between wide/zoom frames
 - `onvif_client.py` - ONVIF camera control and discovery
 - `web.py` - aiohttp JSON API, MJPEG/snapshot streams, PTZ control and the shell of the client-side app (which lives in `static/`, served at `/app`)
+  Every handler that takes a clip path from a request resolves it through
+  `_confined_clip_path`, which refuses anything that leaves `clips/` (an
+  absolute path, a climbing `..`, a symlink out); never join a request path
+  onto the clips directory directly or test it for the substring `..`.
 - `configstore.py` - the settings editor's transaction on `config/cameras.yml`:
   read + validate, deep-merge the managed keys, back up, atomic write, apply
   live-safe fields to the running process, diff file vs. runtime for the

@@ -196,6 +196,12 @@ DEFAULT_MIN_FREE_BYTES = 500 * 1024 * 1024  # 500 MB minimum free space
 DEFAULT_MAX_UTILIZATION_PCT = 80  # Don't use more than 80% of disk
 
 
+# ``build_event_temp_avi`` names: <camera>_<event epoch>_<8 hex>.temp.avi. The
+# camera id may itself contain underscores, so the pattern is anchored on the
+# two fixed fields at the end.
+_EVENT_TEMP_RE = re.compile(r"^(?P<camera>.+)_(?P<ts>\d{6,12})_(?P<tag>[0-9a-f]{8})\.temp\.avi$")
+
+
 @dataclass
 class StorageManager:
     storage_root: Path
@@ -206,16 +212,12 @@ class StorageManager:
     def __post_init__(self) -> None:
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.logs_root.mkdir(parents=True, exist_ok=True)
-        # Clean up any orphan streaming temp AVIs left behind by a previous
-        # crash / OOM-kill so they do not accumulate forever.
-        tmp_dir = self.logs_root / "event_temp"
-        if tmp_dir.is_dir():
-            for stale in tmp_dir.glob("*.temp.avi"):
-                try:
-                    stale.unlink()
-                    LOGGER.info("Removed orphan event temp AVI: %s", stale)
-                except OSError:
-                    pass
+        # Nothing under ``event_temp`` is touched here. Those files are the
+        # only copy of an event until it is transcoded, and any process may
+        # build a StorageManager on this config: the ``cleanup`` command did,
+        # and with it deleted the running service's open recordings. What a
+        # previous run left behind is the pipeline's to deal with, once, at
+        # its own startup (``list_orphan_event_temps``).
 
     def build_clip_path(self, camera_id: str, species: str, event_ts: float, ext: str = "mp4") -> Path:
         ts = time.strftime("%Y/%m/%d", time.localtime(event_ts))
@@ -391,6 +393,72 @@ class StorageManager:
         # Add a uuid suffix so a previous crashed event can't collide with a
         # new one from the same (camera, second).
         return tmp_dir / f"{camera_id}_{int(event_ts)}_{uuid.uuid4().hex[:8]}.temp.avi"
+
+    def list_orphan_event_temps(self) -> List[Path]:
+        """Streaming temp AVIs in ``event_temp``, oldest event first.
+
+        Only meaningful before this process records anything: call it once
+        at pipeline startup, when every file there belongs to a run that is
+        gone. Later the directory also holds the live events' recordings.
+        """
+        tmp_dir = self.logs_root / "event_temp"
+        if not tmp_dir.is_dir():
+            return []
+
+        def event_ts(path: Path) -> int:
+            match = _EVENT_TEMP_RE.match(path.name)
+            return int(match.group("ts")) if match else 0
+
+        return sorted(tmp_dir.glob("*.temp.avi"), key=lambda path: (event_ts(path), path.name))
+
+    def recover_orphan_event_temp(self, temp_avi: Path, label: str) -> Optional[Path]:
+        """Save the clip of an event whose process died before transcoding it.
+
+        A restart used to delete these files. They are the whole recording of
+        an event that closed and was waiting for a post-processing slot, or
+        of one still open when the service stopped, so the clip and its
+        alert were lost with them. The name carries the camera and the
+        event's start (``build_event_temp_avi``), which is all it takes to
+        put the clip where the live path would have: ``label`` is the
+        unclassified label, so the recovery sweep analyses it like any clip
+        a restart interrupted.
+
+        Returns the new clip, or None when there is nothing to save: the
+        name is not ours, the file is empty, the event's clip already exists
+        (the old process died between the rename and the unlink) or the
+        recording cannot be read. The temp file is gone either way.
+        """
+        match = _EVENT_TEMP_RE.match(temp_avi.name)
+        if match is None:
+            LOGGER.warning("Removing event temp file with an unexpected name: %s", temp_avi)
+            self._unlink_quietly(temp_avi)
+            return None
+
+        camera_id = match.group("camera")
+        event_ts = int(match.group("ts"))
+        clip_path = self.build_clip_path(camera_id, label, event_ts)
+        saved = [
+            existing for existing in clip_path.parent.glob(f"{event_ts}_*.mp4")
+            if not existing.name.endswith(".tmp.mp4")
+        ]
+        if saved:
+            LOGGER.info("Removing orphan event recording %s: its clip %s was already saved",
+                        temp_avi.name, saved[0].name)
+            self._unlink_quietly(temp_avi)
+            return None
+
+        LOGGER.info("Recovering the recording of an event the last run never saved: %s", temp_avi.name)
+        if not self.transcode_avi_to_mp4(temp_avi, clip_path):
+            LOGGER.warning("Orphan event recording %s could not be recovered", temp_avi.name)
+            return None
+        return clip_path
+
+    @staticmethod
+    def _unlink_quietly(path: Path) -> None:
+        try:
+            path.unlink()
+        except OSError as e:
+            LOGGER.warning("Failed to remove %s: %s", path, e)
 
     def transcode_avi_to_mp4(self, temp_avi: Path, output_path: Path) -> bool:
         """Transcode a finished MJPG AVI into a browser-friendly MP4.

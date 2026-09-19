@@ -24,7 +24,7 @@ from .onvif_client import OnvifClient
 from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
 from .web import WebServer
-from .analysis_recovery import ClipAnalysisRegistry, RecoverySweeper
+from .analysis_recovery import RECOVERED_CLIP_LABEL, ClipAnalysisRegistry, RecoverySweeper
 
 LOGGER = logging.getLogger(__name__)
 
@@ -390,6 +390,10 @@ class StreamWorker:
     # so two cameras finishing simultaneously don't serialize on the GPU).
     _postprocess_semaphore: threading.Semaphore = None
     _postprocess_limit: int = 2
+    # One transcode at a time across all cameras. libx264 already spreads over
+    # every core, so two at once only slow each other and the capture threads;
+    # the job is seconds to a couple of minutes, so the queue stays short.
+    _transcode_lock: threading.Lock = threading.Lock()
     # Every clip analysis in flight in this process (live events, reanalyses,
     # recoveries) claims its path here; the recovery sweeper and the web UI
     # read it. See analysis_recovery.py.
@@ -570,6 +574,25 @@ class StreamWorker:
                             LOGGER.info(f"ONVIF {camera.id}: Using first profile '{self.onvif_profile_token}'")
                 except Exception as e:
                     LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
+
+    def _save_event_clip(self, temp_avi: Optional[Path], clip_path: Path) -> bool:
+        """Transcode an event's streamed recording into its clip, right away.
+
+        Called before the job waits for a post-processing slot. Until this
+        has run, the temp AVI under ``logs_root/event_temp`` is the only copy
+        of the event, and the wait can be most of an hour while SpeciesNet
+        works through a long clip: a deploy in that window used to lose every
+        queued event, clip and alert, with nothing for the recovery sweep to
+        find. Once the MP4 exists, a restart costs only the analysis, which
+        the sweep finishes. ffmpeg runs on the CPU, so nothing here needs
+        the GPU slot.
+
+        Returns True when the clip was written.
+        """
+        if temp_avi is None:
+            return False
+        with StreamWorker._transcode_lock:
+            return self.storage.transcode_avi_to_mp4(temp_avi, clip_path)
 
     def _get_postprocess_detector(self) -> BaseDetector:
         """Get or create the cached post-process detector (thread-safe).
@@ -1777,6 +1800,17 @@ class StreamWorker:
             We transcode it once here and then immediately delete it; no
             full-resolution frame buffer is ever held in RAM.
             """
+            # Step 1: save the clip before waiting for anything (see
+            # ``_save_event_clip``). ``clip_path`` was built by
+            # ``finalize_event`` and is already registered as in flight, so
+            # the archive shows it as analysing and the sweeper leaves it be.
+            if not self._save_event_clip(temp_avi, clip_path):
+                LOGGER.error(
+                    "No clip file produced for %s event @ %s; skipping post-processing",
+                    camera_id, start_ts,
+                )
+                return
+
             # Acquire semaphore to limit concurrent post-processing (prevents RAM explosion)
             # This will block if too many clips are already being processed
             with StreamWorker._ensure_postprocess_semaphore():
@@ -1794,16 +1828,8 @@ class StreamWorker:
                 # default config has ``unified_post_processing=True`` so
                 # SpeciesNet runs on the saved MP4 below instead.
 
-                # Step 2: ``clip_path`` was built by ``finalize_event`` and
-                # registered as in flight before this job queued for a slot.
-
-                # Step 3: Transcode the streamed MJPG AVI -> browser-friendly MP4
-                if temp_avi is None or not self.storage.transcode_avi_to_mp4(temp_avi, clip_path):
-                    LOGGER.error(
-                        "No clip file produced for %s event @ %s; skipping post-processing",
-                        camera_id, start_ts,
-                    )
-                    return
+                # Steps 2-3: the clip was transcoded above, before the wait
+                # for this slot.
 
                 # Step 4: Save detection thumbnails for each species (skip if unified processor will regenerate)
                 if species_key_frames and not use_unified_processor:
@@ -2351,6 +2377,11 @@ class PipelineOrchestrator:
             logs_root=Path(self.runtime.general.logs_root),
             max_utilization_pct=self.runtime.general.retention.max_utilization_pct,
         )
+        # Recordings the previous run never turned into clips. Listed now,
+        # before any camera records, so nothing in the list is ours; they
+        # are saved in the background once the pipeline is up (``run``).
+        self._orphan_event_temps = self.storage.list_orphan_event_temps()
+        self._orphan_stop = threading.Event()
         cameras = runtime.cameras
         if camera_filter:
             camera_set = {cid for cid in camera_filter}
@@ -2704,13 +2735,51 @@ class PipelineOrchestrator:
         )
         
         recovery.start()
+        if self._orphan_event_temps:
+            threading.Thread(
+                target=self._recover_orphan_recordings,
+                args=(list(self._orphan_event_temps), recovery),
+                name="orphan-recordings", daemon=True,
+            ).start()
         try:
             await asyncio.gather(
                 web_server.start(),
                 *(worker.run(stop_event) for worker in workers)
             )
         finally:
+            self._orphan_stop.set()
             recovery.stop()
+
+    def _recover_orphan_recordings(self, orphans: List[Path], recovery: RecoverySweeper) -> None:
+        """Save the recordings the last run left behind, then have them analysed.
+
+        Each becomes ``<epoch>_animal.mp4`` in its camera's archive
+        (``StorageManager.recover_orphan_event_temp``), which is exactly what
+        the recovery sweep looks for, so the species, key frames and sidecar
+        follow without an alert, like any analysis a restart interrupted.
+        Off the event loop and one file at a time, behind the same lock as
+        the live transcodes, so a backlog never delays camera startup.
+        """
+        LOGGER.info("Found %d event recording(s) the last run never saved", len(orphans))
+        recovered = 0
+        for temp_avi in orphans:
+            if self._orphan_stop.is_set():
+                return
+            try:
+                with StreamWorker._transcode_lock:
+                    clip = self.storage.recover_orphan_event_temp(temp_avi, RECOVERED_CLIP_LABEL)
+            except Exception:  # noqa: BLE001 - one bad file must not stop the rest
+                LOGGER.exception("Recovery of orphan event recording %s failed", temp_avi)
+                continue
+            if clip is not None:
+                recovered += 1
+        if not recovered:
+            return
+        LOGGER.info("Recovered %d event recording(s); the recovery sweep will analyse them", recovered)
+        # The sweep leaves clips younger than its minimum age to the live
+        # path, so ask for it once these have aged past that.
+        if not self._orphan_stop.wait(recovery.min_age_s + 5.0):
+            recovery.request_sweep()
 
     def _recover_clip(self, worker_map: Dict[str, StreamWorker], clip_path: Path) -> bool:
         """Run one interrupted clip through post-processing, like a live event would.

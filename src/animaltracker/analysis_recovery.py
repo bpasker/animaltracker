@@ -45,6 +45,11 @@ SIDECAR_SUFFIX = ".log.json"
 # the species. A clip whose name carries only these was never finished.
 UNCLASSIFIED_LABELS = frozenset({"animal"})
 
+# The label given to a clip saved from a recording the previous run never
+# transcoded (``StorageManager.recover_orphan_event_temp``). It must be one of
+# ``UNCLASSIFIED_LABELS`` so the sweep below picks the clip up.
+RECOVERED_CLIP_LABEL = "animal"
+
 # A clip written in the last two minutes belongs to a live event that may be
 # between its transcode and the start of its analysis; the registry already
 # protects that window, this is the belt to its braces.
@@ -333,6 +338,7 @@ class RecoverySweeper(threading.Thread):
 
 
 __all__ = [
+    "RECOVERED_CLIP_LABEL",
     "ClipAnalysisRegistry",
     "RecoverySweeper",
     "find_unfinished_clips",

@@ -63,6 +63,15 @@ The system uses a two-stage detection approach:
   The API reports `analysis: running|queued|unfinished` for such clips and
   the archive shows "Analyzing…" / "Awaiting analysis" / "Not analyzed"
   instead of "No frame". `clip.recover_unfinished_clips` switches it off.
+- `storage.py` - `StorageManager` and `StreamingClipWriter`. An event records
+  to `logs_root/event_temp/<camera>_<epoch>_<tag>.temp.avi`, the only copy
+  until it is transcoded. `StreamWorker._save_event_clip` does that as soon as
+  the event closes, *before* the job waits for a post-processing slot, so a
+  restart costs the analysis (which the sweep redoes) and never the clip.
+  Building a `StorageManager` touches nothing there (the `cleanup` command
+  builds one next to the running service). At startup the pipeline turns
+  whatever a previous run left behind into `<epoch>_animal.mp4` clips
+  (`recover_orphan_event_temp`), which the recovery sweep then analyses.
 - `species_names.py` - display names, and the one specificity scale:
   `species_lineage` / `species_rank` read a label's taxonomy depth (0 animal,
   1 class, 2 order, 3 family) and `pick_species_by_lineage` is the vote every

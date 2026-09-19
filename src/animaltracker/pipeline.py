@@ -2075,20 +2075,29 @@ class StreamWorker:
                 LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)",
                            ctx.camera_id, clip_path, final_species, tracks_count)
 
-        def finalize_event(temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
-            """Claim the clip path, then run ``_finalize_event_body``.
+        def finalize_event(writer, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
+            """Claim the clip path, drain the writer, then run ``_finalize_event_body``.
 
             The path is registered before the job even waits for a
             post-processing slot, so the recovery sweeper never picks up a
             clip a live event is about to analyse and the archive can show
             it as analysing; the live count makes the sweeper hold back
             while an event needs the post-processor.
+
+            The writer is drained here, on this job's thread, not by the
+            coroutine that closed the event: see ``_maybe_close_event``.
             """
             registry = StreamWorker.analysis_registry
             clip_path = self.storage.build_clip_path(camera_id, ctx_base['species'], start_ts, clip_format)
             registry.live_begin()
             claimed = registry.begin(clip_path, source='event')
             try:
+                # ``close()`` joins the writer thread, which first encodes
+                # whatever is still queued. The thread owns the cv2 handle
+                # and releases it on exit, so the temp AVI is fully flushed
+                # by the time this returns.
+                temp_avi = writer.close() if writer is not None else None
+                frame_count = writer.frame_count if writer is not None else 0
                 _finalize_event_body(
                     temp_avi, frame_count, camera_id, start_ts, clip_format, ctx_base,
                     priority, sound, destinations, species_key_frames, ptz_decisions,
@@ -2147,21 +2156,22 @@ class StreamWorker:
             except Exception:
                 pass
 
-        # Drain and release the streaming MJPG writer off-loop. The writer
-        # thread owns the cv2 handle and releases it on exit, so the temp
-        # AVI is fully flushed by the time ``close()`` returns and the
-        # executor picks it up.
-        temp_avi_path: Optional[Path] = None
-        frame_count = 0
-        if writer is not None:
-            temp_avi_path = await loop.run_in_executor(None, writer.close)
-            frame_count = writer.frame_count
-
+        # Hand the writer to the finalize job and return: nothing here may
+        # wait for it to drain. This coroutine runs inside the camera's
+        # inference task, and while that task is unfinished the read loop
+        # drops every frame as "busy". Draining meant encoding whatever the
+        # writer still had queued, up to ``max_pending`` frames; on a camera
+        # whose encoder runs at half the capture rate that was some twenty
+        # seconds after every event with no detection, no PTZ update and no
+        # new event. A stream drop during the wait also cancelled this task
+        # between detaching the event and scheduling its finalize job, so
+        # the event never alerted. With no ``await`` between the two, that
+        # cannot happen. A new event may now open while the old recording is
+        # still being encoded; the two writers share the CPU until it ends.
         loop.run_in_executor(
             None,
             finalize_event,
-            temp_avi_path,
-            frame_count,
+            writer,
             self.camera.id,
             start_ts,
             self.runtime.general.clip.format,

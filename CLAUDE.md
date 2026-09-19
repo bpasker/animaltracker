@@ -74,6 +74,10 @@ The system uses a two-stage detection approach:
   until it is transcoded. `StreamWorker._save_event_clip` does that as soon as
   the event closes, *before* the job waits for a post-processing slot, so a
   restart costs the analysis (which the sweep redoes) and never the clip.
+  The finalize job also drains the writer (`writer.close()`); the coroutine
+  that closes the event must never wait for it, because it runs inside the
+  camera's inference task and the read loop drops every frame until that
+  task ends.
   Building a `StorageManager` touches nothing there (the `cleanup` command
   builds one next to the running service). At startup the pipeline turns
   whatever a previous run left behind into `<epoch>_animal.mp4` clips

@@ -272,8 +272,8 @@ def closing_worker(tmp_path: Path, monkeypatch, detector, *, ptz: bool = False):
     temp_avi.write_bytes(b"the recording")
 
     def transcode(avi: Path, output: Path) -> bool:
-        write_video(output)
         avi.unlink()
+        write_video(output)
         return True
 
     monkeypatch.setattr(storage, "transcode_avi_to_mp4", transcode)

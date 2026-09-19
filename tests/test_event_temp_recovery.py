@@ -55,8 +55,10 @@ def _fake_transcode(calls: list):
     """Stand-in with the real contract: write the clip, always drop the AVI."""
     def transcode(temp_avi: Path, output_path: Path) -> bool:
         calls.append((temp_avi.name, output_path))
-        output_path.write_bytes(b"mp4")
+        # The clip appears last: a test that waits for it on another thread
+        # may look at everything else the moment it exists.
         temp_avi.unlink()
+        output_path.write_bytes(b"mp4")
         return True
     return transcode
 
@@ -337,16 +339,19 @@ def test_the_clip_is_saved_while_every_post_processing_slot_is_busy(tmp_path, mo
         await worker._maybe_close_event(float(EVENT_TS + 30), force=True)
         # finalize_event now runs in the default executor; give it the floor.
         loop = asyncio.get_running_loop()
-        assert await loop.run_in_executor(None, _wait_for, clip.exists)
+        try:
+            assert await loop.run_in_executor(None, _wait_for, clip.exists)
 
-        # Saved, although the job has not got its slot yet: a restart now
-        # costs the analysis (which the sweep redoes), not the event.
-        assert [name for name, _ in calls] == [temp_avi.name]
-        assert not temp_avi.exists()
-        assert notifier.sent == []
-        assert StreamWorker.analysis_registry.is_active(clip)
-
-        one_busy_slot()
+            # Saved, although the job has not got its slot yet: a restart now
+            # costs the analysis (which the sweep redoes), not the event.
+            assert [name for name, _ in calls] == [temp_avi.name]
+            assert not temp_avi.exists()
+            assert notifier.sent == []
+            assert StreamWorker.analysis_registry.is_active(clip)
+        finally:
+            # Always, or a failed assertion leaves the job blocked and
+            # asyncio.run() waiting minutes for its thread.
+            one_busy_slot()
         assert await loop.run_in_executor(None, _wait_for, lambda: len(notifier.sent) == 1)
 
     asyncio.run(close_event())
@@ -354,6 +359,91 @@ def test_the_clip_is_saved_while_every_post_processing_slot_is_busy(tmp_path, mo
     assert notifier.sent[0].clip_path == str(clip)
     assert _wait_for(lambda: not StreamWorker.analysis_registry.is_active(clip))
     assert worker.event_state is None
+
+
+class SlowWriter(FakeWriter):
+    """A writer with frames still queued: ``close()`` takes as long as the drain."""
+
+    def __init__(self, temp_avi: Path) -> None:
+        super().__init__(temp_avi)
+        self.drained = threading.Event()
+        self.closed_on: list = []
+
+    def close(self) -> Path:
+        self.closed_on.append(threading.current_thread())
+        assert self.drained.wait(10), "the test never let the drain finish"
+        return self.temp_avi
+
+
+def test_closing_an_event_does_not_wait_for_its_writer_to_drain(tmp_path, monkeypatch):
+    """The close runs inside the camera's inference task, and until that task
+    ends the read loop drops every frame. Awaiting the drain there blinded the
+    camera for as long as the encoder needed for its queue: some twenty
+    seconds after every event where it runs at half the capture rate."""
+    storage = _storage(tmp_path)
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode([]))
+    temp_avi = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    notifier = FakeNotifier()
+    worker = _closing_worker(storage, temp_avi, notifier)
+    writer = SlowWriter(temp_avi)
+    worker.event_state.clip_writer = writer
+    clip = storage.build_clip_path("cam1", "animal", EVENT_TS)
+
+    async def close_event() -> None:
+        loop_thread = threading.current_thread()
+        started = time.monotonic()
+        try:
+            await asyncio.wait_for(worker._maybe_close_event(float(EVENT_TS + 30), force=True), timeout=2.0)
+            elapsed = time.monotonic() - started
+        except BaseException:
+            writer.drained.set()
+            raise
+
+        # Back at once, with the recording still draining: the inference
+        # task is free and the camera can detect again.
+        if not (elapsed < 1.0 and worker.event_state is None and not clip.exists()):
+            writer.drained.set()
+        assert elapsed < 1.0
+        assert worker.event_state is None
+        assert not clip.exists()
+
+        loop = asyncio.get_running_loop()
+        try:
+            assert await loop.run_in_executor(None, _wait_for, lambda: bool(writer.closed_on))
+            assert writer.closed_on[0] is not loop_thread        # drained on the job's own thread
+            assert StreamWorker.analysis_registry.is_active(clip)  # and claimed while it drains
+        finally:
+            writer.drained.set()
+        assert await loop.run_in_executor(None, _wait_for, lambda: len(notifier.sent) == 1)
+
+    asyncio.run(close_event())
+
+    assert clip.exists() and notifier.sent[0].clip_path == str(clip)
+
+
+def test_a_writer_that_never_produced_a_file_yields_no_clip_and_no_alert(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode(calls))
+    notifier = FakeNotifier()
+    worker = _closing_worker(storage, storage.logs_root / "event_temp" / "never.temp.avi", notifier)
+
+    class FailedWriter(FakeWriter):
+        def close(self):
+            return None                                    # what StreamingClipWriter returns on failure
+
+    worker.event_state.clip_writer = FailedWriter(Path("unused"))
+    clip = storage.build_clip_path("cam1", "animal", EVENT_TS)
+
+    async def close_event() -> None:
+        await worker._maybe_close_event(float(EVENT_TS + 30), force=True)
+        loop = asyncio.get_running_loop()
+        assert await loop.run_in_executor(
+            None, _wait_for, lambda: not StreamWorker.analysis_registry.is_active(clip))
+
+    asyncio.run(close_event())
+
+    assert calls == [] and notifier.sent == [] and not clip.exists()
 
 
 def test_an_event_with_no_recording_is_dropped_without_waiting_for_a_slot(tmp_path, one_busy_slot):

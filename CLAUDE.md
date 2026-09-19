@@ -61,6 +61,12 @@ The system uses a two-stage detection approach:
   the pipeline can read and trim it on the loop, and `clear_lock()` never
   blocks (a contended reset is done by the next update before it looks at a
   detection).
+  Two guards against false locks: a first lock on a detection ByteTrack has
+  not confirmed needs 0.75 until the episode has locked (`_episode_locked`;
+  never test `_mode` for this, every update path sets TRACKING before it
+  selects), and the static-target watchdog remembers the spot it released
+  (`_static_rejects`, per camera, ten minutes) so the blob is dropped before
+  it counts as a sighting and patrol can resume.
 - `analysis_recovery.py` - `ClipAnalysisRegistry` (every clip analysis in
   flight: live event, reanalysis, recovery) and `RecoverySweeper`, a daemon
   thread that finishes the post-processing a restart interrupted: shortly

@@ -465,6 +465,23 @@ class PTZTracker:
     # the PTZ's own motion, so a lower bar re-acquires instead of stalling.
     _untracked_lock_conf_cold: float = field(default=0.75, init=False)
     _untracked_lock_conf_tracking: float = field(default=0.60, init=False)
+    # Whether a lock has formed since this tracking episode began. "Already
+    # TRACKING" above means exactly that: evidence an animal is there. It
+    # used to be read off ``_mode``, but every update path switches the mode
+    # to TRACKING before it selects a target, so the mode never said "cold"
+    # and the strict bar never applied: an unconfirmed 65% flash seen from
+    # patrol locked at once.
+    _episode_locked: bool = field(default=False, init=False)
+    # Targets the static-target watchdog released, as
+    # (source_camera, norm_x, norm_y, expires_at). Detections at one of these
+    # spots are dropped before they count as a sighting. Without this the
+    # watchdog's release fell straight through to "no lock: pick the best
+    # detection", which is the same stationary blob, so it was re-locked in
+    # the same call with a fresh anchor and the camera never went back to
+    # patrol: the very hang the watchdog exists for.
+    _static_rejects: list = field(default_factory=list, init=False)
+    _static_reject_sec: float = field(default=600.0, init=False)
+    _static_reject_radius: float = field(default=0.05, init=False)
     # Hysteresis for switching to a *different* (non-locked) max-confidence target.
     # H4: prevents flickering between two similar-confidence detections.
     _challenger_track_id: Optional[int] = field(default=None, init=False)
@@ -1370,6 +1387,9 @@ class PTZTracker:
         # Auto-stop expired tracking step BEFORE rate-limiting so it always
         # fires within ~1 worker tick of the scheduled time.
         self._check_tracking_step_expiry(now)
+        # A released static target is not a sighting: dropped first, or it
+        # would hold the camera off patrol for as long as it is detected.
+        detections = self._drop_static_rejects(detections, frame_width, frame_height, "single", now)
         # Record the sighting BEFORE the rate limit can discard this tick.
         # A detection that arrives inside the update_interval window still
         # proves the subject is present, and must not count toward the
@@ -1425,6 +1445,7 @@ class PTZTracker:
                     'detection_count': len(detections),
                 })
                 self._mode = PTZMode.TRACKING
+                self._episode_locked = False  # a new episode: nothing has locked yet
                 LOGGER.info("PTZ switching to TRACKING mode - object detected")
 
             return self._do_tracking(detections, frame_width, frame_height)
@@ -1577,6 +1598,15 @@ class PTZTracker:
 
         source_detections = source_data[0] if source_data else []
         target_detections = target_data[0] if target_data else []
+
+        # A released static target is not a sighting: dropped first, or it
+        # would hold the camera off patrol for as long as it is detected.
+        if source_detections and source_data:
+            source_detections = self._drop_static_rejects(
+                source_detections, source_data[1], source_data[2], source_camera_id, now)
+        if target_detections and target_data:
+            target_detections = self._drop_static_rejects(
+                target_detections, target_data[1], target_data[2], target_camera_id, now)
 
         if (source_detections or target_detections) and self._track_active:
             self._last_target_seen_time = now
@@ -1775,6 +1805,7 @@ class PTZTracker:
                 else:
                     self._reset_lock_state_locked()
                 self._mode = PTZMode.TRACKING
+                self._episode_locked = False  # a new episode: nothing has locked yet
 
             # Use target camera's detections - these are most accurate since
             # they show where the object is in the PTZ camera's current view
@@ -1880,6 +1911,7 @@ class PTZTracker:
                 else:
                     self._reset_lock_state_locked()
                 self._mode = PTZMode.TRACKING
+                self._episode_locked = False  # a new episode: nothing has locked yet
 
             # Use the original tracking method for source camera detections
             return self._do_tracking(
@@ -2556,6 +2588,42 @@ class PTZTracker:
 
         return False
 
+    def _drop_static_rejects(
+        self, detections: List['Detection'], frame_width: int, frame_height: int,
+        source_camera: Optional[str], now: float,
+    ) -> List['Detection']:
+        """``detections`` without those sitting where a static target was released.
+
+        A spot is remembered per source camera, in that camera's normalized
+        frame, for ``_static_reject_sec``. The currently locked track is never
+        dropped: a real animal walking across the spot keeps its lock, and an
+        animal that was merely resting there is lockable again as soon as it
+        has moved ``_static_reject_radius`` away.
+        """
+        if not self._static_rejects:
+            return detections
+        self._static_rejects = [r for r in self._static_rejects if r[3] > now]
+        spots = [(r[1], r[2]) for r in self._static_rejects if r[0] == source_camera]
+        if not spots or not detections:
+            return detections
+        kept: List['Detection'] = []
+        for det in detections:
+            tid = getattr(det, 'track_id', None)
+            if tid is not None and tid == self._locked_track_id:
+                kept.append(det)
+                continue
+            cx = (det.bbox[0] + det.bbox[2]) / 2 / max(frame_width, 1)
+            cy = (det.bbox[1] + det.bbox[3]) / 2 / max(frame_height, 1)
+            if any(abs(cx - sx) <= self._static_reject_radius and abs(cy - sy) <= self._static_reject_radius
+                   for sx, sy in spots):
+                PTZ_LOGGER.debug(
+                    "[STATIC_REJECT] Ignoring %s at (%.2f, %.2f) on %s: released there as a static target",
+                    det.species, cx, cy, source_camera,
+                )
+                continue
+            kept.append(det)
+        return kept
+
     def _select_best_detection(
         self, detections: List['Detection'], frame_width: int, frame_height: int,
         source_camera: Optional[str] = None,
@@ -2589,7 +2657,29 @@ class PTZTracker:
                     self._lock_motion_threshold * 100, stuck_for,
                     self._locked_species, self._locked_track_id,
                 )
+                now_t = time.time()
+                self._static_rejects.append((
+                    self._locked_source_camera or source_camera,
+                    self._lock_motion_anchor[0], self._lock_motion_anchor[1],
+                    now_t + self._static_reject_sec,
+                ))
+                del self._static_rejects[:-16]   # a handful of spots, never a growing list
+                self._log_decision('static_target_released', {
+                    'species': self._locked_species,
+                    'track_id': self._locked_track_id,
+                    'stuck_for_s': round(stuck_for, 1),
+                    'position': [round(self._lock_motion_anchor[0], 3), round(self._lock_motion_anchor[1], 3)],
+                    'ignored_for_s': self._static_reject_sec,
+                })
                 self._reset_lock_state_locked()
+                # What we took for an animal was not one: the next lock is a
+                # first lock again, at the strict bar.
+                self._episode_locked = False
+                # Not this blob again, in this call or the next ten minutes.
+                detections = self._drop_static_rejects(
+                    detections, frame_width, frame_height, source_camera, now_t)
+                if not detections:
+                    return None
 
         # H1: a lock center stored in a *different* camera's normalized
         # coordinates is meaningless (cam1 wide vs cam2 zoom). On a true
@@ -2627,6 +2717,7 @@ class PTZTracker:
         def _record_lock(det: 'Detection', is_new: bool) -> None:
             tid = getattr(det, 'track_id', None)
             self._locked_track_id = tid
+            self._episode_locked = True
             cx = (det.bbox[0] + det.bbox[2]) / 2 / max(frame_width, 1)
             cy = (det.bbox[1] + det.bbox[3]) / 2 / max(frame_height, 1)
             self._locked_bbox_center = (cx, cy)
@@ -2785,16 +2876,17 @@ class PTZTracker:
             # No confirmed tracks -- only lock if confidence is very high
             # (real, strong detection) AND log it as suspicious.
             best = max(detections, key=lambda d: d.confidence)
+            reacquiring = self._mode == PTZMode.TRACKING and self._episode_locked
             min_conf = (
-                self._untracked_lock_conf_tracking
-                if self._mode == PTZMode.TRACKING
+                self._untracked_lock_conf_tracking if reacquiring
                 else self._untracked_lock_conf_cold
             )
             if best.confidence < min_conf:
                 PTZ_LOGGER.info(
                     "[LOCK_SKIP] No tracked detections and best untracked is only %.1f%% "
-                    "(%s, need %.0f%% in %s); not locking",
-                    best.confidence * 100, best.species, min_conf * 100, self._mode.value
+                    "(%s, need %.0f%% %s); not locking",
+                    best.confidence * 100, best.species, min_conf * 100,
+                    "to re-acquire" if reacquiring else "for a first lock",
                 )
                 return None
             PTZ_LOGGER.warning(

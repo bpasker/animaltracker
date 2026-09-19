@@ -154,9 +154,22 @@ def test_spatial_lock_stays_tight_for_static_wide_camera_anchor() -> None:
 # --------------------------------------------------------------------------
 
 def test_untracked_lock_accepted_at_65pct_while_tracking() -> None:
+    """The lower bar is for re-acquiring: a lock formed earlier in this episode
+    (evidence an animal is there) and was released after its misses."""
     t, _ = tracker()
-    chosen = t._select_best_detection([det(0.5, 0.5, 0.1, 0.1, conf=0.65)], W, H, "cam2")
+    assert t._select_best_detection([det(0.5, 0.5, 0.1, 0.1, track_id=4)], W, H, "cam2") is not None
+    t._reset_lock_state_locked()                      # what LOCK_RELEASE does
+
+    chosen = t._select_best_detection([det(0.2, 0.2, 0.1, 0.1, conf=0.65)], W, H, "cam2")
     assert chosen is not None
+
+
+def test_untracked_lock_refused_at_65pct_when_nothing_has_locked_yet() -> None:
+    """``_mode`` alone says nothing: every update path sets TRACKING before it
+    selects, so a mode test made the strict bar unreachable."""
+    t, _ = tracker()                                  # mode TRACKING, no lock so far
+    chosen = t._select_best_detection([det(0.5, 0.5, 0.1, 0.1, conf=0.65)], W, H, "cam2")
+    assert chosen is None
 
 
 def test_untracked_lock_refused_at_65pct_from_patrol() -> None:

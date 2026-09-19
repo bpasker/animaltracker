@@ -677,8 +677,11 @@ class WebServer:
             if not tracker:
                 return web.json_response({'error': 'No PTZ tracker configured for this camera'}, status=400)
             
-            # Use the new method
-            tracker.set_patrol_enabled(enabled)
+            # Off the event loop: this takes the tracker's lock, which an
+            # update may hold for the length of an ONVIF request, and sends
+            # the camera to a preset or stops it itself.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, tracker.set_patrol_enabled, enabled)
             
             # Persist the state
             self._update_ptz_state(camera_id, patrol_enabled=enabled)
@@ -710,8 +713,10 @@ class WebServer:
             if not tracker:
                 return web.json_response({'error': 'No PTZ tracker configured for this camera'}, status=400)
             
-            # Use the new method
-            tracker.set_track_enabled(enabled)
+            # Off the event loop, like the patrol toggle: it takes the
+            # tracker's lock and may stop the camera.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, tracker.set_track_enabled, enabled)
             
             # Persist the state
             self._update_ptz_state(camera_id, track_enabled=enabled)
@@ -3422,8 +3427,10 @@ class WebServer:
         self._save_ptz_state(state)
 
     async def start(self):
-        # Apply persisted PTZ state to trackers
-        self._apply_ptz_state()
+        # Apply persisted PTZ state to trackers. On a thread: it sends the
+        # camera to its first preset and re-arms patrol, all ONVIF requests,
+        # while the camera workers are starting on this same loop.
+        await asyncio.get_running_loop().run_in_executor(None, self._apply_ptz_state)
         
         # Setup access logger
         access_logger = logging.getLogger('web_access')

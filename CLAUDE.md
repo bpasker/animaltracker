@@ -54,6 +54,13 @@ The system uses a two-stage detection approach:
 - `tracker.py` - ByteTrack object tracking with persistent IDs
 - `postprocess.py` - Clip post-analysis, track merging, species finalization
 - `ptz_tracker.py` - PTZ auto-tracking controller, pixel-to-PTZ coordinate mapping
+  `PTZTracker._lock` is held for the whole of an update, ONVIF requests
+  included, and cam1 and cam2 share one tracker. Nothing the event loop
+  calls may wait for it: call lock-taking methods through `run_in_executor`.
+  The decision log has its own `_decision_lock`, never held across I/O, so
+  the pipeline can read and trim it on the loop, and `clear_lock()` never
+  blocks (a contended reset is done by the next update before it looks at a
+  detection).
 - `analysis_recovery.py` - `ClipAnalysisRegistry` (every clip analysis in
   flight: live event, reanalysis, recovery) and `RecoverySweeper`, a daemon
   thread that finishes the post-processing a restart interrupted: shortly

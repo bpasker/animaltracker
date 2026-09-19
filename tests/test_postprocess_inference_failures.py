@@ -258,6 +258,9 @@ class FakePtzTracker:
     def clear_lock(self) -> None:
         pass
 
+    def decision_log_span(self):
+        return 0, 0.0, 0.0
+
     def is_track_enabled(self) -> bool:
         return True
 

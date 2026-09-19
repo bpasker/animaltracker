@@ -1817,11 +1817,9 @@ class StreamWorker:
                             len(ptz_log), window_start, event_end)
             else:
                 # Log why no decisions were captured - helps debug PTZ issues
-                total_decisions = len(self.ptz_tracker._decision_log)
+                total_decisions, oldest, newest = self.ptz_tracker.decision_log_span()
                 # Show timestamps of available decisions if any
                 if total_decisions > 0:
-                    oldest = min(e.timestamp for e in self.ptz_tracker._decision_log)
-                    newest = max(e.timestamp for e in self.ptz_tracker._decision_log)
                     LOGGER.info(
                         "No PTZ decisions in event window [%.1f - %.1f] for %s "
                         "(tracker has %d decisions from %.1f to %.1f - outside window)",

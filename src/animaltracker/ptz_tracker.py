@@ -490,8 +490,19 @@ class PTZTracker:
     _decision_log: List[PTZDecisionEntry] = field(default_factory=list, init=False)
     _decision_log_max_entries: int = field(default=1000, init=False)  # Prevent unbounded growth
 
-    # Thread lock for multi-camera access
+    # Thread lock for multi-camera access. Held for the whole of an update,
+    # ONVIF requests included, so it can stay taken for as long as the camera
+    # takes to answer (up to the 5 s SOAP timeout). Nothing the event loop
+    # calls may wait for it: the loop serves every camera and the web UI, and
+    # cam1 and cam2 share one tracker, so cam1's frame handler used to stall
+    # the whole process for the rest of cam2's request on every frame.
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    # The decision log has a lock of its own, never held across I/O, so the
+    # pipeline can read and trim it from the event loop. Taken after ``_lock``
+    # where both are held (``_log_decision`` inside an update), never before.
+    _decision_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    # ``clear_lock()`` found ``_lock`` taken: the next update resets first.
+    _lock_reset_pending: bool = field(default=False, init=False)
 
     def _log_decision(self, event: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Log a PTZ decision for later retrieval."""
@@ -501,23 +512,33 @@ class PTZTracker:
             mode=self._mode.value,
             details=details or {},
         )
-        self._decision_log.append(entry)
-        # Trim if too large
-        if len(self._decision_log) > self._decision_log_max_entries:
-            self._decision_log = self._decision_log[-self._decision_log_max_entries:]
+        with self._decision_lock:
+            self._decision_log.append(entry)
+            # Trim if too large
+            if len(self._decision_log) > self._decision_log_max_entries:
+                self._decision_log = self._decision_log[-self._decision_log_max_entries:]
     
     def get_decision_log(self) -> List[Dict[str, Any]]:
         """Get all logged PTZ decisions as dicts."""
-        with self._lock:
+        with self._decision_lock:
             return [entry.to_dict() for entry in self._decision_log]
+
+    def decision_log_span(self) -> Tuple[int, float, float]:
+        """``(count, oldest timestamp, newest timestamp)`` of the log; zeros when empty."""
+        with self._decision_lock:
+            if not self._decision_log:
+                return 0, 0.0, 0.0
+            stamps = [entry.timestamp for entry in self._decision_log]
+        return len(stamps), min(stamps), max(stamps)
     
     def get_decisions_in_window(self, start_ts: float, end_ts: float) -> List[Dict[str, Any]]:
         """Get PTZ decisions within a time window (for event finalization).
         
         This is safe for shared trackers - doesn't clear the log, just returns
-        decisions that fall within the event's time window.
+        decisions that fall within the event's time window. Called from the
+        event loop when an event closes, so it takes only the log's own lock.
         """
-        with self._lock:
+        with self._decision_lock:
             return [
                 entry.to_dict()
                 for entry in self._decision_log
@@ -529,7 +550,7 @@ class PTZTracker:
         
         DEPRECATED: Use get_decisions_in_window() for shared trackers.
         """
-        with self._lock:
+        with self._decision_lock:
             log = [entry.to_dict() for entry in self._decision_log]
             self._decision_log = []
             return log
@@ -537,9 +558,11 @@ class PTZTracker:
     def trim_old_decisions(self, cutoff_ts: float) -> int:
         """Remove decisions older than cutoff timestamp.
         
-        Returns number of entries removed.
+        Returns number of entries removed. The pipeline calls this from the
+        event loop on every processed frame, so it takes only the log's own
+        lock and never waits behind an ONVIF request.
         """
-        with self._lock:
+        with self._decision_lock:
             original_len = len(self._decision_log)
             self._decision_log = [e for e in self._decision_log if e.timestamp >= cutoff_ts]
             return original_len - len(self._decision_log)
@@ -1157,8 +1180,28 @@ class PTZTracker:
         self._locked_seen_at = 0.0
 
     def clear_lock(self) -> None:
-        """Public: clear the target lock (e.g. on event boundary)."""
-        with self._lock:
+        """Public: clear the target lock (e.g. on event boundary). Never blocks.
+
+        Called from the event loop when an event closes. If an update holds
+        ``_lock`` right now, possibly in the middle of an ONVIF request, the
+        reset is left for the next update to do before it looks at a single
+        detection. The order of things is what it was when this waited: the
+        update in flight finishes on the old lock state either way, and the
+        one after it starts clean.
+        """
+        if self._lock.acquire(blocking=False):
+            try:
+                self._lock_reset_pending = False
+                self._reset_lock_state_locked()
+            finally:
+                self._lock.release()
+        else:
+            self._lock_reset_pending = True
+
+    def _apply_pending_lock_reset_locked(self) -> None:
+        """Do the reset a ``clear_lock()`` could not. Caller must hold self._lock."""
+        if self._lock_reset_pending:
+            self._lock_reset_pending = False
             self._reset_lock_state_locked()
     
     def _goto_current_preset(self) -> None:
@@ -1309,6 +1352,7 @@ class PTZTracker:
             True if PTZ was moved, False otherwise
         """
         with self._lock:
+            self._apply_pending_lock_reset_locked()
             self._current_capture_ts = frame_capture_ts or 0.0
             try:
                 return self._update_locked(detections, frame_width, frame_height)
@@ -1498,6 +1542,7 @@ class PTZTracker:
             True if PTZ was moved, False otherwise
         """
         with self._lock:
+            self._apply_pending_lock_reset_locked()
             self._current_capture_ts = frame_capture_ts or 0.0
             try:
                 return self._update_multi_camera_locked(

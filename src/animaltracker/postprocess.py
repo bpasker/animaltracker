@@ -990,7 +990,11 @@ class ClipPostProcessor:
 
             # Merge tracks that fill gaps in larger tracks' detection timelines
             # If a smaller track exists entirely within a gap of a larger track, merge them
-            gap_merged = tracker.merge_gap_filling_tracks()
+            gap_merged = tracker.merge_gap_filling_tracks(
+                iou_threshold=settings.spatial_merge_iou,
+                reach=settings.spatial_merge_reach,
+                reach_frames=settings.spatial_merge_gap,
+            )
             if gap_merged > 0:
                 note("gap_fill_merge",
                      f"Merged {gap_merged} tracks that filled detection gaps in larger tracks")
@@ -1025,7 +1029,12 @@ class ClipPostProcessor:
             # the same animal read differently for that moment. Only fragments
             # below min_specific_detections are absorbed.
             if settings.spatial_merge_enabled:
-                late_gap_merged = tracker.merge_gap_filling_tracks(max_detections=weak_limit - 1)
+                late_gap_merged = tracker.merge_gap_filling_tracks(
+                    max_detections=weak_limit - 1,
+                    iou_threshold=settings.spatial_merge_iou,
+                    reach=settings.spatial_merge_reach,
+                    reach_frames=settings.spatial_merge_gap,
+                )
                 if late_gap_merged > 0:
                     note("gap_fill_merge",
                          f"Merged {late_gap_merged} tracks with fewer than {weak_limit} detections "

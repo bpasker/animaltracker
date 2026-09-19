@@ -965,21 +965,42 @@ class ObjectTracker:
         
         return merged_count
 
-    def merge_gap_filling_tracks(self, max_detections: Optional[int] = None) -> int:
+    def merge_gap_filling_tracks(
+        self,
+        max_detections: Optional[int] = None,
+        iou_threshold: float = 0.3,
+        reach: float = 1.0,
+        reach_frames: int = 30,
+    ) -> int:
         """Merge tracks that fill gaps in larger tracks' detection timelines.
         
         If Track A has detections at frames [100-200, 300-400] (with a gap 200-300)
         and Track B exists entirely within that gap (e.g., frames 220-280),
         Track B likely represents the same animal that was briefly lost and re-detected
         with a new track ID.
-        
-        This is more aggressive than spatial merge - it doesn't require IoU match,
-        just that the smaller track is temporally "sandwiched" by the larger track.
+
+        Being sandwiched in time is not enough, though: a second animal that
+        visits while the first is out of sight is sandwiched too. This pass
+        took any such track, wherever it was in the frame and whatever it was
+        (a cardinal in the far corner disappeared into a dog with a three
+        second gap, and the clip reported one animal). So the fragment must
+        also be where the larger track plausibly was: its first box near the
+        larger track's last box before the gap, or its last box near the
+        first one after it (``_fits_gap_spatially``). No species agreement is
+        asked for, as in the other spatial passes: a dog read as a cat for a
+        few frames on the dog's own path is still the dog.
 
         Args:
             max_detections: When set, only tracks with at most this many
                 detections are absorbed, so a real second animal that stayed
                 for a while keeps its own track.
+            iou_threshold: Overlap that counts as "the same place".
+            reach: Centre-to-centre distance, in body lengths, that counts as
+                a continuation across ``reach_frames`` frames; 0 disables the
+                distance test and leaves the overlap as the only criterion.
+            reach_frames: The frame gap ``reach`` is meant for. A longer wait
+                allows proportionally more movement, up to
+                ``_GAP_FILL_MAX_REACH`` times ``reach``.
         
         Returns:
             Number of tracks merged
@@ -1023,19 +1044,18 @@ class ObjectTracker:
                 continue
             
             # Find gaps in the larger track's detections
-            larger_frames = sorted(larger['detection_frames'])
-            if len(larger_frames) < 2:
+            if len(larger['detection_frames']) < 2:
                 continue
-            
-            # Build list of gaps (start_frame, end_frame)
-            gaps = []
-            for j in range(len(larger_frames) - 1):
-                gap_start = larger_frames[j]
-                gap_end = larger_frames[j + 1]
-                gap_size = gap_end - gap_start
-                if gap_size > 6:  # Only consider gaps larger than typical frame skip
-                    gaps.append((gap_start, gap_end))
-            
+
+            def open_gaps() -> list:
+                """(start_frame, end_frame) of every gap still open in ``larger``."""
+                frames = sorted(larger['detection_frames'])
+                return [
+                    (frames[j], frames[j + 1]) for j in range(len(frames) - 1)
+                    if frames[j + 1] - frames[j] > 6  # larger than typical frame skip
+                ]
+
+            gaps = open_gaps()
             if not gaps:
                 continue
             
@@ -1057,6 +1077,18 @@ class ObjectTracker:
                         smaller_last <= gap_end + 3 and
                         smaller_first > gap_start and
                         smaller_last < gap_end):
+
+                        if not self._fits_gap_spatially(
+                            larger['info'], smaller['info'], gap_start, gap_end,
+                            iou_threshold, reach, reach_frames,
+                        ):
+                            LOGGER.debug(
+                                "Gap-fill skipped: Track %d (%s) sits in a gap of Track %d (%s) "
+                                "but nowhere near it",
+                                smaller['track_id'], smaller['species'],
+                                larger['track_id'], larger['species'],
+                            )
+                            break
                         
                         LOGGER.info(
                             "Gap-fill merge: Track %d (%s, %d det, frames %d-%d) <- "
@@ -1094,8 +1126,13 @@ class ObjectTracker:
                                 if existing[0] is None or frame_data[1] > existing[1]:
                                     larger_info.species_best_frames[sp] = frame_data
                         
-                        # Update larger's detection_frames for subsequent gap detection
+                        # The gap just got smaller (or split in two): work
+                        # the rest out against what is actually still open.
+                        # The list used to be built once per larger track, so
+                        # two fragments that overlapped each other in time
+                        # could both land in the same, by then filled, gap.
                         larger['detection_frames'].update(smaller['detection_frames'])
+                        gaps = open_gaps()
                         
                         tracks_to_remove.add(smaller['track_id'])
                         merged_count += 1
@@ -1110,6 +1147,59 @@ class ObjectTracker:
                        merged_count, len(self.tracks))
         
         return merged_count
+
+    # A fragment found after a long wait may have moved further than one after
+    # a short one; this caps how much further, in multiples of ``reach``.
+    _GAP_FILL_MAX_REACH = 4.0
+
+    def _fits_gap_spatially(
+        self,
+        larger: TrackInfo,
+        smaller: TrackInfo,
+        gap_start: int,
+        gap_end: int,
+        iou_threshold: float,
+        reach: float,
+        reach_frames: int,
+    ) -> bool:
+        """Whether ``smaller`` is where ``larger`` plausibly was during its gap.
+
+        Compares the fragment's first box with the larger track's last box
+        before the gap, and its last box with the first one after it; either
+        side is enough. "Near" is the spatial merge's test, overlap or centre
+        distance in body lengths, with the distance allowed to grow with the
+        frames that passed between the two boxes. Tracks without boxes give
+        nothing to go on and are treated as fitting, as before.
+        """
+        def box_at(info: TrackInfo, frame_idx: int) -> Optional[List[float]]:
+            for c in info.classifications:
+                if c.frame_idx == frame_idx and c.bbox:
+                    return c.bbox
+            return None
+
+        boxed = [c for c in smaller.classifications if c.bbox]
+        if not boxed:
+            return True
+        first = min(boxed, key=lambda c: c.frame_idx)
+        last = max(boxed, key=lambda c: c.frame_idx)
+        before = box_at(larger, gap_start)
+        after = box_at(larger, gap_end)
+        if before is None and after is None:
+            return True
+
+        def near(box_a: Optional[List[float]], box_b: List[float], frames_between: int) -> bool:
+            if box_a is None:
+                return False
+            if self._calculate_iou(box_a, box_b) >= iou_threshold:
+                return True
+            if reach <= 0:
+                return False
+            scale = max(1.0, frames_between / max(reach_frames, 1))
+            allowed = reach * min(scale, self._GAP_FILL_MAX_REACH)
+            return self._center_distance_ratio(box_a, box_b) <= allowed
+
+        return (near(before, first.bbox, first.frame_idx - gap_start)
+                or near(after, last.bbox, gap_end - last.frame_idx))
 
     def _calculate_iou(self, bbox1: List[float], bbox2: List[float]) -> float:
         """Calculate Intersection over Union between two bounding boxes.
@@ -1264,8 +1354,11 @@ class ObjectTracker:
                 
                 # Check frame gap
                 frame_gap = later['first_frame'] - earlier['last_frame']
-                if frame_gap < 0:
-                    # Tracks overlap in time - skip
+                if frame_gap <= 0:
+                    # Tracks overlap in time - skip. Zero counts: both tracks
+                    # have a box in that frame, so they are two objects (a doe
+                    # and the fawn beside her), not one that moved. Duplicate
+                    # boxes of one animal are the overlap merge's job.
                     continue
                 if frame_gap > max_frame_gap:
                     # Too far apart temporally

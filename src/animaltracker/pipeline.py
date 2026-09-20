@@ -925,6 +925,23 @@ class StreamWorker:
                 await self._close_event_left_open_offline()
                 await asyncio.sleep(1)  # Brief pause before reconnect
 
+    async def _recover_after_error(self) -> None:
+        """Leave nothing half-open behind a ``run()`` that died.
+
+        An event that was open is closed, so what it recorded so far is
+        saved and alerts. If even that fails, the event is dropped: the
+        camera must be able to start a new one after the restart, and the
+        recording, if there is one, is recovered at the next startup.
+        """
+        self.stream_connected = False
+        if self.event_state is None:
+            return
+        try:
+            await self._maybe_close_event(time.time(), force=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Could not close the open event for %s after the error; dropping it", self.camera.id)
+            self.event_state = None
+
     async def _close_event_left_open_offline(self) -> None:
         """Close an event the stream dropped out from under, once it has gone idle.
 
@@ -2918,11 +2935,58 @@ class PipelineOrchestrator:
         try:
             await asyncio.gather(
                 web_server.start(),
-                *(worker.run(stop_event) for worker in workers)
+                *(self._run_worker_supervised(worker, stop_event) for worker in workers)
             )
         finally:
             self._orphan_stop.set()
             recovery.stop()
+
+    # Seconds before a worker that died is started again; doubles with each
+    # failure in a row up to the maximum, and starts over once a worker has
+    # run for a minute.
+    _WORKER_RESTART_DELAY = 5.0
+    _WORKER_RESTART_DELAY_MAX = 60.0
+
+    async def _run_worker_supervised(self, worker: StreamWorker, stop_event: asyncio.Event) -> None:
+        """Keep one camera running whatever its worker raises.
+
+        ``StreamWorker.run`` guards its inference task but not its read loop,
+        and the workers were gathered bare: an unexpected exception in one
+        camera's loop (a temp directory that cannot be written when an event
+        starts, the tracker race at a forced event close) ended ``run()``,
+        the gather raised, and the whole process went down, every other
+        camera and the web UI with it. systemd starts it again, but a cause
+        that persists makes that a crash loop with nothing recording.
+
+        Here the error is logged with its traceback, the camera's open event
+        is closed so what it recorded is saved, and that one worker starts
+        again after a pause. The web server is not supervised: a second
+        instance that cannot bind its port must still fail.
+        """
+        delay = self._WORKER_RESTART_DELAY
+        while not stop_event.is_set():
+            started = time.monotonic()
+            try:
+                await worker.run(stop_event)
+                if stop_event.is_set():
+                    return
+                LOGGER.error("Worker for %s returned without being asked to stop", worker.camera.id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - whatever it was, the other cameras carry on
+                LOGGER.exception(
+                    "Worker for %s stopped on an unexpected error; the other cameras are unaffected",
+                    worker.camera.id,
+                )
+            if time.monotonic() - started > 60.0:
+                delay = self._WORKER_RESTART_DELAY
+            await worker._recover_after_error()
+            LOGGER.warning("Restarting the worker for %s in %.0fs", worker.camera.id, delay)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            delay = min(delay * 2, self._WORKER_RESTART_DELAY_MAX)
 
     def _recover_orphan_recordings(self, orphans: List[Path], recovery: RecoverySweeper) -> None:
         """Save the recordings the last run left behind, then have them analysed.

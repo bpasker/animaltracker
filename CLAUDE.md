@@ -50,6 +50,13 @@ The system uses a two-stage detection approach:
 
 - `cli.py` - Entry point, command parsing
 - `pipeline.py` - `PipelineOrchestrator` manages all cameras, spawns `StreamWorker` per camera
+  Each worker runs under `_run_worker_supervised`: an unexpected error in one
+  camera's `run()` is logged, its open event is closed, and that worker
+  restarts after a growing pause while the others carry on. Never gather
+  `worker.run()` bare; one camera's exception then ends the whole process.
+  The web server is deliberately not supervised (a second instance must fail).
+  The live `ObjectTracker` is ticked through `_tick_live_tracker`, which
+  forgets tracks ByteTrack has given up on, but only between events.
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
 - `tracker.py` - ByteTrack object tracking with persistent IDs
 - `postprocess.py` - Clip post-analysis, track merging, species finalization

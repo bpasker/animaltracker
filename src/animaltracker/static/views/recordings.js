@@ -184,8 +184,33 @@ function frameNotice(clip) {
   return { text: 'No frame', cls: 'frame--error', title: 'The key frame could not be loaded.' };
 }
 
+/** Where the archive is right now, as the query a clip page carries along.
+    The clip page hands it back on Back and walks previous/next inside it.
+    Clip links used to carry nothing, so Back returned to the unfiltered
+    archive and previous/next walked every clip, not the ones being reviewed.
+    Same keys as applyFilters() writes. */
+function archiveQuery() {
+  if (!S || !S.filters) return {};
+  var f = S.filters;
+  var out = {};
+  if (f.cameras.length) out.cameras = f.cameras.join(',');
+  if (f.locations.length) out.location = f.locations.join(',');
+  if (f.species.length) out.species = f.species.join(',');
+  if (f.from) out.from = f.from;
+  if (f.to) out.to = f.to;
+  if (f.q) out.q = f.q;
+  if (f.sort && f.sort !== 'newest') out.sort = f.sort;
+  if (S.view === 'month') {
+    out.view = 'month';
+    out.year = S.year;
+    out.month = S.month;
+    if (S.date) out.date = S.date;
+  }
+  return out;
+}
+
 function clipHref(path) {
-  return router.href('/clips/' + api.encodePath(path));
+  return router.href('/clips/' + api.encodePath(path), archiveQuery());
 }
 
 /** "White-tailed Deer, 6:42 PM · cam1" — the accessible name of a card. */
@@ -484,11 +509,14 @@ function updateCard(li, clip) {
     li.className = 'cliptile ' + speciesClass(clip.species);
     p.art.classList.toggle('clip--unclassified', isUnclassified(clip.species));
   }
+  /* A tile outlives a filter change when its clip is in both result sets:
+     its link must carry the filters of now, not of when it was built. */
+  var href = clipHref(clip.path);
+  if (p.link.getAttribute('href') !== href) p.link.setAttribute('href', href);
   if (p.link.getAttribute('data-path') !== clip.path) {
     /* Renamed by post-processing: every handle that carries the path moves. */
     var id = clipId(clip.path);
     p.link.setAttribute('data-path', clip.path);
-    p.link.setAttribute('href', clipHref(clip.path));
     p.check.setAttribute('data-path', clip.path);
     p.check.id = 'sel-' + id;
     p.checkLabel.setAttribute('for', 'sel-' + id);
@@ -1174,7 +1202,7 @@ function quickPlay(path) {
       var k = S.dialogs.indexOf(handle);
       if (k >= 0) S.dialogs.splice(k, 1);
     }
-    if (value === 'open') router.go('/clips/' + api.encodePath(clip.path), {});
+    if (value === 'open') router.go('/clips/' + api.encodePath(clip.path), archiveQuery());
   });
 }
 

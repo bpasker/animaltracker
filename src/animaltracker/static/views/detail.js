@@ -50,8 +50,11 @@ var PAGE_STEP = 30;               /* PageUp / PageDown */
 
 /* Query keys that describe the filtered result set this clip was opened from.
    They ride along on every navigation so prev/next and Back stay inside the
-   set the user was actually looking at. */
-var FILTER_KEYS = ['camera', 'species', 'from', 'to', 'q', 'sort', 'view', 'year', 'month'];
+   set the user was actually looking at.
+   These are the archive's own URL keys (recordings.js archiveQuery), so Back
+   can hand them straight back; loadNeighbors() translates them for the API. */
+var FILTER_KEYS = ['cameras', 'camera', 'location', 'species', 'from', 'to', 'q', 'sort',
+                   'view', 'year', 'month', 'date'];
 
 var S = null;
 
@@ -392,11 +395,21 @@ function copyText(text, okMessage) {
 
 /* ------------------------------------------------------------ prev / next */
 
+/** The archive's URL query as the list API wants it: `cameras` is `camera`
+    there, and an open day in the month view is that day. */
+function neighborsQuery(query) {
+  var q = { limit: 500, offset: 0 };
+  var cameras = query.cameras || query.camera;
+  if (cameras) q.camera = cameras;
+  ['location', 'species', 'from', 'to', 'q', 'sort'].forEach(function (k) {
+    if (query[k]) q[k] = query[k];
+  });
+  if (query.date && !q.from && !q.to) { q.from = query.date; q.to = query.date; }
+  return q;
+}
+
 function loadNeighbors() {
-  var q = Object.assign({}, S.query, { limit: 500, offset: 0 });
-  delete q.view;
-  delete q.year;
-  delete q.month;
+  var q = neighborsQuery(S.query);
   api.recordings(q, { signal: signal() }).then(function (payload) {
     if (!S || S.dead) return;
     var clips = (payload && payload.clips) || [];

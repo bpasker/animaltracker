@@ -79,6 +79,9 @@ The system uses a two-stage detection approach:
   selects), and the static-target watchdog remembers the spot it released
   (`_static_rejects`, per camera, ten minutes) so the blob is dropped before
   it counts as a sighting and patrol can resume.
+  `_do_patrol` re-issues its sweep only when the cached `_patrol_velocity`
+  differs, so every way into PATROL, and every Stop the tracker issues, must
+  clear that cache or the camera sits still until the 90 s reversal.
 - `analysis_recovery.py` - `ClipAnalysisRegistry` (every clip analysis in
   flight: live event, reanalysis, recovery) and `RecoverySweeper`, a daemon
   thread that finishes the post-processing a restart interrupted: shortly

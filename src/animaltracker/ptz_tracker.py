@@ -683,6 +683,10 @@ class PTZTracker:
                 })
             return
         self._holding_position = True
+        # The camera has stopped, whatever it was doing: a sweep that was
+        # issued meanwhile (patrol switched on during the step) is over too,
+        # and the next patrol tick has to issue it again.
+        self._patrol_velocity = None
         late_ms = max(0.0, (now - scheduled_at)) * 1000.0
         slew_ms = max(0.0, (now - armed_at)) * 1000.0 if armed_at > 0 else 0.0
         PTZ_LOGGER.debug(
@@ -2536,8 +2540,18 @@ class PTZTracker:
                     self._tracking_lost_logged_at = 0.0
                     # Reset track lock so we pick fresh when tracking resumes
                     self._reset_lock_state_locked()
+                    # The sweep that was running before the episode is long
+                    # gone: tracking moved the camera and then stopped it.
+                    # Every other way into PATROL forgets the cached sweep
+                    # velocity; this one did not, so _do_patrol saw "already
+                    # sweeping at that speed", issued nothing, and the camera
+                    # sat still until the 90 s direction reversal.
+                    self._patrol_velocity = None
+                    self._holding_position = False
                     if self._preset_tokens:
                         self._goto_current_preset()
+                    else:
+                        self._patrol_reverse_time = time.time()
                 else:
                     self._mode = PTZMode.IDLE
                     self._tracking_lost_logged_at = 0.0

@@ -226,6 +226,54 @@ def test_sweep_does_nothing_while_disabled(tmp_path):
     assert sw.status()["enabled"] is True
 
 
+def test_switching_recovery_off_stops_a_sweep_that_is_under_way(tmp_path):
+    """The switch was read once per sweep, and a backlog can run for hours."""
+    clips = tmp_path / "clips"
+    for i in range(4):
+        make_clip(clips, "cam1", 1789384540 + i, "animal", age_s=1_000 + i)
+    switch = {"on": True}
+    seen = []
+
+    def process(path):
+        seen.append(path)
+        sidecar_path(path).write_text("{}")
+        if len(seen) == 1:
+            switch["on"] = False                 # someone turns it off during the first clip
+        return True
+
+    sw = sweeper(clips, ClipAnalysisRegistry(), process, enabled=lambda: switch["on"])
+
+    assert sw.sweep() == 1
+    assert len(seen) == 1
+    switch["on"] = True
+    assert sw.sweep() == 3                       # and the rest wait for it to come back on
+
+
+def test_a_clip_analysed_by_someone_else_meanwhile_is_not_analysed_again(tmp_path):
+    clips = tmp_path / "clips"
+    newest = make_clip(clips, "cam1", 1789384549, "animal", age_s=1_000)
+    reanalysed = make_clip(clips, "cam1", 1789384540, "animal", age_s=2_000)
+    renamed = make_clip(clips, "cam1", 1789384530, "animal", age_s=3_000)
+    seen = []
+
+    def process(path):
+        seen.append(path)
+        sidecar_path(path).write_text("{}")
+        if path == newest:
+            # While this one ran, the clip page reanalysed the next (it kept
+            # its name) and a second reanalysis renamed the one after.
+            sidecar_path(reanalysed).write_text('{"clip": "theirs", "settings": {}}')
+            renamed.rename(renamed.with_name("1789384530_mammalia_carnivora_canidae.mp4"))
+        return True
+
+    sw = sweeper(clips, ClipAnalysisRegistry(), process)
+
+    assert sw.sweep() == 1
+    assert seen == [newest]
+    assert sidecar_path(reanalysed).read_text() == '{"clip": "theirs", "settings": {}}'
+    assert sw.status()["failed"] == 0            # a clip that went away is not a failure
+
+
 def test_sweep_waits_for_live_post_processing_to_finish(tmp_path):
     clips = tmp_path / "clips"
     clip = make_clip(clips, "cam1", 1789384540, "animal")

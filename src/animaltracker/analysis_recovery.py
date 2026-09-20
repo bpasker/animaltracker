@@ -338,6 +338,18 @@ class RecoverySweeper(threading.Thread):
                 break
             if self.registry.is_active(clip):
                 continue
+            # The list was made when the sweep began, and a clip can take
+            # most of an hour: look again at everything that may have
+            # changed meanwhile. The switch used to be read once per sweep,
+            # so turning recovery off did nothing until the backlog ended;
+            # and a clip someone reanalysed meanwhile was analysed again,
+            # over their result.
+            if not self._safe_enabled():
+                LOGGER.info("Recovery switched off: leaving %d clip(s) of this sweep unprocessed",
+                            len(todo) - todo.index(clip))
+                break
+            if not clip.exists() or has_analysis_sidecar(clip):
+                continue    # renamed, deleted or analysed since the sweep began
             self._attempted.add(_key(clip))
             with self._lock:
                 self._current = str(clip)

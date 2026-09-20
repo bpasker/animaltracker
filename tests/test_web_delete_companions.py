@@ -101,3 +101,77 @@ def test_a_clip_with_no_companions_and_a_file_that_is_not_a_clip_behave_as_befor
     assert server._delete_file(f"{DAY}/{STEM}_thumb_canidae_t0.jpg")[0]      # deleting one key frame by name
 
     assert remaining(server) == [f"{STEM}.log.json"]
+
+
+# --- a clip that is being analysed --------------------------------------------------
+#
+# Background (bug hunt, 2026-09-19): nothing stopped a clip from being deleted from
+# under its analysis. The post-processor then wrote key frames and a log for a
+# file that was gone, failed its rename, and on the live path sent an alert whose
+# link was dead.
+
+import asyncio
+
+from animaltracker.analysis_recovery import ClipAnalysisRegistry
+
+
+class QueryRequest:
+    def __init__(self, path: str) -> None:
+        self.query = {"path": path}
+
+
+class JsonRequest:
+    def __init__(self, body) -> None:
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+@pytest.fixture
+def analysing(tmp_path):
+    (tmp_path / "clips" / DAY).mkdir(parents=True)
+    registry = ClipAnalysisRegistry()
+    server = WebServer({}, tmp_path, tmp_path / "logs", port=0, analysis_registry=registry)
+    clip = make_clip(server)
+    registry.begin(clip, "event")
+    return server, registry, clip
+
+
+def test_a_clip_under_analysis_is_not_deleted(analysing):
+    server, registry, clip = analysing
+    before = remaining(server)
+
+    resp = asyncio.run(server.handle_delete_recording(QueryRequest(f"{DAY}/{STEM}.mp4")))
+
+    assert resp.status == 409 and "being analysed" in resp.text
+    assert remaining(server) == before
+
+    registry.end(clip)
+    resp = asyncio.run(server.handle_delete_recording(QueryRequest(f"{DAY}/{STEM}.mp4")))
+    assert resp.status == 200 and remaining(server) == []
+
+
+def test_a_reanalysis_from_the_clip_page_protects_it_too(server):
+    make_clip(server)
+    rel = f"{DAY}/{STEM}.mp4"
+    server.reprocessing_jobs[rel] = {"started": "now"}
+
+    assert server._delete_file(rel) == (False, WebServer.DELETE_REFUSED_ANALYSING)
+
+
+def test_a_bulk_delete_removes_the_rest_and_says_which_it_left(analysing):
+    import json as _json
+
+    server, _registry, _clip = analysing
+    other = "1789000321_animal"
+    make_clip(server, stem=other, thumbs=("animal_t0",))
+
+    resp = asyncio.run(server.handle_bulk_delete(JsonRequest(
+        {"paths": [f"{DAY}/{STEM}.mp4", f"{DAY}/{other}.mp4"]})))
+
+    body = _json.loads(resp.body)
+    assert body["deleted_count"] == 1 and body["total_requested"] == 2
+    assert [r["success"] for r in body["results"]] == [False, True]
+    assert "being analysed" in body["results"][0]["message"]
+    assert f"{STEM}.mp4" in remaining(server) and f"{other}.mp4" not in remaining(server)

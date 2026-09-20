@@ -2163,11 +2163,20 @@ class WebServer:
             return None
         return clips_dir / relative
 
+    DELETE_REFUSED_ANALYSING = "This clip is being analysed; delete it when the analysis has finished"
+
     def _delete_file(self, rel_path: str) -> tuple[bool, str]:
         self._invalidate_scan_cache()
         file_path = self._confined_clip_path(rel_path)
         if file_path is None:
             return False, "Invalid path"
+        # A clip under analysis is not deleted from under its job. The
+        # post-processor would go on to write key frames and a log for a file
+        # that is gone (orphans nothing lists or prunes), fail its rename, and
+        # on the live path send an alert whose link is dead.
+        registry = self.analysis_registry
+        if (registry is not None and registry.is_active(file_path)) or rel_path in self.reprocessing_jobs:
+            return False, self.DELETE_REFUSED_ANALYSING
         try:
             if file_path.exists() and file_path.is_file():
                 companions = self._clip_companion_files(file_path)
@@ -2226,6 +2235,8 @@ class WebServer:
             return web.Response(status=404, text=message)
         elif message == "Invalid path":
             return web.Response(status=403, text=message)
+        elif message == self.DELETE_REFUSED_ANALYSING:
+            return web.Response(status=409, text=message)
         else:
             return web.Response(status=500, text=message)
 

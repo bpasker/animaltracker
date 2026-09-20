@@ -358,9 +358,15 @@ function openOverflow(anchor) {
       { label: 'Reanalyze with these settings', icon: 'refresh', disabled: !clip, onSelect: function () {
         startReanalyze(null);
       } },
-      { label: 'Delete recording', icon: 'trash', danger: true, disabled: !clip, onSelect: function () {
-        confirmDelete();
-      } }
+      /* The server refuses to delete a clip from under its analysis (409);
+         say so here instead of offering a button that cannot work. */
+      { label: (clip && (clip.reprocessing || clip.analysis === 'running'))
+          ? 'Delete recording (being analysed)' : 'Delete recording',
+        icon: 'trash', danger: true,
+        disabled: !clip || !!clip.reprocessing || clip.analysis === 'running',
+        onSelect: function () {
+          confirmDelete();
+        } }
     ],
     initialFocus: null,
     onClose: function () { if (anchor && anchor.isConnected) anchor.focus(); }

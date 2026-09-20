@@ -1096,12 +1096,28 @@ function deleteSelection() {
 
 function commitDelete(paths, restoreTotal) {
   api.bulkDelete(paths, {}).then(function (res) {
-    var n = (res && res.deleted_count) || paths.length;
-    toast.success(plural(n, 'clip') + ' removed from disk');
+    /* The server answers per clip, and may refuse some: one that is being
+       analysed, one that is already gone. Only what it really deleted leaves
+       the grid. Every requested card used to be dropped whatever it said. */
+    var results = (res && res.results) || [];
+    /* "File not found" is not a refusal: the clip is gone, which is what was
+       asked for (the post-processor's own cleanup got there first). */
+    var refused = results.filter(function (r) {
+      return r && !r.success && r.message !== 'File not found';
+    });
+    var refusedPaths = refused.map(function (r) { return r.path; });
+    var deleted = paths.filter(function (p) { return refusedPaths.indexOf(p) < 0; });
+    if (deleted.length) toast.success(plural(deleted.length, 'clip') + ' removed from disk');
+    if (refused.length) {
+      toast.error(plural(refused.length, 'clip') + ' could not be deleted', {
+        detail: refused[0].message || 'The server refused.'
+      });
+    }
     if (!S) return;
-    /* Success: drop them from the model for good. */
-    S.clips = S.clips.filter(function (c) { return paths.indexOf(c.path) < 0; });
+    /* Success: drop them from the model for good. Refused ones come back. */
+    S.clips = S.clips.filter(function (c) { return deleted.indexOf(c.path) < 0; });
     paths.forEach(function (p) { S.pendingDelete.delete(p); S.collapsing.delete(p); });
+    if (refused.length && typeof restoreTotal === 'number') S.total = restoreTotal - deleted.length;
     S.offset = S.clips.length;
     renderGrid();
     if (S.view === 'month') loadMonth(true);

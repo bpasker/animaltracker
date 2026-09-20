@@ -734,3 +734,38 @@ def test_unreadable_sidecar_is_swallowed(server, clips_dir):
     write_file(clip.with_suffix(".log.json"), b"{not json")
 
     assert server._get_thumbnails_for_clip(clip) == []
+
+
+# --- a clip that goes away while the scan is walking the archive --------------------
+#
+# Background (bug hunt, 2026-09-19): the scan listed a directory and then called
+# stat() on each name with no guard. A clip renamed by a finishing analysis, or
+# deleted as a false positive, between those two moments raised
+# FileNotFoundError out of the scan and the list, calendar and day endpoints all
+# answered 500. On NFS a stale listing can keep naming the file for a while.
+
+def test_a_clip_that_vanishes_mid_scan_is_skipped_not_fatal(tmp_path, monkeypatch):
+    from pathlib import Path as _Path
+
+    from animaltracker.web import WebServer
+
+    day = tmp_path / "clips" / "cam1" / "2026" / "09" / "10"
+    day.mkdir(parents=True)
+    (day / "1789000000_animal.mp4").write_bytes(b"x")          # about to become ..._canidae.mp4
+    (day / "1789000100_mammalia_carnivora_canidae.mp4").write_bytes(b"x")
+    (tmp_path / "clips" / "manual_cam1_1789000200.mp4").write_bytes(b"x")
+    (tmp_path / "clips" / "manual_cam1_1789000300.mp4").write_bytes(b"x")
+    gone = {"1789000000_animal.mp4", "manual_cam1_1789000300.mp4"}
+    real_stat = _Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name in gone:
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "stat", stat)
+    server = WebServer({}, tmp_path, tmp_path / "logs", port=0)
+
+    names = sorted(c["filename"] for c in server._scan_recordings())
+
+    assert names == ["1789000100_mammalia_carnivora_canidae.mp4", "manual_cam1_1789000200.mp4"]

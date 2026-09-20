@@ -1120,7 +1120,9 @@ class WebServer:
         
         # 1. Check for manual clips in root
         for clip_file in clips_dir.glob('*.mp4'):
-            stat = clip_file.stat()
+            stat = self._stat_listed_clip(clip_file)
+            if stat is None:
+                continue
             rel_path = clip_file.relative_to(clips_dir)
             parts = clip_file.name.split('_')
             camera = parts[1] if len(parts) > 1 else 'unknown'
@@ -1144,7 +1146,9 @@ class WebServer:
             
             # Use rglob to find all mp4 files recursively (handles year/month/day structure)
             for clip_file in cam_dir.rglob('*.mp4'):
-                stat = clip_file.stat()
+                stat = self._stat_listed_clip(clip_file)
+                if stat is None:
+                    continue
                 rel_path = clip_file.relative_to(clips_dir)
                 
                 # Parse species from filename (format: timestamp_species.mp4)
@@ -1177,6 +1181,24 @@ class WebServer:
         # Sort by time descending
         clips.sort(key=lambda x: x['time'], reverse=True)
         return clips
+
+    @staticmethod
+    def _stat_listed_clip(clip_file: Path):
+        """``stat()`` of a clip a directory listing named, or None if it is gone.
+
+        A listing and the stat that follows it are two moments. Every finished
+        analysis renames a clip and every false-positive cleanup deletes one,
+        and on the NFS archive a listing can go on naming a file for a while
+        after it has gone. The scan used to let that ``FileNotFoundError``
+        out, which failed the whole archive: the list, the calendar and the
+        day endpoints all answered 500 for one clip that was merely on its way
+        to a new name. The clip is back, under that name, on the next scan.
+        """
+        try:
+            return clip_file.stat()
+        except OSError as e:
+            LOGGER.debug("Skipping %s in the archive scan: %s", clip_file.name, e)
+            return None
 
     def _get_thumbnails_for_clip(self, clip_path: Path, log_data: dict | None = None) -> list:
         """Get all thumbnails associated with a clip file.

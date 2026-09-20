@@ -312,7 +312,23 @@ def build_processing_settings(clip_cfg, overrides: Optional[Dict] = None) -> Pro
     }
     for key, value in (overrides or {}).items():
         values[key] = value
+    _check_processing_values(values)
     return ProcessingSettings.from_dict(values)
+
+
+def _check_processing_values(values: Dict) -> None:
+    """Refuse values an analysis could only fail on, before it starts.
+
+    A reanalysis can run for most of an hour; a bad override from the clip
+    page's dialog should cost a 400 now, not a 500 then.
+    """
+    rate = values.get('sample_rate')
+    if isinstance(rate, bool) or not isinstance(rate, int) or rate < 0:
+        raise ValueError(f"sample_rate must be a whole number, 0 (automatic) or more, not {rate!r}")
+    for name in ('confidence_threshold', 'generic_confidence'):
+        value = values.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ValueError(f"{name} must be a number between 0 and 1, not {value!r}")
 
 
 @dataclass
@@ -498,7 +514,14 @@ class ClipPostProcessor:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker = \
                 self._analyze_video(cap, total_frames)
-            frames_analyzed = (total_frames + self.sample_rate - 1) // self.sample_rate
+            # The frames the detector was really shown. This used to be worked
+            # out from the configured sample rate, which the analysis itself
+            # treats as "choose for me" when it is 0 (and, without tracking,
+            # when it is 1): a rate of 0 ran the whole analysis and then died
+            # here on a division by zero, with nothing written, and without
+            # tracking the figure overstated what had been looked at, which
+            # the false-positive gates downstream rely on.
+            frames_analyzed = int(video_metadata.get("frames_inferred") or 0)
             
         finally:
             cap.release()

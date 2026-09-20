@@ -1480,7 +1480,15 @@ function pollJob() {
     if (S.job && payload && payload.reprocessing && S.job.note !== 'Running on the server.') {
       S.job.note = 'Running on the server.';
     }
-    if (S.job && wasReprocessing && !payload.reprocessing) {
+    if (S.job && S.job.adopted && payload && !payload.reprocessing) {
+      /* The job this page adopted has ended. Nothing else will ever say so:
+         the request that started it is not ours, so no response arrives to
+         clear it, and a clip that keeps its name sends no rename to follow.
+         Left alone, the page polled every two seconds for as long as it
+         stayed open, counting "Elapsed" upwards with Reanalyze disabled. */
+      S.job = null;
+      jobLog('The analysis has finished.', 'info');
+    } else if (S.job && wasReprocessing && !payload.reprocessing) {
       S.job.note = 'Finishing up — writing thumbnails and the log.';
     }
     if (!S.job && payload && !payload.reprocessing && payload.analysis !== 'queued') {
@@ -1822,7 +1830,10 @@ function installVisibility() {
       /* Pause the media and stop every poll; nothing decodes in a hidden tab. */
       if (S.els.video && !S.els.video.paused) S.els.video.pause();
       stopJobPolling();
-    } else if (S.job) {
+    } else if (S.job || (S.clip && S.clip.analysis === 'queued')) {
+      /* Also for a clip that is only waiting for the recovery sweep: that
+         watch runs without a job, and used to end for good the first time
+         the tab was hidden. */
       startJobPolling();
       pollJob();
     }

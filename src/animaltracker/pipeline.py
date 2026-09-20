@@ -643,6 +643,31 @@ class StreamWorker:
                 except Exception as e:
                     LOGGER.warning(f"Failed to initialize ONVIF for {camera.id}: {e}")
 
+    def _tick_live_tracker(self, detections: List[Detection], frame, frame_idx: int):
+        """One update of the live ObjectTracker, then drop what has gone stale.
+
+        The live tracker runs for the life of the process and was only ever
+        cleared when an event closed. An event needs ``min_frames`` detections
+        over ``min_duration`` seconds, but ByteTrack reports a track from its
+        second match: a bird crossing the frame or a leaf that flickers for a
+        second leaves a track without ever starting an event, and each track
+        keeps up to two copies of a full frame (24 MB on the 2688x1512
+        cameras). They piled up until that camera's next event, hours later
+        on a quiet one, and then supplied that event's label and key frames.
+
+        Between events, tracks ByteTrack can no longer continue are
+        forgotten. During an event nothing is, so an animal that left earlier
+        in the event still counts towards its label. Runs on the executor
+        thread that does the update, so the two never touch the track table
+        at once.
+        """
+        result = self.tracker.update(detections, frame, frame_idx)
+        if self.event_state is None:
+            pruned = self.tracker.prune_stale_tracks()
+            if pruned:
+                LOGGER.debug("Forgot %d stale live track(s) for %s", pruned, self.camera.id)
+        return result
+
     def _save_event_clip(self, temp_avi: Optional[Path], clip_path: Path) -> bool:
         """Transcode an event's streamed recording into its clip, right away.
 
@@ -1210,7 +1235,7 @@ class StreamWorker:
                 if self.tracker is not None:
                     try:
                         await loop.run_in_executor(
-                            None, self.tracker.update, [], frame, frame_idx,
+                            None, self._tick_live_tracker, [], frame, frame_idx,
                         )
                     except Exception as e:
                         self._note_tracker_update_failure(e)
@@ -1248,7 +1273,7 @@ class StreamWorker:
                 if self.tracker is not None:
                     try:
                         await loop.run_in_executor(
-                            None, self.tracker.update, [], frame, frame_idx,
+                            None, self._tick_live_tracker, [], frame, frame_idx,
                         )
                     except Exception as e:
                         self._note_tracker_update_failure(e)
@@ -1362,7 +1387,7 @@ class StreamWorker:
             try:
                 await loop.run_in_executor(
                     None,
-                    self.tracker.update,
+                    self._tick_live_tracker,
                     filtered,
                     frame,
                     frame_idx,

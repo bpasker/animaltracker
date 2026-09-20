@@ -223,6 +223,12 @@ class ObjectTracker:
         
         # track_id -> TrackInfo
         self.tracks: Dict[int, TrackInfo] = {}
+        # track_id -> the update (``frame_count``) that last added to it; see
+        # ``prune_stale_tracks``. Updates, not frame indexes: ByteTrack ages
+        # its lost tracks per update, whatever ``frame_idx`` the caller counts.
+        self._last_update_seen: Dict[int, int] = {}
+        self._lost_track_buffer = lost_track_buffer
+        self._frame_rate = frame_rate
         self.frame_count = 0
     
     def update(
@@ -333,6 +339,8 @@ class ObjectTracker:
                     first_seen_frame=actual_frame_idx,
                 )
 
+            self._last_update_seen[track_id] = self.frame_count
+
             # Add classification to track
             self.tracks[track_id].add_classification(
                 species=original_det.species,
@@ -405,7 +413,42 @@ class ObjectTracker:
         """Reset the tracker state for a new event."""
         self.tracker.reset()
         self.tracks.clear()
+        self._last_update_seen = {}
         self.frame_count = 0
+
+    def prune_stale_tracks(self, max_updates_unseen: Optional[int] = None) -> int:
+        """Forget tracks that nothing can continue any more.
+
+        ByteTrack drops a lost track after ``max_time_lost`` updates; from
+        then on its id never comes back, so the ``TrackInfo`` under that id
+        can only be read, never added to. For a tracker that runs for the
+        life of the process that is a leak: each one holds up to two copies
+        of a full frame. The live pipeline calls this between events; the
+        post-processor never does, because there every track is part of the
+        clip's result however early it ended.
+
+        Args:
+            max_updates_unseen: Updates without a detection after which a
+                track goes. Default: ByteTrack's own ``max_time_lost``.
+
+        Returns:
+            Number of tracks forgotten
+        """
+        if max_updates_unseen is None:
+            max_updates_unseen = getattr(self.tracker, "max_time_lost", None)
+            if max_updates_unseen is None:
+                max_updates_unseen = int(self._frame_rate / 30.0 * self._lost_track_buffer)
+        stale = [
+            track_id for track_id in self.tracks
+            if self.frame_count - self._last_update_seen.get(track_id, 0) > max_updates_unseen
+        ]
+        for track_id in stale:
+            del self.tracks[track_id]
+            self._last_update_seen.pop(track_id, None)
+        # Ids whose track a merge removed.
+        for track_id in [t for t in self._last_update_seen if t not in self.tracks]:
+            del self._last_update_seen[track_id]
+        return len(stale)
     
     def _get_species_hierarchy(self, species: str) -> tuple:
         """Get the hierarchy category and specificity of a species.

@@ -309,3 +309,54 @@ def test_log_summary_counts_frames_not_entries(tmp_path):
     assert summary["frames_filtered_other"] == 2
     assert summary["frames_with_no_animal"] == 1
     assert summary["detection_rate_pct"] == 25.0
+
+
+# --- which labels need the generic threshold ---------------------------------------
+#
+# Background (bug hunt, 2026-09-19): the generic test ran over every non-empty
+# field of the label, the common name included. "rodent" and "carnivorous
+# mammal" are in no list, so every order-level rollup failed it and was accepted
+# at the specific-species threshold, while "mammal" and "bird" at the same score
+# were dropped. The order entries of GENERIC_CATEGORIES had never matched.
+
+ANIMAL = "1f689929-883d-4dae-958c-3d57ab5b6c16;;;;;;animal"
+BIRD = "b1352069-a39c-4a84-a949-60044271c0c1;aves;;;;;bird"
+MAMMAL = "f2d233e3-80e3-433d-9687-e29ecc7a467a;mammalia;;;;;mammal"
+RODENT = "90d950db-2106-4bd9-a4c1-777604c3eada;mammalia;rodentia;;;;rodent"
+CARNIVORE = "eeeb5d26-2a47-4d01-a3de-10b33ec0aee4;mammalia;carnivora;;;;carnivorous mammal"
+SONGBIRD = "4d7b2b5c-0000-4000-8000-000000000003;aves;passeriformes;;;;passeriformes order"
+RABBIT_ORDER = "4d7b2b5c-0000-4000-8000-000000000004;mammalia;lagomorpha;;;;lagomorph"
+SQUIRREL_FAMILY = "4d7b2b5c-0000-4000-8000-000000000005;mammalia;rodentia;sciuridae;;;sciuridae family"
+
+GENERIC = {"animal", "bird", "mammalia", "mammal", "aves", "reptilia", "reptile", "amphibia",
+           "amphibian", "fish", "carnivora", "rodentia", "passeriformes", "artiodactyla"}
+
+
+@pytest.mark.parametrize("label, generic", [
+    (ANIMAL, True), (BIRD, True), (MAMMAL, True),
+    (RODENT, True), (CARNIVORE, True), (SONGBIRD, True),     # the orders the list names
+    (RABBIT_ORDER, False),                                     # an order it does not name stays specific
+    (SQUIRREL_FAMILY, False), (DOG, False), (DEER, False),     # a family or below is specific
+    ("bird", True), ("mammalia;mammal", True), ("mammalia;rodentia;sciuridae", False),
+    ("", False),
+])
+def test_a_rollup_is_generic_by_the_taxa_it_names_not_by_its_common_name(label, generic):
+    assert SpeciesNetDetector._is_generic_label(label, GENERIC) is generic
+
+
+@pytest.mark.parametrize("label, score, accepted", [
+    (RODENT, 0.70, False),          # under the 0.8 generic bar: it used to pass at 0.3
+    (RODENT, 0.85, True),
+    (CARNIVORE, 0.45, False),
+    (MAMMAL, 0.70, False),          # always was
+    (SQUIRREL_FAMILY, 0.35, True),  # a family needs only the species threshold
+    (DOG, 0.35, True),
+])
+def test_an_order_level_rollup_needs_the_generic_confidence(label, score, accepted):
+    det = _detector([DOG_BOX], {_key(DOG_BOX["bbox"]): (label, score)})
+
+    detections, filtered = _infer(det)
+
+    assert bool(detections) is accepted
+    if not accepted:
+        assert detections == []

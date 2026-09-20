@@ -819,18 +819,9 @@ class SpeciesNetDetector(BaseDetector):
                     ), "no_animal_detected"))
                 continue
             
-            # Check if any part of the taxonomy is generic (not just the final label)
-            taxonomy_parts = []
-            for part in species.split(";"):
-                part_clean = part.lower().strip().replace(" ", "_")
-                if not part_clean or part_clean in {"unknown", "blank", "empty", "no_cv_result"}:
-                    continue
-                if re.match(r'^[0-9a-fA-F-]+$', part_clean) and len(part_clean) > 10:
-                    continue
-                taxonomy_parts.append(part_clean)
-            is_generic = species_clean in GENERIC_CATEGORIES or (
-                taxonomy_parts and all(p in GENERIC_CATEGORIES for p in taxonomy_parts)
-            )
+            # Broad labels (animal, a class, one of the big orders) need the
+            # higher generic threshold.
+            is_generic = self._is_generic_label(species, GENERIC_CATEGORIES)
             
             # Apply tiered confidence threshold
             required_conf = generic_confidence if is_generic else conf_threshold
@@ -1104,6 +1095,43 @@ class SpeciesNetDetector(BaseDetector):
             return False
         return _is_edge_anchored_elongated_bbox(bbox, frame_shape)
     
+    @staticmethod
+    def _is_generic_label(label: str, generic_categories) -> bool:
+        """Whether a SpeciesNet label is one of the broad ones that need ``generic_confidence``.
+
+        The library's labels are ``uuid;class;order;family;genus;species;common
+        name``. A rollup leaves the levels it was unsure of empty:
+        ``...;mammalia;rodentia;;;;rodent``. It is generic when it names no
+        family, genus or species and every taxon it does name is in
+        ``generic_categories`` (which lists the classes and the four big
+        orders), or when it names no taxon at all and its common name is
+        listed ("animal").
+
+        The test used to run over every non-empty field, the common name
+        included. "rodent", "carnivorous mammal" and "passeriformes order" are
+        in no list, so every order-level rollup failed it and was accepted at
+        the specific-species threshold: in post-processing 0.3 where 0.5 was
+        meant, while "mammal" and "bird" at the same score were dropped. The
+        order entries of the list had never matched anything.
+        """
+        fields = [f.strip().lower().replace(" ", "_") for f in label.split(";")]
+        if len(fields) >= 7:
+            taxa = fields[1:6]                    # class, order, family, genus, species
+            named = [t for t in taxa if t and t not in {"unknown", "blank", "empty", "no_cv_result"}]
+            if not named:
+                return fields[6] in generic_categories
+            if any(taxa[2:]):                     # a family or below: specific, whatever it is called
+                return False
+            return all(t in generic_categories for t in named)
+
+        # Not the library's format (a bare "bird", a label without its uuid):
+        # the last field, or every field, must be listed.
+        parts = [f for f in fields if f and f not in {"unknown", "blank", "empty", "no_cv_result"}
+                 and not (re.match(r'^[0-9a-f-]+$', f) and len(f) > 10)]
+        if not parts:
+            return False
+        return parts[-1] in generic_categories or all(p in generic_categories for p in parts)
+
     def _simplify_species_name(self, taxonomy: str) -> str:
         """Convert taxonomy label to display-friendly name.
         

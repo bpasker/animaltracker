@@ -360,6 +360,12 @@ class PostProcessResult:
     # Sampled frames on which the detector raised. A result with any of these
     # is no proof that the clip is empty: the caller must not delete on it.
     inference_errors: int = 0
+    # Sampled frames with a detection that stands behind a species in this
+    # result: frames of the tracks that survived (or, without tracking, of
+    # the accepted detections that are not a person's shadow). This is what
+    # ``min_detection_frames`` is measured against. None from code that does
+    # not compute it.
+    detection_frames: Optional[int] = None
     success: bool = True
     error: Optional[str] = None
 
@@ -637,6 +643,7 @@ class ClipPostProcessor:
             settings_used=self.settings,
             tracks_detected=tracks_detected,
             inference_errors=inference_errors,
+            detection_frames=video_metadata.get("detection_frames"),
             success=True,
         )
     
@@ -899,11 +906,14 @@ class ClipPostProcessor:
         # Person-shadow filter first, so no merge below can fold a shadow
         # fragment into a real animal's track.
         shadow_tracks = 0
+        shadow_track_boxes: set = set()   # (frame_idx, bbox) of every detection in a dropped track
         if self.settings.person_shadow_enabled and non_animal_boxes:
             if tracker and tracker.active_track_count > 0:
-                shadow_tracks, shadow_log = self._drop_person_shadow_tracks(tracker, non_animal_boxes)
+                shadow_tracks, shadow_log = self._drop_person_shadow_tracks(
+                    tracker, non_animal_boxes, dropped_boxes=shadow_track_boxes)
                 processing_log.extend(shadow_log)
-            dropped_species = self._drop_person_shadow_species(species_results, processing_log, non_animal_boxes)
+            dropped_species = self._drop_person_shadow_species(
+                species_results, processing_log, non_animal_boxes, cap)
             if dropped_species:
                 processing_log.append(ProcessingLogEntry(
                     frame_idx=-1, event="person_shadow", species=", ".join(dropped_species),
@@ -926,11 +936,14 @@ class ClipPostProcessor:
             if tracked_results:
                 LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
                            raw_detection_count, len(tracked_results))
+                video_metadata["detection_frames"] = self._evidence_frames(
+                    processing_log, non_animal_boxes, shadow_track_boxes)
                 return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker
             # Every track resolved to a non-animal. The tracker has explained
             # each detection, so the per-frame votes below must not resurrect
             # them as a species.
             LOGGER.info("Tracking found %d object(s) but none is an animal", tracker.active_track_count)
+            video_metadata["detection_frames"] = 0
             return {}, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
 
         if shadow_tracks:
@@ -939,6 +952,8 @@ class ClipPostProcessor:
                                 "person_shadow_tracks": shadow_tracks}
 
         # Fallback to non-tracked results
+        video_metadata["detection_frames"] = self._evidence_frames(
+            processing_log, non_animal_boxes, shadow_track_boxes)
         return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
     
     def _merge_tracks(self, tracker: ObjectTracker) -> List[ProcessingLogEntry]:
@@ -1265,10 +1280,14 @@ class ClipPostProcessor:
         self,
         tracker: ObjectTracker,
         non_animal_boxes: NonAnimalBoxes,
+        dropped_boxes: Optional[set] = None,
     ) -> Tuple[int, List[ProcessingLogEntry]]:
         """Remove tracks that are mostly a person's (or a vehicle's) shadow.
 
-        Returns (tracks_removed, log_entries).
+        Returns (tracks_removed, log_entries). ``dropped_boxes``, when given,
+        receives ``(frame_idx, bbox)`` for every detection of the removed
+        tracks, the ones that did not overlap the person included, so none of
+        them is later counted as evidence of an animal (``_evidence_frames``).
         """
         removed = 0
         log_entries: List[ProcessingLogEntry] = []
@@ -1295,36 +1314,126 @@ class ClipPostProcessor:
                 frame_idx=-1, event="track_filtered", species=species,
                 confidence=confidence, track_id=track_id, reason=reason,
             ))
+            if dropped_boxes is not None:
+                dropped_boxes.update(
+                    (c.frame_idx, tuple(c.bbox)) for c in info.classifications if c.bbox)
             del tracker.tracks[track_id]
             removed += 1
         return removed, log_entries
+
+    def _evidence_frames(
+        self,
+        processing_log: List[ProcessingLogEntry],
+        non_animal_boxes: NonAnimalBoxes,
+        shadow_track_boxes: set,
+    ) -> int:
+        """Sampled frames with an accepted detection that may be an animal.
+
+        This is what ``min_detection_frames`` is measured against. It is the
+        count the live path used to take from the log itself, every frame with
+        an accepted detection, less the detections that are a person's shadow
+        and the ones that belonged to a track dropped as one. With those left
+        in, someone walking past (a dozen shadow frames) plus one stray
+        "squirrel" frame elsewhere cleared a minimum of two and alerted as a
+        squirrel. A track's first detection is counted like the rest, although
+        ByteTrack only reports a track from its second match, so a visit of
+        exactly the minimum length still passes.
+        """
+        frames = set()
+        for entry in processing_log:
+            if entry.event != "accepted" or entry.frame_idx < 0:
+                continue
+            if entry.bbox and (entry.frame_idx, tuple(entry.bbox)) in shadow_track_boxes:
+                continue
+            if self._is_person_shadow(entry.bbox, entry.frame_idx, non_animal_boxes):
+                continue
+            frames.add(entry.frame_idx)
+        return len(frames)
 
     def _drop_person_shadow_species(
         self,
         species_results: Dict[str, SpeciesResult],
         processing_log: List[ProcessingLogEntry],
         non_animal_boxes: NonAnimalBoxes,
+        cap: Optional[cv2.VideoCapture] = None,
     ) -> List[str]:
-        """Recount the per-frame (non-tracked) species votes without shadows.
+        """Rebuild the per-frame (non-tracked) species votes without shadows.
+
+        A species whose every detection sat on a person is removed. One that
+        keeps some detections is rebuilt from those alone: its count, its
+        confidence and its key frames. Only the count used to be corrected,
+        so a bird seen once beside a person who was read as "bird" a dozen
+        times went out at the shadow's 0.93, with three crops of the person
+        as its key frames.
 
         Returns the species that had no detection left and were removed.
         """
-        kept: Dict[str, int] = {}
+        kept: Dict[str, List[ProcessingLogEntry]] = {}
+        shadows = 0
         for entry in processing_log:
             if entry.event != "accepted" or entry.frame_idx < 0 or not entry.bbox:
                 continue
             if self._is_person_shadow(entry.bbox, entry.frame_idx, non_animal_boxes):
+                shadows += 1
                 continue
-            kept[entry.species] = kept.get(entry.species, 0) + 1
+            kept.setdefault(entry.species, []).append(entry)
         dropped: List[str] = []
         for species in list(species_results.keys()):
-            count = kept.get(species, 0)
-            if count == 0:
+            entries = kept.get(species, [])
+            if not entries:
                 del species_results[species]
                 dropped.append(species)
-            else:
-                species_results[species].count = count
+                continue
+            result = species_results[species]
+            result.count = len(entries)
+            if shadows:
+                result.confidence = max(e.confidence for e in entries)
+                self._rebuild_key_frames(result, entries, non_animal_boxes, cap)
         return dropped
+
+    def _rebuild_key_frames(
+        self,
+        result: SpeciesResult,
+        entries: List[ProcessingLogEntry],
+        non_animal_boxes: NonAnimalBoxes,
+        cap: Optional[cv2.VideoCapture],
+    ) -> None:
+        """Key frames of ``result`` from its non-shadow detections only.
+
+        The frames kept while the clip was read are the most confident ones,
+        shadows included, and which detections are shadows is only known once
+        the whole clip has been seen. The real detections' frames may have
+        been displaced by then, so they are read again from the clip.
+        """
+        def is_shadow(bbox) -> bool:
+            # Key frames carry no frame index; any of the species' shadow
+            # boxes identifies one.
+            return bool(bbox) and non_animal_boxes.overlaps(
+                bbox, 0, float(self.settings.person_shadow_iou), 0)
+
+        frames = [kf for kf in result.key_frames if not is_shadow(kf[2])]
+        # Each surviving key frame accounts for one detection with its box
+        # and confidence; the others are read again, best first.
+        unused = sorted(entries, key=lambda e: e.confidence, reverse=True)
+        for kf in frames:
+            match = next((e for e in unused
+                          if list(e.bbox) == list(kf[2] or []) and e.confidence == kf[1]), None)
+            if match is not None:
+                unused.remove(match)
+        if cap is not None and len(frames) < MAX_KEY_FRAMES_PER_SPECIES:
+            for entry in unused:
+                if len(frames) >= MAX_KEY_FRAMES_PER_SPECIES:
+                    break
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, entry.frame_idx)
+                    ok, frame = cap.read()
+                except Exception as e:  # noqa: BLE001 - a seek that fails costs a key frame, not the analysis
+                    LOGGER.debug("Could not re-read frame %d for a key frame: %s", entry.frame_idx, e)
+                    continue
+                if ok and frame is not None:
+                    frames.append((frame, entry.confidence, list(entry.bbox)))
+        frames.sort(key=lambda kf: kf[1], reverse=True)
+        result.key_frames = frames[:MAX_KEY_FRAMES_PER_SPECIES]
 
     def _process_detections_with_log(
         self,

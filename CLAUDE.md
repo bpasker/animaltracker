@@ -53,6 +53,11 @@ The system uses a two-stage detection approach:
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
 - `tracker.py` - ByteTrack object tracking with persistent IDs
 - `postprocess.py` - Clip post-analysis, track merging, species finalization
+  `PostProcessResult.detection_frames` is what `clip.min_detection_frames` is
+  measured against: sampled frames with an accepted detection that is neither
+  a person's shadow nor part of a track dropped as one (`_evidence_frames`).
+  The live path's false-positive gate must use it, never a recount of the
+  processing log, which still holds the shadow frames.
 - `ptz_tracker.py` - PTZ auto-tracking controller, pixel-to-PTZ coordinate mapping
   `PTZTracker._lock` is held for the whole of an update, ONVIF requests
   included, and cam1 and cam2 share one tracker. Nothing the event loop

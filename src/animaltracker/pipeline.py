@@ -1970,14 +1970,20 @@ class StreamWorker:
                             # Note: raw_detections counts blank frames too, so check species_results instead
                             delete_if_no_animal = getattr(clip_cfg, 'delete_if_no_animal', True)
                             min_detection_frames = max(1, int(getattr(clip_cfg, 'min_detection_frames', 2) or 1))
-                            # Count distinct sampled frames where a detection survived filtering.
-                            # "tracked" = detection assigned to a ByteTrack track (tracking path)
-                            # "accepted" = detection passed filters (non-tracking fallback path)
-                            detection_frame_idxs = {
-                                e.frame_idx for e in (result.processing_log or [])
-                                if e.event in ("tracked", "accepted") and e.frame_idx >= 0
-                            }
-                            detection_frame_count = len(detection_frame_idxs)
+                            # Sampled frames that stand behind the result: frames of
+                            # the tracks that survived, not every frame that had a
+                            # detection. Counting the log also counted the frames of
+                            # tracks dropped as a person's shadow, so someone walking
+                            # past plus a single stray "squirrel" frame cleared
+                            # min_detection_frames and alerted as a squirrel.
+                            detection_frame_count = result.detection_frames
+                            if detection_frame_count is None:
+                                # A post-processor that does not report it:
+                                # fall back to every frame in its log.
+                                detection_frame_count = len({
+                                    e.frame_idx for e in (result.processing_log or [])
+                                    if e.event in ("tracked", "accepted") and e.frame_idx >= 0
+                                })
                             no_species = (not result.species_results or len(result.species_results) == 0) and result.tracks_detected == 0
                             too_few_detections = (
                                 detection_frame_count < min_detection_frames

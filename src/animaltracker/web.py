@@ -2742,21 +2742,19 @@ class WebServer:
         recent_clips = []
         clips_dir = self.storage_root / 'clips'
         if clips_dir.exists():
-            all_clips = []
-            for camera_dir in clips_dir.iterdir():
-                if camera_dir.is_dir():
-                    for clip in camera_dir.glob('*.mp4'):
-                        all_clips.append((clip, clip.stat().st_mtime))
-            all_clips.sort(key=lambda x: x[1], reverse=True)
-            for clip, mtime in all_clips[:5]:
-                species = self._parse_species_from_filename(clip.name)
+            # The archive's own scan, newest first. This used to glob
+            # ``<camera>/*.mp4``, one level above the day directories the
+            # pipeline writes to, so the panel was permanently empty; and it
+            # put the (display, raw) tuple in 'species', which the page would
+            # have rendered as "Deer,deer".
+            for clip in self._scan_recordings_cached()[:5]:
                 recent_clips.append({
-                    'path': str(clip.relative_to(clips_dir)),
-                    'species': species,
-                    'time': datetime.fromtimestamp(mtime, tz=CENTRAL_TZ).strftime('%H:%M:%S'),
-                    'camera': clip.parent.name,
+                    'path': clip['path'],
+                    'species': clip['species'],
+                    'time': clip['time'].strftime('%H:%M:%S'),
+                    'camera': clip['camera'],
                 })
-        
+
         return system, gpu, detector_info, recent_clips
 
     async def handle_get_monitor_data(self, request):

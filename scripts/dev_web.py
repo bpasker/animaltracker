@@ -46,11 +46,29 @@ class FakeRecovery:
                 "last_candidates": 0, "processed": 0, "failed": 0}
 
 
+class FakeClipBuffer:
+    """The pre-roll buffer's figures, as /api/monitor reads them."""
+
+    def __init__(self, live: bool) -> None:
+        self.max_frames = 200
+        self.max_seconds = 10
+        self.frame_count = 120 if live else 0
+        self.duration = 6.0 if live else 0.0
+
+
+class FakeDetector:
+    """The detector's name, which /api/monitor reports."""
+
+    backend_name = "megadetector (dev stand-in)"
+
+
 class FakeWorker:
     """Just enough of StreamWorker for the web handlers."""
 
-    def __init__(self, cam, live: bool) -> None:
+    def __init__(self, cam, live: bool, runtime=None) -> None:
         self.camera = cam
+        self.runtime = runtime
+        self.detector = FakeDetector()
         self.live = live
         self.latest_frame = object() if live else None
         self.latest_frame_ts = time.time() if live else 0.0
@@ -62,6 +80,11 @@ class FakeWorker:
         self.latest_detection_ts = 0.0
         self.latest_frame_size = (0, 0)
         self.perf_last_snapshot = {}
+        # /api/monitor: no event is ever in flight here, but the buffer is
+        # read unconditionally.
+        self.clip_buffer = FakeClipBuffer(live)
+        self.event_state = None
+        self.tracking_enabled = bool(cam.ptz_tracking.enabled or cam.ptz_tracking.self_track)
 
 
 def main() -> None:
@@ -91,7 +114,8 @@ def main() -> None:
 
     runtime = configstore.validate(configstore.load_raw(cfg_path))
     (scratch / "storage" / "clips").mkdir(parents=True, exist_ok=True)
-    workers = {cam.id: FakeWorker(cam, live=(i == 0)) for i, cam in enumerate(runtime.cameras)}
+    workers = {cam.id: FakeWorker(cam, live=(i == 0), runtime=runtime)
+               for i, cam in enumerate(runtime.cameras)}
 
     registry = ClipAnalysisRegistry()
     for rel in args.analyzing:

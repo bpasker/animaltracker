@@ -201,6 +201,10 @@ backed by `configstore.py`). Rules that keep it safe:
   (`False`). The client inventory (`GENERAL_SECTIONS` / `CAMERA_GROUPS` in
   `settings.js`) must carry the matching `restart` flag; adding a field means
   touching both lists.
+  `tests/test_settings_inventory.py` enforces that. A control must also
+  *do* something: before adding one, follow the value to the code that reads
+  it, and if nothing acts on it, say so in its hint rather than implying it
+  works.
 - POST deep-merges into the parsed file, validates the result with
   `RuntimeConfig`, backs up, writes atomically, then `setattr`s live fields on
   the running models. Restart-only fields are never applied live, because the

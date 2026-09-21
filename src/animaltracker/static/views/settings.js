@@ -143,9 +143,11 @@ var GENERAL_SECTIONS = [
           label: 'Longitude', hint: 'Optional.' }
       ] },
       { id: 'confidence', legend: 'Confidence', fields: [
-        { key: 'detector.generic_confidence', kind: 'pct',
-          label: 'Default generic confidence',
-          hint: 'Fallback threshold for vague labels (animal, bird, mammal) where a camera sets none.' }
+        /* detector.generic_confidence used to sit here as "the fallback where
+           a camera sets none". Every camera's own generic confidence has a
+           value (the schema default is 90%) and there is no way to clear it,
+           so the fallback could never apply and the slider did nothing. The
+           per-camera control below Detection is the real one. */
       ] }
     ]
   },
@@ -222,13 +224,19 @@ var GENERAL_SECTIONS = [
         { key: 'logs_root', kind: 'text', mono: true, required: true, restart: true,
           label: 'Logs root', hint: 'Application and web access logs.' }
       ] },
-      { id: 'retention', legend: 'Retention', hint: 'Enforced by the cleanup command and the ssd-cleaner timer where it is installed.', fields: [
+      { id: 'retention', legend: 'Retention', hint: 'Recorded in config/cameras.yml; nothing prunes clips yet (see BUGS.md).', fields: [
+        /* Nothing enforces these yet: the pruning pass they feed has never
+           deleted anything (it looks one directory level above the clips),
+           and arming it is a deliberate decision, not a side effect of
+           editing a field — the first run would remove everything past
+           "keep at most" in one go. The labels say so rather than promising
+           a tidy-up that does not happen. See BUGS.md. */
         { key: 'retention.min_days', kind: 'number', min: 1, max: 365, step: 1, int: true,
-          label: 'Keep at least (days)', hint: 'Clips younger than this are never deleted for space.' },
+          label: 'Keep at least (days)', hint: 'Not enforced yet — recorded for when pruning is switched on.' },
         { key: 'retention.max_days', kind: 'number', min: 1, max: 3650, step: 1, int: true,
-          label: 'Keep at most (days)', hint: 'Clips older than this are deleted.' },
+          label: 'Keep at most (days)', hint: 'Not enforced yet — nothing deletes old clips today.' },
         { key: 'retention.max_utilization_pct', kind: 'slider', min: 50, max: 95, step: 5, unit: '%', restart: true,
-          label: 'Disk usage ceiling', hint: 'Above this the oldest clips are removed to make room.' }
+          label: 'Disk usage ceiling', hint: 'Not enforced yet — nothing frees space when the disk fills.' }
       ] }
     ]
   },

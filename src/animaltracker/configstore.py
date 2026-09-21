@@ -96,7 +96,6 @@ GENERAL_FIELDS: Dict[str, bool] = {
     "detector.admin1_region": False,
     "detector.latitude": False,
     "detector.longitude": False,
-    "detector.generic_confidence": True,
     "clip.pre_seconds": True,
     "clip.post_seconds": True,
     "clip.max_event_seconds": True,

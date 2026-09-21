@@ -1237,9 +1237,16 @@ class StreamWorker:
         loop = asyncio.get_running_loop()
 
         # --- Blur detection: skip processing blurry frames (PTZ motion blur) ---
+        # On the executor, never here: a Laplacian over a full frame is 2.5 ms
+        # at 1080p and 4.9 ms at 2688x1512, and this runs on every inferred
+        # frame of every camera with blur_threshold > 0 (the default is 50).
+        # On the loop that is time no camera's read, no stream and no request
+        # can use. The metric itself is unchanged -- it is computed on the
+        # full frame, as the configured thresholds were tuned against, not on
+        # the downscaled copy inference may use.
         blur_threshold = self.camera.thresholds.blur_threshold
         if blur_threshold > 0:
-            blur_score = self._compute_blur_score(frame)
+            blur_score = await loop.run_in_executor(None, self._compute_blur_score, frame)
             if blur_score < blur_threshold:
                 LOGGER.debug(
                     "[BLUR_SKIP] %s: frame too blurry (score=%.1f < threshold=%.1f), skipping detection",

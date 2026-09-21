@@ -60,6 +60,11 @@ The system uses a two-stage detection approach:
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
 - `tracker.py` - ByteTrack object tracking with persistent IDs
 - `postprocess.py` - Clip post-analysis, track merging, species finalization
+  The clip is renamed LAST: key frames and the sidecar are written under the
+  name the clip is about to take, and only then does the rename commit. The
+  rename is what tells the recovery sweep a clip is finished, so renaming
+  first let a kill strand a clip with its species name and no outputs, which
+  nothing would ever revisit.
   `PostProcessResult.detection_frames` is what `clip.min_detection_frames` is
   measured against: sampled frames with an accepted detection that is neither
   a person's shadow nor part of a track dropped as one (`_evidence_frames`).

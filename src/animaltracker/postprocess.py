@@ -594,13 +594,20 @@ class ClipPostProcessor:
             new_species = original_species
             confidence = 0.0
         
-        # Update filename if species changed
-        new_path = None
+        # Where the clip is going, if it is going anywhere. The key frames and
+        # the log are written under that name FIRST and the clip is renamed
+        # LAST, because the rename is what tells the recovery sweep this clip
+        # is finished. Renaming first left a window of a few seconds in which
+        # a restart (every deploy is one, and a restart abandons a running
+        # analysis) produced a clip named for its species with no key frames
+        # and no sidecar: the sweep only looks at clips that still carry the
+        # generic name, so it showed "No frame" for good. Killed the other way
+        # round, the clip still has its generic name and no sidecar of its
+        # own, which is exactly what the sweep picks up and redoes.
+        rename_to = None
         if update_filename and new_species != original_species and new_species:
-            new_path = self._rename_clip(clip_path, new_species)
-            working_path = new_path if new_path else clip_path
-        else:
-            working_path = clip_path
+            rename_to = self._planned_clip_path(clip_path, new_species)
+        working_path = rename_to if rename_to is not None else clip_path
         
         # Regenerate thumbnails with best detection frames
         thumbnails_saved = []
@@ -615,7 +622,8 @@ class ClipPostProcessor:
             else:
                 # No valid detections - extract sample frames from video as fallback
                 LOGGER.info("No valid detections found, extracting sample frames as fallback")
-                thumbnails_saved = self._extract_sample_frames(working_path, num_samples=3)
+                thumbnails_saved = self._extract_sample_frames(
+                    working_path, num_samples=3, source=clip_path)
         
         # Save processing log as JSON alongside the clip. It names the
         # thumbnails written above so readers can find them without trusting
@@ -625,15 +633,29 @@ class ClipPostProcessor:
             thumbnails=thumbnails_saved if regenerate_thumbnails else None,
             ptz_decisions=carried_ptz_decisions,
         )
-        # The clip was renamed: the log under its old name describes a file
-        # that no longer exists and everything in it has been carried over.
-        old_log = clip_path.with_suffix('.log.json')
-        new_log = working_path.with_suffix('.log.json')
-        if working_path != clip_path and new_log.exists():
-            try:
-                old_log.unlink(missing_ok=True)
-            except OSError as e:
-                LOGGER.warning("Failed to remove superseded processing log %s: %s", old_log, e)
+
+        # Everything this run produced is on disk under the new name: commit.
+        new_path = None
+        if rename_to is not None:
+            new_path = self._rename_clip(clip_path, new_species)
+            if new_path is None:
+                # The outputs sit under a name the clip did not take. The clip
+                # keeps its generic name and has no sidecar of its own, so the
+                # sweep will run it again and write over them.
+                LOGGER.warning(
+                    "Analysis of %s finished but the clip could not be renamed to %s; "
+                    "leaving it for the recovery sweep",
+                    clip_path.name, working_path.name,
+                )
+                working_path = clip_path
+            else:
+                # The log under the old name describes a file that no longer
+                # exists, and everything in it has been carried over.
+                try:
+                    clip_path.with_suffix('.log.json').unlink(missing_ok=True)
+                except OSError as e:
+                    LOGGER.warning("Failed to remove superseded processing log for %s: %s",
+                                   clip_path.name, e)
         _drop_directory_cache(working_path.parent)
         
         # Count unique tracks (animals) detected
@@ -1668,36 +1690,45 @@ class ClipPostProcessor:
         
         return parts[1]
     
+    @staticmethod
+    def _planned_clip_path(clip_path: Path, new_species: str) -> Optional[Path]:
+        """Where ``_rename_clip`` would put this clip, or None if it would not.
+
+        Used to write the key frames and the log under the clip's final name
+        before the rename commits to it (see ``process_clip``).
+        """
+        parts = clip_path.stem.split('_', 1)
+        if not parts or not parts[0]:
+            return None
+        clean_species = new_species.replace(' ', '_').replace('/', '_')
+        new_path = clip_path.parent / f"{parts[0]}_{clean_species}{clip_path.suffix}"
+        if new_path == clip_path:
+            return None
+        try:
+            if new_path.exists():
+                LOGGER.warning("Cannot rename: %s already exists", new_path)
+                return None
+        except OSError:
+            return None
+        return new_path
+
     def _rename_clip(self, clip_path: Path, new_species: str) -> Optional[Path]:
         """Rename clip file with new species classification.
         
         Returns new path if renamed, None if failed.
         """
         try:
-            # Parse timestamp from original filename
-            old_name = clip_path.stem
-            parts = old_name.split('_', 1)
-            if not parts:
-                return None
-            
-            timestamp = parts[0]
-            
-            # Clean species name for filename
-            clean_species = new_species.replace(' ', '_').replace('/', '_')
-            
-            new_name = f"{timestamp}_{clean_species}{clip_path.suffix}"
-            new_path = clip_path.parent / new_name
-            
-            # Don't overwrite existing files
-            if new_path.exists() and new_path != clip_path:
-                LOGGER.warning("Cannot rename: %s already exists", new_path)
+            new_path = self._planned_clip_path(clip_path, new_species)
+            if new_path is None:
                 return None
             
             # Rename the clip
             clip_path.rename(new_path)
-            LOGGER.info("Renamed clip: %s -> %s", clip_path.name, new_name)
+            LOGGER.info("Renamed clip: %s -> %s", clip_path.name, new_path.name)
             
-            # Also rename any existing thumbnails
+            # Thumbnails this run wrote are already under the new name (they
+            # are written before the rename); this moves any an earlier run
+            # left under the old one.
             self._rename_thumbnails(clip_path, new_path)
             
             return new_path
@@ -1719,6 +1750,12 @@ class ClipPostProcessor:
             new_thumb_path = clip_dir / new_thumb_name
             
             try:
+                if new_thumb_path.exists():
+                    # This run already wrote a key frame there (they go under
+                    # the clip's new name before the rename). A leftover from
+                    # an earlier run must not replace a fresh one.
+                    thumb.unlink(missing_ok=True)
+                    continue
                 thumb.rename(new_thumb_path)
             except Exception as e:
                 LOGGER.warning("Failed to rename thumbnail %s: %s", thumb, e)
@@ -1908,15 +1945,21 @@ class ClipPostProcessor:
         self,
         clip_path: Path,
         num_samples: int = 3,
+        source: Optional[Path] = None,
     ) -> List[Path]:
         """Extract sample frames from video when no detections are found.
         
         This provides fallback thumbnails so the user can see what's in the video.
         Frames are taken at 25%, 50%, and 75% through the video.
+
+        ``clip_path`` names the thumbnails; ``source`` is the file to read them
+        from, which is not the same thing while an analysis is writing its
+        outputs under the name the clip is about to take (see ``process_clip``).
         """
         saved = []
         clip_stem = clip_path.stem
         clip_dir = clip_path.parent
+        read_from = source if source is not None else clip_path
         
         # First, remove old thumbnails for this clip
         for old_thumb in clip_dir.glob(f"{clip_stem}_thumb_*.jpg"):
@@ -1925,9 +1968,9 @@ class ClipPostProcessor:
             except Exception as e:
                 LOGGER.warning("Failed to remove old thumbnail %s: %s", old_thumb, e)
         
-        cap = cv2.VideoCapture(str(clip_path))
+        cap = cv2.VideoCapture(str(read_from))
         if not cap.isOpened():
-            LOGGER.error("Could not open video for frame extraction: %s", clip_path)
+            LOGGER.error("Could not open video for frame extraction: %s", read_from)
             return saved
         
         try:

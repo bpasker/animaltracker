@@ -279,6 +279,64 @@ the recovery sweep now triggers that load ~90 s after every start.
 
 ---
 
+## 6. PTZ defects that cannot run in production today
+
+**Status:** open, dormant — recorded 2026-09-21 at the operator's request
+**Area:** `src/animaltracker/ptz_tracker.py`, `ptz_calibration.py`,
+`onvif_client.py`, `web.py`, `pipeline.py`
+
+No camera in production has an `onvif` block, `ptz_tracking.enabled` is off
+on all three, and `cam2`, the only zoom camera, is retired. None of the
+following can happen until a PTZ camera comes back; fix them then, and
+test on the hardware, because none can be proved without it. Found in the
+2026-09-19 bug hunt. The first five were re-checked against the code on
+2026-09-21; line numbers are as of `7d24274`.
+
+- **Investigate mode can never start.** It points cam2 at a detection too
+  small to track, one between `investigate_min_area` and
+  `min_detection_area`, and `PTZTracker` collects those "before size
+  filtering removes them" (`ptz_tracker.py:1623`). But the pipeline hands
+  the tracker its detections after `StreamWorker._filter_false_positives`
+  has applied `min_detection_area` (`pipeline.py:1435`, then the `update` /
+  `update_multi_camera` calls below it), so the candidates never arrive.
+  Fixing it makes cam2 move more, which is why it wants a decision.
+- **Investigate mode gives up on the first empty tick.** In
+  `INVESTIGATE`, any update without a candidate calls
+  `_maybe_finish_investigate(now, confirmed=False)` (`ptz_tracker.py:1950`)
+  with no check of `investigate_timeout`, logs "[INVESTIGATE_TIMEOUT] ...
+  within 4.0s" however long it waited, and puts the spot on the 30 s
+  cooldown. One frame where the small detection flickers out ends it.
+- **Zoom-FOV bounds are inflated when the wide frame was upscaled.**
+  `ZoomFOVCalibrator` upscales the wide frame to the zoom frame's size for
+  matching (`ptz_calibration.py:705`) but normalises the matched corners
+  by the original wide size (`:806-809`), so with cam1 on a sub-stream and
+  cam2 on the main stream every calibrated box is `scale_up` times too
+  big. Visibility recovery reads that calibration.
+- **The web UI saves the calibration by coincidence of layout.**
+  `web.py:1038` writes `<storage_root>/../config/zoom_fov_calibration.json`;
+  the tracker reads `ptz_tracking.zoom_fov_calibration_path` (default
+  `config/zoom_fov_calibration.json`, relative to the working directory).
+  They are the same file only because production's storage lives inside
+  the checkout; with storage on its own mount the tracker never sees a
+  calibration run from the UI. Save to the configured path.
+- **The ONVIF timeout is applied after the constructor's network calls.**
+  `OnvifClient.__init__` builds `ONVIFCamera(...)`, which talks to the
+  camera (capabilities, service addresses), and only then calls
+  `_apply_transport_timeout()` (`onvif_client.py:56-61`). A camera that
+  accepts the connection and never answers hangs worker start-up with no
+  timeout.
+- **Visibility recovery** (`_do_visibility_recovery_from_source`,
+  `ptz_tracker.py:919`) was reported to never put the tracker in
+  `TRACKING` after its move, and every branch sets a non-zero zoom
+  velocity, so it zooms (in or out) on every call even with the target
+  centred and a good size. Not re-checked on 2026-09-21.
+- **The single-camera path was reported never to get the wide post-slew
+  lock radius** (`_lock_spatial_radius_after_own_move`, chosen at
+  `ptz_tracker.py:2831-2838` only when the anchor's source is the PTZ
+  camera itself). Not re-checked on 2026-09-21.
+
+---
+
 ## Awaiting a decision (not a tracking item)
 
 ### Storage retention (fixed 2026-09-20)

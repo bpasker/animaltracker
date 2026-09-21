@@ -653,3 +653,110 @@ def test_pushover_variables_can_be_set_before_the_config_names_them(cfg_path, mo
     with pytest.raises(configstore.ConfigError) as info:
         configstore.set_secret(cfg_path, "CAM9_ONVIF_PASS", "k")
     assert "PUSHOVER" in info.value.problems[0]["message"]
+
+
+# --------------------------------------------------------------------------
+# unapplied live changes: the file edited behind the settings page
+# --------------------------------------------------------------------------
+#
+# Background (bug hunt, 2026-09-20): the page reads the file, the pipeline holds
+# its own objects, and the only bridge was a save — which applied just the keys
+# that save itself changed. A live key edited in the file by hand was therefore
+# never applied and never reported: the page showed the new value as though it
+# were in force, the process kept the old one, and the restart banner said
+# nothing, because it only compares the restart-only keys. Pressing Save could
+# not fix it either, since the payload then matched the file and nothing counted
+# as a change. Only a restart reconciled them.
+
+def hand_edit(path, mutate):
+    """Change cameras.yml behind the running process, as an operator would."""
+    raw = configstore.load_raw(path)
+    mutate(raw)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+
+def test_a_hand_edited_live_key_is_reported_as_not_in_effect(cfg_path):
+    rt, workers = running(cfg_path)
+    hand_edit(cfg_path, lambda raw: (
+        raw["general"]["clip"].update({"pre_seconds": 33}),
+        raw["cameras"][0]["thresholds"].update({"confidence": 0.81}),
+    ))
+    cfg = configstore.validate(configstore.load_raw(cfg_path))
+
+    unapplied = configstore.unapplied_live_changes(cfg, rt, workers)
+
+    assert set(unapplied) == {"general.clip.pre_seconds", "cam1.thresholds.confidence"}
+    # It is not a restart matter, so it must not turn up as one.
+    assert configstore.pending_restart(cfg, rt, workers) == []
+
+
+def test_a_restart_only_key_is_not_reported_as_unapplied(cfg_path):
+    rt, workers = running(cfg_path)
+    hand_edit(cfg_path, lambda raw: raw["general"]["detector"].update({"realtime_backend": "yolo"}))
+    cfg = configstore.validate(configstore.load_raw(cfg_path))
+
+    assert configstore.unapplied_live_changes(cfg, rt, workers) == []
+    assert "real-time detector" in " ".join(configstore.pending_restart(cfg, rt, workers))
+
+
+def test_nothing_is_reported_when_the_process_matches_the_file(cfg_path):
+    rt, workers = running(cfg_path)
+    cfg = configstore.validate(configstore.load_raw(cfg_path))
+
+    assert configstore.unapplied_live_changes(cfg, rt, workers) == []
+
+
+def test_describe_tells_the_page_about_it(cfg_path):
+    rt, workers = running(cfg_path)
+    hand_edit(cfg_path, lambda raw: raw["cameras"][0]["thresholds"].update({"confidence": 0.81}))
+
+    payload = configstore.describe(cfg_path, rt, workers)
+
+    assert payload["unapplied"]["count"] == 1
+    assert payload["unapplied"]["keys"] == ["cam1.thresholds.confidence"]
+    assert payload["restart"]["required"] is False
+
+
+def test_saving_takes_the_hand_edited_value_even_with_an_empty_payload(cfg_path):
+    """The case that had no way out: the payload matches the file, so nothing
+    is 'changed', yet the running process is still behind it."""
+    rt, workers = running(cfg_path)
+    hand_edit(cfg_path, lambda raw: (
+        raw["general"]["clip"].update({"pre_seconds": 33}),
+        raw["cameras"][0]["thresholds"].update({"confidence": 0.81}),
+    ))
+
+    result = configstore.save(cfg_path, {}, rt, workers)
+
+    assert rt.general.clip.pre_seconds == 33
+    assert workers["cam1"].camera.thresholds.confidence == 0.81
+    assert set(result["applied_live"]) == {"clip.pre_seconds", "cam1.thresholds.confidence"}
+    assert result["changes"]["general"] == [] and result["changes"]["cameras"] == {}
+    assert result["backup"] is None, "nothing changed in the file, so it is not rewritten"
+    assert configstore.unapplied_live_changes(result["config"], rt, workers) == []
+
+
+def test_saving_still_leaves_restart_only_keys_for_the_restart(cfg_path):
+    rt, workers = running(cfg_path)
+    hand_edit(cfg_path, lambda raw: (
+        raw["general"]["detector"].update({"realtime_backend": "yolo"}),
+        raw["cameras"][0]["rtsp"].update({"uri": "rtsp://elsewhere/stream"}),
+    ))
+
+    configstore.save(cfg_path, {}, rt, workers)
+
+    assert rt.general.detector.realtime_backend == "megadetector"
+    assert workers["cam1"].camera.rtsp.uri.startswith("rtsps://192.168.1.1")
+    reasons = " ".join(configstore.pending_restart(
+        configstore.validate(configstore.load_raw(cfg_path)), rt, workers))
+    assert "real-time detector" in reasons and "stream settings" in reasons
+
+
+def test_a_camera_that_is_not_running_is_not_a_drift(cfg_path):
+    rt, workers = running(cfg_path)
+    workers.pop("cam1")
+    hand_edit(cfg_path, lambda raw: raw["cameras"][0]["thresholds"].update({"confidence": 0.81}))
+    cfg = configstore.validate(configstore.load_raw(cfg_path))
+
+    assert configstore.unapplied_live_changes(cfg, rt, workers) == []
+    assert "not running" in " ".join(configstore.pending_restart(cfg, rt, workers))

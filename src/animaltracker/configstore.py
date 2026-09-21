@@ -666,42 +666,92 @@ def write_config(path: Path, raw: dict, keep: int = BACKUP_KEEP) -> Optional[Pat
 # Live apply and pending-restart detection
 # ---------------------------------------------------------------------------
 
-def hot_apply(runtime: Any, workers: Dict[str, Any], cfg: RuntimeConfig, changes: Dict[str, Any]) -> List[str]:
-    """Push live-safe changes into the running process.
+def hot_apply(runtime: Any, workers: Dict[str, Any], cfg: RuntimeConfig,
+              changes: Dict[str, Any] = None) -> List[str]:
+    """Bring the running process in line with the file, for every live key.
 
     Values are taken from the *validated* config so the running models
     receive typed values (an int for ``min_frames``, a list for species).
     Restart-only keys are deliberately left alone: the pending-restart diff
     depends on the running copy still holding the old value.
+
+    Every live key that differs is applied, not just the ones this save
+    changed. Those are not the same set: a key edited in the file by hand,
+    or by another writer, is already in the file the payload was merged into,
+    so it never appears in the diff. It used to stay unapplied for ever —
+    pressing Save could not fix it either, because the payload then matched
+    the file and nothing counted as a change — while the page went on showing
+    the file's value as though it were in force.
+
+    ``changes`` is accepted and ignored, so old callers keep working.
     """
     applied: List[str] = []
     if runtime is not None and getattr(runtime, "general", None) is not None:
-        for key in changes.get("general", []):
-            if not GENERAL_FIELDS.get(key):
-                continue
+        for key in _live_general_drift(cfg, runtime):
             try:
                 _assign(runtime.general, key, _get(cfg.general, key))
                 applied.append(key)
             except Exception as err:  # noqa: BLE001 - one bad field must not block the rest
                 LOGGER.warning("Could not apply general.%s live: %s", key, err)
-    for cid, keys in changes.get("cameras", {}).items():
+    for cam in cfg.cameras:
+        cid = cam.id
         worker = workers.get(cid)
         running = getattr(worker, "camera", None) if worker is not None else None
         if running is None:
             continue
-        try:
-            new_cam = cfg.camera_by_id(cid)
-        except KeyError:
-            continue
-        for key in keys:
-            if not CAMERA_FIELDS.get(key):
-                continue
+        new_cam = cam
+        for key in _live_camera_drift(new_cam, running):
             try:
                 _assign(running, key, _get(new_cam, key))
                 applied.append(f"{cid}.{key}")
             except Exception as err:  # noqa: BLE001
                 LOGGER.warning("Could not apply %s.%s live: %s", cid, key, err)
     return applied
+
+
+def _live_general_drift(cfg: RuntimeConfig, runtime: Any) -> List[str]:
+    """Live general keys whose file value differs from the running one."""
+    general = getattr(runtime, "general", None) if runtime is not None else None
+    if general is None:
+        return []
+    out = []
+    for key, live in GENERAL_FIELDS.items():
+        if not live:
+            continue
+        if _dump(_get(cfg.general, key, None)) != _dump(_get(general, key, None)):
+            out.append(key)
+    return out
+
+
+def _live_camera_drift(cam: Any, running: Any) -> List[str]:
+    """Live camera keys whose file value differs from the running one."""
+    out = []
+    for key, live in CAMERA_FIELDS.items():
+        if not live:
+            continue
+        if _dump(_get(cam, key, None)) != _dump(_get(running, key, None)):
+            out.append(key)
+    return out
+
+
+def unapplied_live_changes(cfg: RuntimeConfig, runtime: Any, workers: Dict[str, Any]) -> List[str]:
+    """Live settings the file has changed that the running process has not taken.
+
+    A restart is not what these need — they apply without one — so they are
+    reported apart from the restart reasons. Saving from the settings page
+    now takes them (``hot_apply``), and so does a restart.
+    """
+    reasons: List[str] = []
+    for key in _live_general_drift(cfg, runtime):
+        reasons.append(f"general.{key}")
+    for cam in cfg.cameras:
+        worker = workers.get(cam.id)
+        running = getattr(worker, "camera", None) if worker is not None else None
+        if running is None:
+            continue
+        for key in _live_camera_drift(cam, running):
+            reasons.append(f"{cam.id}.{key}")
+    return reasons
 
 
 def _camera_label(cam: Any) -> str:
@@ -792,7 +842,9 @@ def save(path: Path, payload: dict, runtime: Any, workers: Dict[str, Any]) -> Di
             raise ConfigError("Some cameras name Pushover destinations that do not exist.", dangling)
         touched = bool(changes["general"] or changes["cameras"] or changes["added"] or changes["removed"])
         backup = write_config(path, new_raw) if touched else None
-        applied = hot_apply(runtime, workers, cfg, changes) if touched else []
+        # Always, not only when this payload changed something: a value
+        # edited in the file by hand is the case that needs reconciling.
+        applied = hot_apply(runtime, workers, cfg)
         ptz_sync = ptz_state_updates(old_cfg, cfg, list(changes["cameras"].keys()) + list(changes["added"]))
         return {
             "changes": changes,
@@ -981,6 +1033,7 @@ def describe(path: Path, runtime: Any, workers: Dict[str, Any],
         entry["recent_detections"] = (recent_detections or {}).get(cam.id, {})
         cameras.append(entry)
     reasons = pending_restart(cfg, runtime, workers)
+    unapplied = unapplied_live_changes(cfg, runtime, workers)
     support = restart_support()
     spath = secrets_path(path)
     return {
@@ -992,6 +1045,10 @@ def describe(path: Path, runtime: Any, workers: Dict[str, Any],
         "secrets": {"file": str(spath), "exists": spath.exists(), "variables": env_references(cfg)},
         "defaults": {"camera": camera_defaults()},
         "fields": {"general": GENERAL_FIELDS, "camera": CAMERA_FIELDS},
+        "unapplied": {
+            "count": len(unapplied),
+            "keys": unapplied,
+        },
         "restart": {
             "required": bool(reasons),
             "reasons": reasons,

@@ -1047,6 +1047,7 @@ function newSession() {
     restarting: false,
     destroyed: false,
     leaveDialog: null,   /* the "discard unsaved changes?" dialog, while open */
+    unapplied: null,     /* live settings in the file the process has not taken */
     navGeneral: null,
     navCameras: null,
     panelEl: null,
@@ -3079,7 +3080,12 @@ function serverPath(p) {
 /** Write the draft. Resolves true when config/cameras.yml was written (or
     there was nothing to write), false when nothing was saved — so a caller
     that meant "save and then leave" knows whether it may leave. */
-function save() {
+function save(opts) {
+  /* `apply` posts even when the form is not dirty. That is the only way to
+     reconcile a value edited in the file behind this page: the payload then
+     equals the file, so there is nothing to "change", and without this the
+     Save button looked like it did nothing at all. */
+  var force = !!(opts && opts.apply);
   if (S.saving || !S.draft || !S.baseline) return Promise.resolve(false);
 
   var problems = validateModel(S.draft);
@@ -3107,7 +3113,7 @@ function save() {
   var d = computeChanges();
   var changed = d.list.slice();
   var n = changed.length;
-  if (!n) return Promise.resolve(true);   /* nothing to lose */
+  if (!n && !force) return Promise.resolve(true);   /* nothing to lose */
   var restarts = 0;
   for (var r = 0; r < changed.length; r++) if (changed[r].restart) restarts += 1;
 
@@ -3120,8 +3126,10 @@ function save() {
   S.baseline = clone(S.draft);
   refreshDirty();
 
-  var progress = toast.progress('Writing config/cameras.yml…', {
-    detail: n + ' ' + plural(n, 'change') + ' · ' + S.draft.order.length + ' ' + plural(S.draft.order.length, 'camera')
+  var progress = toast.progress(n ? 'Writing config/cameras.yml…' : 'Applying the file to the running process…', {
+    detail: n
+      ? n + ' ' + plural(n, 'change') + ' · ' + S.draft.order.length + ' ' + plural(S.draft.order.length, 'camera')
+      : 'Nothing to write; taking the settings already in the file.'
   });
 
   return api.saveConfig(payload, { timeout: 30000, signal: S.abort.signal }).then(function (res) {
@@ -3137,6 +3145,8 @@ function save() {
     for (var id in S.draft.cameras) if (Object.prototype.hasOwnProperty.call(S.draft.cameras, id)) delete S.draft.cameras[id].isNew;
 
     S.restart = res && res.restart ? res.restart : S.restart;
+    /* The save applied every live setting the file held, this one included. */
+    S.unapplied = { count: 0, keys: [] };
     renderBanner();
     var live = res && isArray(res.applied_live) ? res.applied_live.length : 0;
     var detail;
@@ -3146,9 +3156,16 @@ function save() {
     } else {
       detail = live ? 'Applied to the running process immediately' : 'Written to disk';
     }
-    toast.success(n + ' ' + plural(n, 'change') + ' saved to config/cameras.yml', {
-      detail: detail + (res && res.backup ? ' · backup kept' : '')
-    });
+    var applied = isArray(res && res.applied_live) ? res.applied_live.length : 0;
+    if (n) {
+      toast.success(n + ' ' + plural(n, 'change') + ' saved to config/cameras.yml', {
+        detail: detail + (res && res.backup ? ' · backup kept' : '')
+      });
+    } else {
+      toast.success(applied
+        ? applied + ' ' + plural(applied, 'setting') + ' from the file applied to the running process'
+        : 'The running process already matches the file', { detail: null });
+    }
     refreshDirty();
     /* Pick up the server's normalised copy (schema defaults for a new camera,
        runtime annotations) without disturbing anything the operator typed
@@ -3468,8 +3485,22 @@ function renderBanner() {
   if (!S.bannerEl) return;
   clear(S.bannerEl);
   var r = S.restart;
-  if (!r || !r.required) { S.bannerEl.hidden = true; return; }
+  var drift = S.unapplied && S.unapplied.count ? S.unapplied : null;
+  if (!r || !r.required) {
+    /* No restart needed, but the file may still hold live settings the
+       running process has not taken — edited by hand, or by another writer.
+       They used to be invisible: this page reads the file, so it showed them
+       as though they were in force. */
+    if (drift) {
+      S.bannerEl.hidden = false;
+      S.bannerEl.appendChild(driftNotice(drift));
+      return;
+    }
+    S.bannerEl.hidden = true;
+    return;
+  }
   S.bannerEl.hidden = false;
+  if (drift) S.bannerEl.appendChild(driftNotice(drift));
   var reasons = isArray(r.reasons) ? r.reasons : [];
   var shown = reasons.slice(0, 4);
   var list = h('ul.notice__list');
@@ -3490,6 +3521,35 @@ function renderBanner() {
     actions.appendChild(btn);
   }
   S.bannerEl.appendChild(h('div.notice.notice--warn', { role: 'status' }, icon('alert'), body, actions));
+}
+
+/** Live settings cameras.yml has changed that the running process has not
+    taken. A restart is not what they need — Save applies them. */
+function driftNotice(drift) {
+  var keys = isArray(drift.keys) ? drift.keys : [];
+  var shown = keys.slice(0, 4);
+  var list = h('ul.notice__list');
+  for (var i = 0; i < shown.length; i++) list.appendChild(h('li', { text: shown[i] }));
+  if (keys.length > shown.length) {
+    list.appendChild(h('li', { text: 'and ' + (keys.length - shown.length) + ' more' }));
+  }
+  var body = h('div.notice__body',
+    h('p.notice__title', {
+      text: drift.count + ' ' + plural(drift.count, 'setting') + ' in cameras.yml ' +
+        (drift.count === 1 ? 'is' : 'are') + ' not in effect'
+    }),
+    list,
+    h('p.notice__hint', {
+      text: 'The file was changed outside this page. These apply without a restart — '
+        + 'press Save to take them, or restart the service.'
+    }));
+  var actions = h('div.notice__actions');
+  var btn = h('button.btn.btn--primary.btn--sm', { type: 'button' },
+    h('span.btn__icon', { 'aria-hidden': 'true' }, icon('check', { size: 'sm' })),
+    h('span.btn__label', 'Apply them'));
+  track(on(btn, 'click', function () { save({ apply: true }); }));
+  actions.appendChild(btn);
+  return h('div.notice.notice--warn', { role: 'status' }, icon('alert'), body, actions);
 }
 
 function restartService() {
@@ -3743,6 +3803,7 @@ function applyServerMeta(raw) {
   S.secrets = raw && raw.secrets && typeof raw.secrets === 'object' ? raw.secrets : null;
   S.defaults = raw && raw.defaults && typeof raw.defaults === 'object' ? raw.defaults : {};
   S.restart = raw && raw.restart ? raw.restart : { required: false, reasons: [], supported: false, unit: null };
+  S.unapplied = raw && raw.unapplied ? raw.unapplied : { count: 0, keys: [] };
   S.configPath = raw && raw.config_path ? String(raw.config_path) : '';
   S.backupDir = raw && raw.backup_dir ? String(raw.backup_dir) : '';
 }

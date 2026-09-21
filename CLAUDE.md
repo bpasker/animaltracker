@@ -214,6 +214,15 @@ backed by `configstore.py`). Rules that keep it safe:
   `RuntimeConfig`, backs up, writes atomically, then `setattr`s live fields on
   the running models. Restart-only fields are never applied live, because the
   pending-restart banner is the diff between file and runtime.
+- `hot_apply` reconciles **every** live key whose file value differs from the
+  running one, not just the keys the payload changed: a value edited in the
+  file by hand is already in the file the payload merged into, so it never
+  shows up as a change. `unapplied_live_changes` reports any that are still
+  out of step (`describe()` returns them under `unapplied`), because the
+  restart banner only compares restart-only keys and said nothing about these.
+  The page shows them as "not in effect" with an Apply button, which posts
+  with `save({apply: true})` — a plain Save returns early when the form is
+  clean, which is exactly the case here.
 - Values equal to the schema default are not written for keys the file lacks,
   so hand-kept files stay compact.
 - Pushover recipients: `general.notification.destinations` is a list of

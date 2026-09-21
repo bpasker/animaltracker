@@ -505,6 +505,13 @@ python -m animaltracker.cli --config config/cameras.yml ptz-test --camera cam1 -
 ```
 
 ### `cleanup` - Remove Old Clips
+
+Applies `general.retention`: clips older than `max_days` go with their key
+frames and logs (never one younger than `min_days`, whatever the disk), then
+the oldest go while the disk is above `max_utilization_pct`. Key frames and
+logs left behind by a clip that was deleted on its own are swept once they
+are past `max_days` too. `systemd/ssd-cleaner.timer` runs it daily.
+
 ```bash
 # Preview what would be deleted
 python -m animaltracker.cli --config config/cameras.yml cleanup --dry-run
@@ -574,7 +581,8 @@ sudo systemctl status animaltracker
 journalctl -u animaltracker -f
 journalctl -u animaltracker -p warning --since "1 hour ago"   # warnings and errors only
 
-# 6. Enable automatic cleanup (optional)
+# 6. Enable the daily retention pass (optional; edit User= and the paths in
+#    ssd-cleaner.service to match animaltracker.service first)
 sudo systemctl enable --now ssd-cleaner.timer
 ```
 

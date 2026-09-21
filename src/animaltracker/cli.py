@@ -236,10 +236,20 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         )
         for f in storage.find_interrupted_recordings()[:10]:
             LOGGER.warning("    %s", f.relative_to(storage.storage_root))
+    if report.leftovers_removed:
+        LOGGER.info(
+            "  %s key frames and logs of %d event(s) whose clip is already gone: %d file(s), %.2f GB",
+            "would also remove" if report.dry_run else "also removed",
+            report.leftovers_removed, report.leftover_files, report.leftover_bytes / 1_073_741_824,
+        )
+    leftovers_kept = report.leftovers_seen - report.leftovers_removed
+    if leftovers_kept > 0:
+        LOGGER.info("  %d more event(s) with key frames but no clip, kept until they pass %d days",
+                    leftovers_kept, retention.max_days)
     if report.failed:
         LOGGER.error("  %d file(s) could not be removed", len(report.failed))
         return 1
-    if report.dry_run and report.deleted:
+    if report.dry_run and (report.deleted or report.leftovers_removed):
         LOGGER.info("Nothing was removed. Run without --dry-run to apply.")
     return 0
 

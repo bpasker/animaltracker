@@ -1,9 +1,13 @@
 [Unit]
-Description=Hourly SSD cleanup scheduler
+Description=Daily retention pass for the clip archive
 
 [Timer]
-OnBootSec=5m
-OnUnitActiveSec=1h
+# Once a day. Retention is counted in days and the archive does not fill in
+# hours; an hourly pass only added a journal entry every hour. The disk
+# ceiling (retention.max_utilization_pct) is checked on the same pass.
+OnCalendar=daily
+# A pass missed while the host was off runs at the next boot.
+Persistent=true
 Unit=ssd-cleaner.service
 
 [Install]

@@ -309,8 +309,24 @@ The three interrupted recordings on production (3.7 GB, all `cam2`) were
 deleted by hand on 2026-09-20 at the operator's request; the archive holds
 none now.
 
-Still open: the first real run removes 247 of 438 clips (7.5 GB, 24 Dec 2025
-to 21 May 2026), 175 of them from `cam2`, a camera no longer in
-`config/cameras.yml`. Nothing forces it — the volume is at 28% of 298 GB and
-the pass would take it to 25% — so it stays a decision about keeping a
-retired camera's history, not a space problem.
+The operator ran the first real pass on production on 2026-09-20: 247 of
+438 clips (24 Dec 2025 to 21 May 2026, 175 of them from the retired `cam2`),
+exactly the files the dry run listed, checked afterwards against a copy of
+the archive taken before it.
+
+Then, 2026-09-21:
+
+- key frames and logs whose clip is already gone go too, once past
+  `max_days` (`StorageManager.find_leftovers`). A delete that removed only
+  the video left them (the web delete did until e236509), and nothing found
+  them because the archive and retention start from the videos: 954 events,
+  4,370 files, 0.8 GB on production. Grouped by directory and event epoch,
+  never by name; a group with any video in it, finished or half-written, or
+  whose event is still recording to `event_temp`, or holding a file the
+  pipeline does not write, is left alone.
+- `ssd-cleaner.service` ran `cleanup --config ...`, which argparse rejects
+  (`--config` belongs before the subcommand), so the unit would have failed
+  on every run; it had never been installed. Fixed, the timer is daily with
+  `Persistent=true`, and `tests/test_systemd_units.py` parses every unit's
+  command with the real parser. Production had no timer at all, so
+  `max_days` held only when someone ran the command.

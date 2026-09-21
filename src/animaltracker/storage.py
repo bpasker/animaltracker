@@ -212,6 +212,21 @@ def _is_intermediate(path: Path) -> bool:
 _CLIP_EPOCH_RE = re.compile(r"^(\d{9,10})_")
 
 
+def _is_companion(name: str) -> bool:
+    """A key frame or a processing log: all the pipeline writes beside a clip."""
+    return name.endswith(".log.json") or (name.endswith(".jpg") and "_thumb" in name)
+
+
+@dataclass
+class LeftoverGroup:
+    """One event's key frames and log, still on disk after its clip went."""
+    directory: Path
+    camera: str
+    epoch: int
+    files: List[Path]
+    size: int
+
+
 @dataclass
 class PruneReport:
     """What a retention pass did, or would do with ``dry_run``."""
@@ -224,6 +239,10 @@ class PruneReport:
     files_removed: int = 0        # clips plus their key frames and logs
     interrupted_seen: int = 0     # *.temp.avi with no clip beside them
     interrupted_removed: int = 0  # ...of those, the ones past max_days
+    leftovers_seen: int = 0       # key frames and logs whose clip is gone, per event
+    leftovers_removed: int = 0    # ...of those, the ones past max_days
+    leftover_files: int = 0
+    leftover_bytes: int = 0       # not in freed_bytes, which counts clips
     freed_bytes: int = 0
     by_camera: Dict[str, int] = field(default_factory=dict)
     oldest: Optional[float] = None
@@ -784,6 +803,82 @@ class StorageManager:
             and not p.with_name(p.name.split(".")[0] + ".mp4").exists()
         )
 
+    def find_leftovers(self) -> List[LeftoverGroup]:
+        """Key frames and processing logs whose clip is gone, one group per event.
+
+        A delete that removed only the video left these behind (the web
+        delete did, until e236509), and nothing else ever finds them: the
+        archive and retention both start from the videos. On production they
+        came to 954 events, 4,370 files.
+
+        A clip and everything written for it share a directory and the event
+        epoch their names begin with, but not always the label after it: the
+        post-processor writes key frames and the log under the name the clip
+        is about to take and renames the video last, and a rename used to
+        leave the old name's log behind. So files are grouped by directory
+        and epoch, never by name, and a group is a leftover only when nothing
+        in it is a video, finished or half-written, and its event is not
+        still recording to ``event_temp``. A group holding any file the
+        pipeline does not write beside a clip is not ours and is left alone.
+        """
+        root = self.storage_root / "clips"
+        if not root.is_dir():
+            return []
+        groups: Dict[tuple, dict] = {}
+        for path in root.rglob("*"):
+            if path.parent == root:
+                continue  # manual clips, named without an event epoch
+            match = _CLIP_EPOCH_RE.match(path.name)
+            if not match:
+                continue
+            group = groups.setdefault((path.parent, int(match.group(1))),
+                                      {"files": [], "size": 0, "held": False})
+            if not _is_companion(path.name):
+                # Decided by name, before any stat: a video that is being
+                # renamed while this listing runs must still hold its group.
+                group["held"] = True
+                continue
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue  # gone between the listing and now
+            group["files"].append(path)
+            group["size"] += size
+
+        recording = self._events_recording()
+        leftovers = []
+        for (directory, epoch), group in groups.items():
+            if group["held"] or not group["files"]:
+                continue
+            camera = directory.relative_to(root).parts[0]
+            if (camera, epoch) in recording:
+                continue
+            leftovers.append(LeftoverGroup(directory, camera, epoch,
+                                           sorted(group["files"]), group["size"]))
+        leftovers.sort(key=lambda g: (g.epoch, str(g.directory)))
+        return leftovers
+
+    def _events_recording(self) -> set:
+        """``(camera, epoch)`` of every event with a recording in ``event_temp``.
+
+        Live or left by a crash, that recording becomes the event's clip (the
+        pipeline recovers orphans at startup), so the event's key frames are
+        not leftovers though its video has not been written yet. Unlike
+        ``list_orphan_event_temps`` this is safe to ask at any time.
+        """
+        events = set()
+        try:
+            names = [p.name for p in (self.logs_root / "event_temp").glob("*.temp.avi")]
+        except OSError:
+            return events
+        for name in names:
+            match = _EVENT_TEMP_RE.match(name)
+            if match:
+                events.add((match.group("camera"), int(match.group("ts"))))
+        return events
+
     def prune_clips(
         self,
         max_days: int,
@@ -796,8 +891,10 @@ class StorageManager:
         Never touches a clip younger than ``min_days``, whatever the disk is
         doing: that floor is the one guarantee the settings page makes, and it
         is what stops a full disk erasing this morning's visitors. Each clip
-        goes with its key frames and its log. Nothing is removed when
-        ``dry_run`` is set, which is how the report is meant to be read first.
+        goes with its key frames and its log, and key frames and logs whose
+        clip is already gone (``find_leftovers``) go once they pass the same
+        age. Nothing is removed when ``dry_run`` is set, which is how the
+        report is meant to be read first.
         """
         report = PruneReport(dry_run=dry_run)
         now = time.time()
@@ -810,6 +907,11 @@ class StorageManager:
         too_old = now - max_days * 86400 if max_days > 0 else None
 
         interrupted = set(self.find_interrupted_recordings())
+        # Listed before anything is removed, so the dry run reports exactly
+        # what the real run removes: a clip pruned below cannot turn a log it
+        # left under an old name into a leftover halfway through this pass.
+        # That log is one on the next.
+        leftovers = self.find_leftovers()
         aged: List[tuple] = []
         for clip in list(self.find_clips()) + sorted(interrupted):
             try:
@@ -844,15 +946,32 @@ class StorageManager:
                 self._prune_one(clip, started, size, report, dry_run,
                                 "older than %d days" % max_days)
 
+        # Aged by the event, like the clip they belonged to. Not in the disk
+        # pass below: they are small, and a full disk is no reason to hurry
+        # files that go at max_days anyway.
+        for group in leftovers:
+            report.leftovers_seen += 1
+            if not 1_000_000_000 <= group.epoch <= now + 86400:
+                continue  # not a time, so no age to judge it by
+            started = float(group.epoch)
+            if keep_after is not None and started >= keep_after:
+                continue
+            if too_old is None or started >= too_old:
+                continue
+            self._prune_leftover(group, report, dry_run)
+
         if max_utilization_pct:
+            def assumed_freed() -> int:
+                return report.freed_bytes + report.leftover_bytes if dry_run else 0
+
             remaining = [row for row in aged if row[1] not in report.deleted_set]
             for started, clip, size in remaining:
-                used_pct = self._utilization_pct(report.freed_bytes if dry_run else 0)
+                used_pct = self._utilization_pct(assumed_freed())
                 if used_pct is None or used_pct <= max_utilization_pct:
                     break
                 self._prune_one(clip, started, size, report, dry_run,
                                 "disk at %.0f%%, ceiling %d%%" % (used_pct, max_utilization_pct))
-            report.utilization_pct = self._utilization_pct(report.freed_bytes if dry_run else 0)
+            report.utilization_pct = self._utilization_pct(assumed_freed())
             if (report.utilization_pct is not None
                     and report.utilization_pct > max_utilization_pct):
                 report.still_over_ceiling = True
@@ -885,6 +1004,21 @@ class StorageManager:
             report.oldest = started
         if report.newest is None or started > report.newest:
             report.newest = started
+
+    def _prune_leftover(self, group: LeftoverGroup, report: "PruneReport", dry_run: bool) -> None:
+        where = group.directory.relative_to(self.storage_root / "clips")
+        LOGGER.info("%s %d file(s) of %s/%d_* (clip already gone)",
+                    "Would remove" if dry_run else "Removing", len(group.files), where, group.epoch)
+        if not dry_run:
+            for path in group.files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    LOGGER.warning("Failed to remove %s: %s", path.name, e)
+                    report.failed.append(path)
+        report.leftovers_removed += 1
+        report.leftover_files += len(group.files)
+        report.leftover_bytes += group.size
 
     def _utilization_pct(self, assume_freed: int = 0) -> Optional[float]:
         try:

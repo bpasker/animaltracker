@@ -120,6 +120,12 @@ The system uses a two-stage detection approach:
   builds one next to the running service). At startup the pipeline turns
   whatever a previous run left behind into `<epoch>_animal.mp4` clips
   (`recover_orphan_event_temp`), which the recovery sweep then analyses.
+  Retention is `prune_clips`, run by `cleanup` from the daily
+  `ssd-cleaner.timer`. Its `find_leftovers` sweeps key frames and logs whose
+  clip is gone; it groups files by directory and event epoch, never by name,
+  because mid-analysis the outputs carry the new name and the video the old
+  one. Any video in the group (even `.tmp.mp4`), a recording in `event_temp`
+  for that event, or a file the pipeline does not write holds the group.
 - `species_names.py` - display names, and the one specificity scale:
   `species_lineage` / `species_rank` read a label's taxonomy depth (0 animal,
   1 class, 2 order, 3 family) and `pick_species_by_lineage` is the vote every

@@ -1,13 +1,18 @@
 [Unit]
-Description=Animal Tracker SSD cleanup
+Description=Animal Tracker retention pass (clip cleanup)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-# Update User and paths to match your system
+# Update User and paths to match your install (the same as animaltracker.service)
 User=YOUR_USERNAME
 WorkingDirectory=/home/YOUR_USERNAME/animaltracker
 EnvironmentFile=/home/YOUR_USERNAME/animaltracker/config/secrets.env
-ExecStart=/home/YOUR_USERNAME/animaltracker/.venv/bin/python -m animaltracker.cli cleanup \
-    --config /home/YOUR_USERNAME/animaltracker/config/cameras.yml
+# --config belongs before the subcommand. Written after it ("cleanup
+# --config ...") argparse rejects it as an unrecognized argument, and this
+# unit failed on every run. Preview a pass by hand with the same command
+# plus --dry-run after "cleanup".
+ExecStart=/home/YOUR_USERNAME/animaltracker/.venv/bin/python -m animaltracker.cli \
+    --config /home/YOUR_USERNAME/animaltracker/config/cameras.yml \
+    cleanup

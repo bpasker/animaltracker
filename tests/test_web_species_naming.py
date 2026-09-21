@@ -198,7 +198,7 @@ def test_parse_uuid_lookalike_is_not_stripped(parse):
 
 
 def test_parse_plus_splits_multiple_species(parse):
-    assert parse("1788800356_bird+mammalia.mp4") == ("Bird, Mammal", "bird")
+    assert parse("1788800356_bird+mammalia.mp4") == ("Bird / Mammal", "bird")
 
 
 def test_parse_raw_is_the_first_species_only(parse):
@@ -206,12 +206,12 @@ def test_parse_raw_is_the_first_species_only(parse):
     display, raw = parse(
         "1788800356_bird_accipitriformes_accipitridae_accipiter_cooperii+mammalia.mp4"
     )
-    assert display == "Cooper's Hawk, Mammal"
+    assert display == "Cooper's Hawk / Mammal"
     assert raw == "bird_accipitriformes_accipitridae_accipiter_cooperii"
 
 
 def test_parse_empty_plus_segments_are_skipped(parse):
-    assert parse("1788800356_bird++mammalia.mp4") == ("Bird, Mammal", "bird")
+    assert parse("1788800356_bird++mammalia.mp4") == ("Bird / Mammal", "bird")
 
 
 def test_parse_bare_plus_is_unknown(parse):
@@ -223,7 +223,7 @@ def test_parse_related_ranks_are_both_displayed(parse):
     assert parse(
         "1788800356_mammalia_carnivora_felidae"
         "+mammalia_carnivora_felidae_felis_catus.mp4"
-    ) == ("Cat, Domestic Cat", "mammalia_carnivora_felidae")
+    ) == ("Cat / Domestic Cat", "mammalia_carnivora_felidae")
 
 
 # ==========================================================================
@@ -328,7 +328,7 @@ def test_parse_dedupes_across_different_raw_names(parse):
 
 def test_parse_joins_with_comma_space(parse):
     assert parse("1788800356_bird+bird_passeriformes.mp4") == (
-        "Bird, Songbird",
+        "Bird / Songbird",
         "bird",
     )
 
@@ -337,8 +337,11 @@ def test_parse_limits_display_to_three_species(parse):
     display, raw = parse(
         "1788800356_bird+mammalia+reptilia+mammalia_carnivora_felidae.mp4"
     )
-    assert display == "Bird, Mammal, Reptile"
-    assert display.count(",") == 2
+    assert display == "Bird / Mammal / Reptile"
+    assert display.count(" / ") == 2
+    # The separator is never a comma: the display string doubles as a filter
+    # value and the species filter splits values on commas.
+    assert "," not in display
     # QUIRK: the 4th species ('Cat') is silently dropped with no ellipsis or
     # '+N more' marker -- asserted as-is to detect rewrite drift.
     assert "Cat" not in display
@@ -347,7 +350,7 @@ def test_parse_limits_display_to_three_species(parse):
 
 def test_parse_dedupe_happens_before_the_three_limit(parse):
     assert parse("1788800356_bird+mammalia+reptilia+bird.mp4") == (
-        "Bird, Mammal, Reptile",
+        "Bird / Mammal / Reptile",
         "bird",
     )
 
@@ -700,7 +703,7 @@ def test_icon_and_display_name_can_disagree():
         ("1778509786_reptilia_reptile.mp4", "Reptile", "\U0001f98e"),
         (
             "1788800356_bird+mammalia_carnivora_felidae.mp4",
-            "Bird, Cat",
+            "Bird / Cat",
             "\U0001f426",
         ),
     ],

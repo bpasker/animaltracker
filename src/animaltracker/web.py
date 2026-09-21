@@ -25,6 +25,10 @@ import time as _time
 # first detection.
 _CLIP_EPOCH_RE = re.compile(r'^(\d{9,10})_')
 
+# How several species in one clip are joined for display. It must not contain
+# the character the species filter splits on (see _filter_clips).
+SPECIES_DISPLAY_SEPARATOR = ' / '
+
 
 def clip_start_time(clip_file: Path, stat) -> datetime:
     """When a clip's event began, as an aware datetime in the display zone.
@@ -1357,7 +1361,13 @@ class WebServer:
                 seen.add(s.lower())
                 unique.append(s)
         
-        display_name = ', '.join(unique[:3])  # Limit to 3 species for display
+        # Joined with a slash, never a comma: this string is also a filter
+        # value, and the species filter separates its values with commas
+        # (``species=Deer,Bird``). Joined with ", ", a clip labelled
+        # "Bird, Mammal" produced a chip whose value split back into two
+        # species, so clicking it selected every Bird and every Mammal clip
+        # and excluded the very clips it was made from.
+        display_name = SPECIES_DISPLAY_SEPARATOR.join(unique[:3])
         # Use first raw species for icon
         first_raw = raw_species_list[0] if raw_species_list else 'unknown'
         

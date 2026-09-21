@@ -222,6 +222,8 @@ class PruneReport:
     deleted_set: set = field(default_factory=set)
     failed: List[Path] = field(default_factory=list)
     files_removed: int = 0        # clips plus their key frames and logs
+    interrupted_seen: int = 0     # *.temp.avi with no clip beside them
+    interrupted_removed: int = 0  # ...of those, the ones past max_days
     freed_bytes: int = 0
     by_camera: Dict[str, int] = field(default_factory=dict)
     oldest: Optional[float] = None
@@ -767,11 +769,11 @@ class StorageManager:
     def find_interrupted_recordings(self) -> List[Path]:
         """Streaming temp files left in the archive by an event that never finished.
 
-        Not clips, and never pruned as if they were: a ``.temp.avi`` with no
-        MP4 beside it is the only copy of an event whose transcode did not
-        complete, and it can still be turned into one. Deleting it as an "old
-        clip" would throw away footage that was never saved. The cleanup
-        command lists them; what happens to them is a decision, not a sweep.
+        A ``.temp.avi`` with no MP4 beside it is the only copy of an event
+        whose transcode did not complete. One from a recent crash may still
+        be worth turning into a clip, so it is kept and reported rather than
+        swept away; one already past ``max_days`` is as stale as any clip of
+        its age and goes with them, logged for what it is.
         """
         root = self.storage_root / "clips"
         if not root.is_dir():
@@ -807,14 +809,24 @@ class StorageManager:
         keep_after = now - min_days * 86400 if min_days > 0 else None
         too_old = now - max_days * 86400 if max_days > 0 else None
 
+        interrupted = set(self.find_interrupted_recordings())
         aged: List[tuple] = []
-        for clip in self.find_clips():
+        for clip in list(self.find_clips()) + sorted(interrupted):
             try:
                 stat = clip.stat()
             except OSError:
                 continue
-            started = self.clip_event_time(clip, stat)
-            report.examined += 1
+            if clip in interrupted:
+                # An intermediate is aged by when it was last written, never by
+                # the epoch in its name. A transcode running right now may well
+                # be finishing a months-old event (the recovery sweep does
+                # exactly that), and dating it by the event would let a
+                # concurrent pass delete the file mid-write.
+                started = float(stat.st_mtime)
+                report.interrupted_seen += 1
+            else:
+                started = self.clip_event_time(clip, stat)
+                report.examined += 1
             if keep_after is not None and started >= keep_after:
                 report.protected += 1
                 continue
@@ -824,7 +836,13 @@ class StorageManager:
         for started, clip, size in aged:
             if too_old is None or started >= too_old:
                 continue
-            self._prune_one(clip, started, size, report, dry_run, "older than %d days" % max_days)
+            if clip in interrupted:
+                report.interrupted_removed += 1
+                self._prune_one(clip, started, size, report, dry_run,
+                                "interrupted recording, never finished")
+            else:
+                self._prune_one(clip, started, size, report, dry_run,
+                                "older than %d days" % max_days)
 
         if max_utilization_pct:
             remaining = [row for row in aged if row[1] not in report.deleted_set]

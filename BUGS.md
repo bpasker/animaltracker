@@ -294,16 +294,23 @@ nothing was ever deleted. `StorageManager.prune_clips` replaces it:
 - treats `retention.min_days` as a floor nothing overrides, disk pressure
   included, and honours `max_utilization_pct` after the age pass, oldest
   first, stopping when nothing more can go;
-- never touches a `*.temp.avi` with no MP4 beside it. Those are events whose
-  transcode never finished, not old clips; `find_interrupted_recordings`
-  lists them for a decision instead.
+- sweeps a `*.temp.avi` or `*.tmp.mp4` with no MP4 beside it once it is past
+  `max_days`, logged for what it is; a recent one is kept and reported,
+  because it may still be an event worth recovering or a transcode in
+  flight. Intermediates are aged by mtime, never by the epoch in their name:
+  the recovery sweep transcodes months-old events, and dating one by its
+  event would let a concurrent pass delete it mid-write.
 
 `cleanup --dry-run` prints what would go (counts, GB, date span, per camera)
 and the command's exit status is now meaningful, so `ssd-cleaner.service`
 can see a failure.
 
-Still open: the first real run on production removes 247 of 438 clips
-(7.5 GB, 24 Dec 2025 to 21 May 2026), 175 of them from `cam2`, a camera no
-longer in `config/cameras.yml`. Nothing forces it — the volume is at 28% of
-298 GB. The three interrupted recordings (3.7 GB, all `cam2`) are separate
-and could be transcoded into real clips instead of deleted.
+The three interrupted recordings on production (3.7 GB, all `cam2`) were
+deleted by hand on 2026-09-20 at the operator's request; the archive holds
+none now.
+
+Still open: the first real run removes 247 of 438 clips (7.5 GB, 24 Dec 2025
+to 21 May 2026), 175 of them from `cam2`, a camera no longer in
+`config/cameras.yml`. Nothing forces it — the volume is at 28% of 298 GB and
+the pass would take it to 25% — so it stays a decision about keeping a
+retired camera's history, not a space problem.

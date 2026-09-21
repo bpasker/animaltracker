@@ -230,30 +230,59 @@ def interrupted(st: StorageManager, camera: str, age_days: float, name: str) -> 
     return path
 
 
-def test_an_interrupted_recording_is_never_pruned_as_a_clip(tmp_path):
+def test_a_recent_interrupted_recording_is_kept_and_reported(tmp_path):
+    """It may still be worth turning into a clip, so it is not swept away."""
     st = storage(tmp_path)
-    stranded = interrupted(st, "cam2", 300, "1766760676_animal.temp.avi")
-    half_written = interrupted(st, "cam2", 300, "1766760999_animal.tmp.mp4")
+    stranded = interrupted(st, "cam2", 3, "1789000000_animal.temp.avi")
     old = add_clip(st, "cam1", 300)
 
     report = st.prune_clips(max_days=120, min_days=7, dry_run=False)
 
     assert report.deleted == [old]
-    assert stranded.exists() and half_written.exists()
-    assert stranded not in set(st.find_clips())
-
-
-def test_they_are_listed_so_someone_can_decide(tmp_path):
-    st = storage(tmp_path)
-    stranded = interrupted(st, "cam2", 300, "1766760676_animal.temp.avi")
-
+    assert stranded.exists()
+    assert report.interrupted_seen == 1 and report.interrupted_removed == 0
     assert st.find_interrupted_recordings() == [stranded]
 
 
-def test_a_leftover_beside_a_finished_clip_is_not_reported(tmp_path):
+def test_one_past_the_limit_goes_with_the_clips(tmp_path):
     st = storage(tmp_path)
-    clip = add_clip(st, "cam2", 300)
-    leftover = clip.with_name(clip.stem + ".temp.avi")
-    leftover.write_bytes(b"x")
+    stranded = interrupted(st, "cam2", 300, "1766760676_animal.temp.avi")
 
+    report = st.prune_clips(max_days=120, min_days=7, dry_run=False)
+
+    assert not stranded.exists()
+    assert report.interrupted_removed == 1
     assert st.find_interrupted_recordings() == []
+
+
+def test_it_is_never_counted_as_a_clip(tmp_path):
+    st = storage(tmp_path)
+    interrupted(st, "cam2", 300, "1766760676_animal.temp.avi")
+    add_clip(st, "cam1", 300)
+
+    report = st.prune_clips(max_days=120, min_days=7, dry_run=True)
+
+    assert report.examined == 1            # one clip, not two
+    assert report.interrupted_seen == 1
+
+
+def test_a_half_written_transcode_is_junk_once_it_is_stale(tmp_path):
+    st = storage(tmp_path)
+    half = interrupted(st, "cam2", 300, "1766760999_animal.tmp.mp4")
+
+    st.prune_clips(max_days=120, min_days=7, dry_run=False)
+
+    assert not half.exists()
+
+
+def test_an_intermediate_is_aged_by_when_it_was_written_not_by_its_name(tmp_path):
+    """A transcode running now may be finishing a months-old event — the
+    recovery sweep does exactly that — and must not be deleted mid-write."""
+    st = storage(tmp_path)
+    in_flight = interrupted(st, "cam2", 300, "1766760676_animal.temp.avi")
+    os.utime(in_flight, (NOW, NOW))          # being written right now
+
+    report = st.prune_clips(max_days=120, min_days=7, dry_run=False)
+
+    assert in_flight.exists()
+    assert report.interrupted_removed == 0 and report.protected == 1

@@ -224,15 +224,17 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             "  still above the ceiling with nothing left to remove that is older than %d days",
             retention.min_days,
         )
-    stranded = storage.find_interrupted_recordings()
-    if stranded:
-        total = sum(f.stat().st_size for f in stranded if f.exists())
+    if report.interrupted_removed:
+        LOGGER.info("  %d interrupted recording(s) past the limit went with them",
+                    report.interrupted_removed)
+    kept_stranded = report.interrupted_seen - report.interrupted_removed
+    if kept_stranded > 0:
         LOGGER.warning(
-            "  %d interrupted recording(s) left in the archive, %.2f GB, NOT removed: "
-            "an event that never finished its transcode, still recoverable",
-            len(stranded), total / 1_073_741_824,
+            "  %d interrupted recording(s) kept: an event that never finished its "
+            "transcode, recent enough to still be worth recovering",
+            kept_stranded,
         )
-        for f in stranded[:10]:
+        for f in storage.find_interrupted_recordings()[:10]:
             LOGGER.warning("    %s", f.relative_to(storage.storage_root))
     if report.failed:
         LOGGER.error("  %d file(s) could not be removed", len(report.failed))

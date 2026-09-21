@@ -15,13 +15,41 @@ import cv2
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
 from .species_names import get_common_name
 
 LOGGER = logging.getLogger(__name__)
+
+# An interval longer than this between two captured frames is a stall of the
+# stream, not the camera's frame rate, and is left out of the measurement.
+_MAX_FRAME_INTERVAL = 1.0
+
+
+def measured_frame_rate(timestamps: Sequence[float]) -> Optional[float]:
+    """Frames per second over a run of capture times; None if it cannot tell.
+
+    Clips were stamped 15 fps whatever the camera delivered, so cam1's 20 fps
+    played 1.33x slow and Otteson1's 24 fps 1.6x, and every time measured in
+    clip seconds was stretched to match. The pre-roll buffer keeps each
+    frame's capture time, which is the rate the clip's frames really arrived
+    at. Stalls are left out; a rate within 2% of a whole number is snapped to
+    it, since cameras deliver whole-number rates and read-time jitter is not
+    worth putting in the file.
+    """
+    intervals = [b - a for a, b in zip(timestamps, timestamps[1:])
+                 if 0 <= b - a <= _MAX_FRAME_INTERVAL]
+    span = sum(intervals)
+    if len(intervals) < 10 or span < 1.0:
+        return None
+    rate = len(intervals) / span
+    whole = round(rate)
+    if whole and abs(rate - whole) <= 0.02 * rate:
+        rate = float(whole)
+    rate = round(rate, 2)
+    return rate if 1.0 <= rate <= 120.0 else None
 
 
 class StreamingClipWriter:
@@ -42,11 +70,22 @@ class StreamingClipWriter:
 
     ``close()`` drains the queue and joins the thread; call it from an
     executor, not from the event loop.
+
+    ``fps`` is the rate frames are offered at, the camera's capture rate.
+    With ``stride`` N only every Nth frame is kept, seed and live alike on
+    one count so the spacing holds across the seam, and the file is stamped
+    ``fps / N``: a clip plays at the speed it was recorded either way. That
+    is for an encoder that cannot keep up. Shedding frames at random when
+    the backlog fills (``dropped_frames``) leaves gaps a truthful stamp
+    would play fast.
     """
 
-    def __init__(self, temp_path: Path, fps: int = 15, max_pending: int = 300) -> None:
+    def __init__(self, temp_path: Path, fps: float = 15, max_pending: int = 300,
+                 stride: int = 1) -> None:
         self.temp_path = temp_path
-        self.fps = fps
+        self.capture_fps = float(fps)
+        self.stride = max(1, int(stride))
+        self.fps = self.capture_fps / self.stride   # what the file is stamped
         # Bound on queued *live* frames. Seed frames are exempt: the
         # pre-roll is the point of the clip and its frames are already
         # alive in the rolling buffer. Only binds when the encoder is
@@ -55,7 +94,9 @@ class StreamingClipWriter:
         self._writer: Optional[cv2.VideoWriter] = None
         self._size: Optional[tuple[int, int]] = None  # (width, height)
         self.frame_count: int = 0
+        self.live_frames: int = 0      # live frames kept by the stride: queued or dropped
         self.dropped_frames: int = 0
+        self._offered: int = 0         # every frame seen, seed and live, for the stride
         self.write_errors: int = 0
         self._failed: bool = False
         self._pending: deque[np.ndarray] = deque()
@@ -68,6 +109,12 @@ class StreamingClipWriter:
 
     # -- producer side (event loop thread) ---------------------------------
 
+    def _takes_next(self) -> bool:
+        """Whether the stride keeps the next frame offered; call under the lock."""
+        keep = self._offered % self.stride == 0
+        self._offered += 1
+        return keep
+
     def seed(self, frames: Iterable[np.ndarray]) -> int:
         """Queue pre-roll frames ahead of any live frame; returns how many."""
         queued = 0
@@ -75,7 +122,7 @@ class StreamingClipWriter:
             if self._closing:
                 return 0
             for frame in frames:
-                if frame is not None:
+                if frame is not None and self._takes_next():
                     self._pending.append(frame)
                     queued += 1
             if queued:
@@ -91,8 +138,9 @@ class StreamingClipWriter:
         if frame is None:
             return
         with self._cv:
-            if self._closing:
+            if self._closing or not self._takes_next():
                 return
+            self.live_frames += 1
             if len(self._pending) >= self.max_pending:
                 self.dropped_frames += 1
                 return
@@ -117,8 +165,9 @@ class StreamingClipWriter:
             return None
         if self.dropped_frames:
             LOGGER.warning(
-                "Streaming writer for %s dropped %d live frames: encoder fell behind capture (max_pending=%d)",
-                self.temp_path.name, self.dropped_frames, self.max_pending,
+                "Streaming writer for %s dropped %d of %d live frames: encoder fell behind "
+                "capture at %.1f fps (max_pending=%d)",
+                self.temp_path.name, self.dropped_frames, self.live_frames, self.fps, self.max_pending,
             )
         if self._failed or self.frame_count == 0:
             self.discard()

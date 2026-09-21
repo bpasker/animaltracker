@@ -111,6 +111,13 @@ The system uses a two-stage detection approach:
   that closes the event must never wait for it, because it runs inside the
   camera's inference task and the read loop drops every frame until that
   task ends.
+  The writer is stamped at the rate the frames were captured at, measured
+  from the pre-roll buffer's timestamps (`StreamWorker._open_event_writer`,
+  `measured_frame_rate`); never pass it a fixed rate, which is what made
+  clips play slow motion. A camera whose encoder sheds more than 5% of an
+  event's live frames records every 2nd (up to 4th) frame from its next
+  event on, stamped to match (`_learn_record_stride`), so a truthful stamp
+  never plays a clip fast.
   Once the clip is saved, the analysis and the alert are queued on
   `StreamWorker._analysis_workers` (`AnalysisWorkers`: daemon threads, one
   per post-processing slot). Never leave a job waiting for a slot on the

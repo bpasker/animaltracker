@@ -20,7 +20,7 @@ from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector, cleanup_gpu_memory
 from .notification import NotificationContext, PushoverNotifier
-from .storage import StorageManager, StreamingClipWriter
+from .storage import StorageManager, StreamingClipWriter, measured_frame_rate
 from .onvif_client import OnvifClient
 from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
@@ -28,6 +28,14 @@ from .web import WebServer
 from .analysis_recovery import RECOVERED_CLIP_LABEL, ClipAnalysisRegistry, RecoverySweeper
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _every_nth_frame(stride: int) -> str:
+    """'every frame', 'every 2nd frame', ... for the clip writer's stride."""
+    if stride <= 1:
+        return "every frame"
+    suffix = {2: "nd", 3: "rd"}.get(stride, "th")
+    return f"every {stride}{suffix} frame"
 
 
 def _format_duration(seconds: float) -> str:
@@ -500,7 +508,14 @@ class StreamWorker:
         self.tracking_enabled = tracking_enabled
         # Ensure buffer is at least 30s for manual clips
         clip_seconds = max(30.0, runtime.general.clip.pre_seconds + runtime.general.clip.post_seconds)
+        # The 15 only sizes the ring (450 frames): at 20-30 fps that still
+        # holds the pre-roll, and sizing it to the real rate would double the
+        # buffer's memory on a 30 fps camera. A clip's rate is measured from
+        # the frames' own timestamps when it is written (_open_event_writer).
         self.clip_buffer = ClipBuffer(max_seconds=clip_seconds, fps=15)
+        # 1 = every frame into the clip. Raised when an event's encoder falls
+        # behind (_learn_record_stride) and kept until the process restarts.
+        self._record_stride = 1
         self.event_state: Optional[EventState] = None
         self.pending_detection_start_ts: Optional[float] = None
         self.pending_detection_count: int = 0  # Consecutive frames with detections
@@ -835,34 +850,9 @@ class StreamWorker:
                     # mid-postprocess sidecars.
                     if self.event_state is not None:
                         if self.event_state.clip_writer is None:
-                            pre_seconds = self.runtime.general.clip.pre_seconds
-                            writer = StreamingClipWriter(
-                                temp_path=self.storage.build_event_temp_avi(
-                                    self.camera.id, self.event_state.start_ts
-                                ),
-                                fps=15,
-                                # Room for the whole pre-roll plus live
-                                # frames while it drains; only binds when
-                                # the encoder is slower than capture.
-                                max_pending=max(300, int(pre_seconds * 30)),
+                            self.event_state.clip_writer = self._open_event_writer(
+                                self.event_state.start_ts
                             )
-                            # Seed with the pre-event rolling buffer so the
-                            # saved clip still includes pre_seconds of
-                            # context. ``dump()`` copies references only;
-                            # the MJPG encode of each frame happens on the
-                            # writer's own thread. Doing it inline here
-                            # blocked this loop -- and every other camera
-                            # gathered on it -- for ~5s per event start.
-                            cutoff = self.event_state.start_ts - pre_seconds
-                            seeded = writer.seed(
-                                _frame for _ts, _frame in self.clip_buffer.dump()
-                                if _ts >= cutoff
-                            )
-                            LOGGER.debug(
-                                "Seeded clip writer for %s with %d pre-roll frames",
-                                self.camera.id, seeded,
-                            )
-                            self.event_state.clip_writer = writer
                         # cap.read() returns a fresh ndarray each call, so
                         # writing by reference is safe -- no copy needed.
                         self.event_state.clip_writer.write(frame)
@@ -958,6 +948,67 @@ class StreamWorker:
         """
         if self.event_state is not None:
             await self._maybe_close_event(time.time())
+
+    def _open_event_writer(self, start_ts: float) -> StreamingClipWriter:
+        """The event's clip writer, stamped at the rate its frames arrive, seeded.
+
+        The rate is measured from the rolling buffer's capture times rather
+        than assumed: a hard-coded 15 made cam1's 20 fps clips play 1.33x
+        slow and Otteson1's 24 fps 1.6x. Falls back to the perf window's
+        capture rate, then to 15, when the buffer is too short to tell (an
+        event in the first second after connecting).
+
+        Seeded with the pre-event rolling buffer so the clip still includes
+        ``pre_seconds`` of context. ``dump()`` copies references only; the
+        MJPG encode of each frame happens on the writer's own thread. Doing
+        it inline here blocked this loop -- and every other camera gathered
+        on it -- for ~5 s per event start.
+        """
+        pre_seconds = self.runtime.general.clip.pre_seconds
+        buffered = self.clip_buffer.dump()
+        fps = (measured_frame_rate([ts for ts, _frame in buffered])
+               or (self.perf_last_snapshot or {}).get('capture_fps')
+               or 15.0)
+        writer = StreamingClipWriter(
+            temp_path=self.storage.build_event_temp_avi(self.camera.id, start_ts),
+            fps=fps,
+            stride=self._record_stride,
+            # Room for the whole pre-roll plus live frames while it drains;
+            # only binds when the encoder is slower than capture.
+            max_pending=max(300, int(pre_seconds * 30)),
+        )
+        cutoff = start_ts - pre_seconds
+        seeded = writer.seed(frame for ts, frame in buffered if ts >= cutoff)
+        LOGGER.debug(
+            "Seeded clip writer for %s with %d pre-roll frames at %.1f fps (%s)",
+            self.camera.id, seeded, writer.fps, _every_nth_frame(writer.stride),
+        )
+        return writer
+
+    def _learn_record_stride(self, writer: StreamingClipWriter) -> None:
+        """Record every 2nd (3rd, 4th) frame after an event the encoder lost.
+
+        A writer sheds live frames when its encoder falls behind capture, and
+        with the clip stamped at the true rate those gaps would play fast: on
+        Otteson2 (2688x1512, 30 fps) the MJPG encode managed about 15 fps in
+        daylight and dropped half of every event. More than 5% shed, over an
+        event long enough to judge, raises this camera's stride for the next
+        event, to at most 4. It is not lowered again: a night event the
+        encoder keeps up with does not prove the next daylight one will.
+        """
+        live = getattr(writer, 'live_frames', 0)
+        if live < 30 or getattr(writer, 'stride', 1) != self._record_stride:
+            return
+        shed = getattr(writer, 'dropped_frames', 0) / live
+        if shed <= 0.05 or self._record_stride >= 4:
+            return
+        self._record_stride += 1
+        LOGGER.warning(
+            "%s: the clip encoder kept only %.0f%% of live frames at %.1f fps; recording %s "
+            "(%.1f fps) from the next event",
+            self.camera.id, 100 * (1 - shed), writer.fps,
+            _every_nth_frame(self._record_stride), writer.capture_fps / self._record_stride,
+        )
 
     def _maybe_log_perf_stats(self) -> None:
         """Periodically log realtime processing latency / backpressure stats.
@@ -2266,6 +2317,10 @@ class StreamWorker:
                         camera_id, start_ts,
                     )
                     return
+                # Only with the clip safe: how this event's encoder coped
+                # decides how the next one records.
+                if writer is not None:
+                    self._learn_record_stride(writer)
 
                 def analyse() -> None:
                     try:

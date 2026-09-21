@@ -21,11 +21,14 @@
    attempt counter. The picture is never left looking healthy.
 
    The second thing this file exists for: a lost PTZ stop leaves a camera
-   slewing until the server's 10s dead-man fires. Every path that can end a
-   jog — pointerup, pointercancel, touchcancel, lostpointercapture, keyup,
+   slewing until the server's 10s dead-man fires. Every path that can end
+   motion — pointerup, pointercancel, touchcancel, lostpointercapture, keyup,
    Escape, window blur, visibilitychange, pagehide, unmount — routes through
-   stopJog(), and a held jog re-sends its move every REPEAT_MS so the backstop
-   can later be tightened.
+   stopAllMotion(), and a held jog re-sends its move every REPEAT_MS so the
+   backstop can later be tightened. That covers held jogs (stopJog) AND the
+   bounded pulses click-to-centre and frame-a-box send (flushPulse): a pulse
+   is a move plus a stop on a timer, and cancelling that timer without
+   sending the stop is exactly the lost stop this file exists to prevent.
 
    iOS 15 floor: var/function style, no optional chaining, no ??, no top-level
    await, no .at().
@@ -461,14 +464,32 @@ function stopJog() {
 
 /** A bounded nudge: move, then stop. Used by click-to-centre and taps. */
 function pulse(card, vec, ms) {
-  stopJog();
+  /* Same gate as startJog: no command while the controls are locked out. */
+  if (card.controlDown) return;
+  stopAllMotion();
   sendMove(card, vec);
   card.stageEl.classList.add('is-jogging');
-  cancel(card.pulseTimer);
   card.pulseTimer = later(function () {
+    card.pulseTimer = null;
     card.stageEl.classList.remove('is-jogging');
     sendStop(card);
   }, ms || PULSE_MS);
+}
+
+/** End a pulse now: drop its timer and send the stop it was going to send. */
+function flushPulse(card) {
+  if (!card || card.pulseTimer === null || card.pulseTimer === undefined) return;
+  cancel(card.pulseTimer);
+  card.pulseTimer = null;
+  if (card.stageEl) card.stageEl.classList.remove('is-jogging');
+  sendStop(card);
+}
+
+/** Every way motion can end: a held jog, and any pulse still counting down. */
+function stopAllMotion() {
+  if (!S) return;
+  stopJog();
+  if (S.cards) S.cards.forEach(function (card) { flushPulse(card); });
 }
 
 function announce(text) {
@@ -1145,7 +1166,13 @@ function wireStage(card) {
 
   el.addEventListener('pointerdown', function (ev) {
     if (!card.cam.has_ptz) return;
-    if (card.state === 'offline' || card.state === 'no-route') return;
+    /* controlDown is what hides the PTZ panel and shows "Controls
+       unavailable while the stream is down"; the stage must obey the same
+       flag. It used to test for a state of 'offline' or 'no-route': after a
+       drop the state is 'reconnecting' (paintCard sets that whenever a retry
+       is counted) and 'no-route' is assigned nowhere, so clicking the frozen
+       frame still drove the head with no picture to aim by. */
+    if (card.controlDown) return;
     if (ev.button !== undefined && ev.button !== 0) return;
     var p = stagePoint(card, ev);
     if (!p) return;
@@ -1479,7 +1506,9 @@ function paintCard(card) {
     card.controlDown = lock;
     card.ptzEl.hidden = lock;
     card.noControl.hidden = !lock;
-    if (lock) stopJog();
+    /* The picture has gone: stop now rather than letting a pulse in flight
+       run out its timer with nothing to aim by. */
+    if (lock) { stopJog(); flushPulse(card); }
   } else {
     card.noControl.hidden = false;
     setText(card.noControl, 'This camera has no PTZ head.');
@@ -2133,8 +2162,8 @@ function syncVisibility() {
   var hidden = document.visibilityState === 'hidden';
   if (hidden === S.hidden) return;
   S.hidden = hidden;
-  /* A jog must never survive the tab going away. */
-  stopJog();
+  /* No motion may survive the tab going away, a pulse mid-flight included. */
+  stopAllMotion();
   if (hidden) {
     S.cards.forEach(function (card) { detachStream(card); });
     stopPolling();
@@ -2279,14 +2308,14 @@ export const view = {
 
     /* --- global stop guarantees --------------------------------------- */
     reg(on(document, 'visibilitychange', syncVisibility));
-    reg(on(window, 'blur', function () { stopJog(); }));
-    reg(on(window, 'pagehide', function () { stopJog(); }));
+    reg(on(window, 'blur', function () { stopAllMotion(); }));
+    reg(on(window, 'pagehide', function () { stopAllMotion(); }));
     reg(on(document, 'keydown', function (ev) {
-      if (ev.key === 'Escape') stopJog();
+      if (ev.key === 'Escape') stopAllMotion();
     }, true));
     /* A pointer released anywhere — outside the button, over the scrim,
        past the window edge — still ends the jog. */
-    reg(on(window, 'pointerup', function () { stopJog(); }));
+    reg(on(window, 'pointerup', function () { stopJog(); }));   /* a pulse is bounded; let it run */
     reg(on(window, 'pointercancel', function () { stopJog(); }));
     reg(on(window, 'touchcancel', function () { stopJog(); }));
 
@@ -2327,7 +2356,7 @@ export const view = {
   unmount: function () {
     if (!S) return;
     S.dead = true;
-    stopJog();
+    stopAllMotion();   /* flushes pending pulses: see flushPulse */
     stopPolling();
     cancel(S.tickTimer);
     /* The panel lives on <body>, so leaving the route does not remove it. */
@@ -2336,7 +2365,6 @@ export const view = {
     S.cards.forEach(function (card) {
       cancel(card.retryTimer);
       cancel(card.stallTimer);
-      cancel(card.pulseTimer);
       cancel(card.crossTimer);
       detachStream(card);
     });

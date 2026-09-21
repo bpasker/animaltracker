@@ -181,3 +181,48 @@ def test_the_sample_frame_fallback_reads_the_file_where_it_actually_is(tmp_path)
     assert len(saved) == 2
     assert all(p.name.startswith(f"{target.stem}_thumb_") for p in saved)
     assert all(p.exists() and p.stat().st_size > 0 for p in saved)
+
+
+# --- only a clip the pipeline named is renamed ---------------------------------------
+#
+# Background (bug hunt, 2026-09-19): the rename kept everything before the first
+# underscore as the timestamp. A manual clip is "manual_<camera>_<epoch>.mp4", so
+# that was the word "manual" and the clip became "manual_<species>.mp4": camera and
+# time both gone. The archive reads the second underscore-separated part as the
+# camera, so it then showed the species' first word there; a second manual clip of
+# the same species could not be renamed at all; and the clip page follows a rename
+# by the epoch, which no longer existed.
+
+@pytest.mark.parametrize("name", [
+    "manual_cam1_1789000000.mp4",       # what save_manual_clip writes
+    "notes.mp4",
+    f"{EPOCH}.mp4",                     # an epoch with no label
+])
+def test_a_clip_the_pipeline_did_not_name_keeps_its_name(tmp_path, name):
+    clip = make_clip(tmp_path)
+    kept = clip.with_name(name)
+    clip.rename(kept)
+
+    result = processor(tmp_path).process_clip(kept)
+
+    assert result.success and result.new_path is None
+    assert kept.exists()
+    assert result.new_species == DOG                  # still identified...
+    assert has_analysis_sidecar(kept)                 # ...and recorded under its own name
+    assert any(n.startswith(f"{kept.stem}_thumb_") for n in names(kept))
+
+
+def test_two_manual_clips_of_the_same_species_both_keep_their_own_identity(tmp_path):
+    first = make_clip(tmp_path)
+    second = make_clip(tmp_path, label="second")
+    a = first.with_name("manual_cam1_1789000000.mp4")
+    b = second.with_name("manual_cam2_1789000500.mp4")
+    first.rename(a)
+    second.rename(b)
+    proc = processor(tmp_path)
+
+    assert proc.process_clip(a).new_path is None
+    assert proc.process_clip(b).new_path is None
+
+    assert a.exists() and b.exists()
+    assert has_analysis_sidecar(a) and has_analysis_sidecar(b)

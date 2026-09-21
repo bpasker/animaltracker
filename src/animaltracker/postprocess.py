@@ -1698,7 +1698,19 @@ class ClipPostProcessor:
         before the rename commits to it (see ``process_clip``).
         """
         parts = clip_path.stem.split('_', 1)
-        if not parts or not parts[0]:
+        if len(parts) < 2 or not parts[0].isdigit():
+            # Only a clip the pipeline named, "<epoch>_<label>", carries its
+            # identity in the part this keeps. A manual clip is
+            # "manual_<camera>_<epoch>", so the old rule took "manual" for the
+            # timestamp and turned it into "manual_<species>.mp4": the camera
+            # and the time were gone, the archive read the species' first word
+            # as the camera, a second manual clip of the same species could
+            # not be renamed at all, and the clip page's follow-the-rename
+            # lookup keys on the epoch. Its species is recorded in the
+            # sidecar and its key frames either way; only the rename is
+            # skipped.
+            LOGGER.info("Not renaming %s: its name does not start with an event timestamp",
+                        clip_path.name)
             return None
         clean_species = new_species.replace(' ', '_').replace('/', '_')
         new_path = clip_path.parent / f"{parts[0]}_{clean_species}{clip_path.suffix}"

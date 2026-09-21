@@ -131,6 +131,11 @@ The system uses a two-stage detection approach:
 - `ptz_calibration.py` - Auto-calibration via ORB feature matching between wide/zoom frames
 - `onvif_client.py` - ONVIF camera control and discovery
 - `web.py` - aiohttp JSON API, MJPEG/snapshot streams, PTZ control and the shell of the client-side app (which lives in `static/`, served at `/app`)
+  A view's `unmount` sets its session to null, so anything that can run after
+  it (a request still decoding, a sheet's close animation, a bulk job that
+  takes minutes) must check the session first: `recordings.js` has `alive()`,
+  `settings.js` guards on `!S || S.destroyed`. Reading `S.anything` in a late
+  callback throws rather than returning quietly.
   Every handler that takes a clip path from a request resolves it through
   `_confined_clip_path`, which refuses anything that leaves `clips/` (an
   absolute path, a climbing `..`, a symlink out); never join a request path

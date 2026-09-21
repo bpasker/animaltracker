@@ -348,10 +348,25 @@ function applyFilters(next, opts) {
 
 /* --- timers, listeners, requests: one place to release them -------------- */
 
+/**
+ * Is this screen still the one on show? `unmount` sets S to null, so anything
+ * that can run after it must ask before touching the session: a request whose
+ * response is already decoding when the route changes, a sheet whose close
+ * animation is still running, a bulk reanalysis that takes minutes. Reading
+ * S.anything in those callbacks throws instead of returning quietly.
+ *
+ * `unmounting` is the window inside unmount itself, where S still exists but
+ * the screen is going: a deferred delete is flushed there on purpose, and
+ * must still reach the server, but nothing should paint.
+ */
+function alive() { return !!S && !S.unmounting; }
+
 function track(off) { if (off) S.cleanups.push(off); return off; }
 
 function later(fn, ms) {
+  if (!S) return null;            /* nothing left to schedule for */
   var id = window.setTimeout(function () {
+    if (!S) return;
     var i = S.timers.indexOf(id);
     if (i >= 0) S.timers.splice(i, 1);
     fn();
@@ -792,6 +807,7 @@ function renderCount() {
 /* --- fetching ------------------------------------------------------------ */
 
 function loadGrid(force) {
+  if (!alive()) return;
   var signal = abortRequest('grid');
   S.loading = true;
   S.loadingMore = false;
@@ -801,6 +817,7 @@ function loadGrid(force) {
 
   var q = apiQuery(S.filters, { limit: PAGE, offset: 0 });
   api.recordings(q, { signal: signal }).then(function (data) {
+    if (!alive()) return;
     S.loading = false;
     S.clips = data.clips || [];
     S.total = data.total || 0;
@@ -812,7 +829,7 @@ function loadGrid(force) {
     renderFilterUI();
     loadUniverse();
   }).catch(function (err) {
-    if (api.isAbort(err)) return;
+    if (!alive() || api.isAbort(err)) return;
     S.loading = false;
     S.error = err;
     renderGrid();
@@ -821,12 +838,16 @@ function loadGrid(force) {
 }
 
 function loadMore() {
+  /* The sentinel observer is disconnected on unmount, but an entry already
+     queued still arrives. */
+  if (!alive()) return;
   if (S.loadingMore || S.loading || !S.hasMore) return;
   S.loadingMore = true;
   renderGrid();
   var signal = abortRequest('more');
   var q = apiQuery(S.filters, { limit: PAGE, offset: S.offset });
   api.recordings(q, { signal: signal }).then(function (data) {
+    if (!alive()) return;
     S.loadingMore = false;
     var seen = {};
     for (var i = 0; i < S.clips.length; i++) seen[S.clips[i].path] = true;
@@ -838,7 +859,7 @@ function loadMore() {
     S.total = data.total || S.total;
     renderGrid();
   }).catch(function (err) {
-    if (api.isAbort(err)) return;
+    if (!alive() || api.isAbort(err)) return;
     S.loadingMore = false;
     renderGrid();
     reportError('Could not load more clips', err, loadMore);
@@ -855,11 +876,12 @@ function loadUniverse() {
   var base = withFilters(S.filters, { cameras: [], locations: [], species: [] });
   api.recordings(apiQuery(base, { limit: 1, offset: 0 }), { signal: signal })
     .then(function (data) {
+      if (!alive()) return;
       S.universe = data.facets || emptyFacets();
       renderFilterUI();
       renderCount();
     }).catch(function (err) {
-      if (api.isAbort(err)) return;
+      if (!alive() || api.isAbort(err)) return;
       /* Not fatal: the chips fall back to the narrowed facets. */
       S.universe = S.facets;
       renderFilterUI();
@@ -877,10 +899,12 @@ function followRename(oldPath, newPath) {
 }
 
 function refreshGrid() {
+  if (!alive()) return;
   if (S.loading || S.loadingMore || !store.get('visible')) return;
   var signal = abortRequest('refresh');
   api.recordings(apiQuery(S.filters, { limit: PAGE, offset: 0 }), { signal: signal })
     .then(function (data) {
+      if (!alive()) return;
       var incoming = data.clips || [];
       var known = {};
       for (var i = 0; i < S.clips.length; i++) known[clipKey(S.clips[i])] = S.clips[i];
@@ -924,7 +948,7 @@ function refreshGrid() {
         S.els.live.textContent = plural(fresh.length, 'new clip') + ' added';
       }
     }).catch(function (err) {
-      if (api.isAbort(err)) return;
+      if (!alive() || api.isAbort(err)) return;
       /* A background refresh still has to be visible when it fails. */
       toast('Refresh failed', { kind: 'error', detail: api.describe(err), timeout: 6000 });
     });
@@ -970,6 +994,7 @@ function selectAllMatching() {
   btn.disabled = true;
   api.recordings(apiQuery(S.filters, { limit: MAX_PAGE, offset: 0 }), { signal: signal })
     .then(function (data) {
+      if (!alive()) return;
       btn.disabled = false;
       (data.clips || []).forEach(function (c) { S.selected.add(c.path); });
       renderGrid();
@@ -980,6 +1005,7 @@ function selectAllMatching() {
         });
       }
     }).catch(function (err) {
+      if (!alive()) return;
       btn.disabled = false;
       if (api.isAbort(err)) return;
       reportError('Could not select every matching clip', err, selectAllMatching);
@@ -1154,7 +1180,9 @@ function reanalyzeSelection() {
       } else {
         toast.success(plural(done, 'clip') + ' queued for SpeciesNet');
       }
-      later(function () { refreshGrid(); }, 1500);
+      /* The clips the operator asked for are queued on the server whether
+         or not this screen is still up; only the refresh needs a grid. */
+      if (alive()) later(function () { refreshGrid(); }, 1500);
       return;
     }
     api.reprocess(paths[i], null, {}).then(function () { done++; }, function () { failed++; })
@@ -1636,6 +1664,8 @@ function openFilterSheet() {
       body.appendChild(built.el);
     },
     onClose: function () {
+      /* unmount closes every sheet and the close animation outlives it. */
+      if (!S) return;
       var i = S.sheets.indexOf(handle);
       if (i >= 0) S.sheets.splice(i, 1);
     }
@@ -1696,10 +1726,12 @@ function loadCalendar() {
   S.calendarLoading = true;
   var signal = abortRequest('calendar');
   api.calendar({ signal: signal }).then(function (data) {
+    if (!alive()) return;
     S.calendarLoading = false;
     S.calendar = data;
     if (S.view === 'month') renderMonth();
   }).catch(function (err) {
+    if (!alive()) return;
     S.calendarLoading = false;
     if (api.isAbort(err)) return;
     S.calendarError = err;
@@ -1714,6 +1746,7 @@ function loadCalendar() {
  * clips, which is what the month view promises.
  */
 function loadMonth(force) {
+  if (!alive()) return;
   var b = monthBounds(S.year, S.month);
   var token = S.year + '-' + S.month + '|' + JSON.stringify(S.filters);
   if (!force && S.monthToken === token && S.monthClips) return;
@@ -1731,12 +1764,13 @@ function loadMonth(force) {
   }), { limit: MAX_PAGE, offset: 0 });
 
   api.recordings(q, { signal: signal }).then(function (data) {
+    if (!alive()) return;
     S.monthLoading = false;
     S.monthClips = data.clips || [];
     S.monthTruncated = !!data.has_more;
     renderMonth();
   }).catch(function (err) {
-    if (api.isAbort(err)) return;
+    if (!alive() || api.isAbort(err)) return;
     S.monthLoading = false;
     S.monthError = err;
     renderMonth();
@@ -1962,6 +1996,7 @@ function loadDay(date) {
   if (f.species.length === 1) q.species = f.species[0];
 
   api.day(date, q, { signal: signal }).then(function (data) {
+    if (!alive()) return;
     var clips = (data.clips || []).map(function (c) { return normaliseDayClip(c, date); });
     /* THE FIX: the old UI ignored the active filters here, so filtering to
        Deer and opening a day showed everything. */
@@ -1978,7 +2013,7 @@ function loadDay(date) {
     S.day = { date: date, clips: clips, loading: false, error: null, summary: data.summary || null };
     renderDayPanel();
   }).catch(function (err) {
-    if (api.isAbort(err)) return;
+    if (!alive() || api.isAbort(err)) return;
     S.day = { date: date, clips: null, loading: false, error: err };
     renderDayPanel();
     reportError('Could not load ' + longDate(date), err, function () {

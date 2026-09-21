@@ -183,6 +183,10 @@ class ProcessingSettings:
     """
     # Detection settings
     sample_rate: int = DEFAULT_SAMPLE_RATE  # Analyze every Nth frame
+    # Never look at more than this many frames of a clip (0 = no ceiling).
+    # A long clip is what makes a job take the best part of an hour, and the
+    # sample rate alone cannot bound it because it is a rate, not a count.
+    max_frames: int = 0
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD  # Min confidence for species
     generic_confidence: float = DEFAULT_GENERIC_CONFIDENCE  # Min confidence for "animal", "bird"
     
@@ -229,6 +233,7 @@ class ProcessingSettings:
         """Convert settings to dictionary for JSON serialization."""
         return {
             "sample_rate": self.sample_rate,
+            "max_frames": self.max_frames,
             "confidence_threshold": self.confidence_threshold,
             "generic_confidence": self.generic_confidence,
             "tracking_enabled": self.tracking_enabled,
@@ -257,6 +262,7 @@ class ProcessingSettings:
         """Create settings from dictionary, using defaults for missing keys."""
         return cls(
             sample_rate=data.get("sample_rate", DEFAULT_SAMPLE_RATE),
+            max_frames=data.get("max_frames", 0),
             confidence_threshold=data.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD),
             generic_confidence=data.get("generic_confidence", DEFAULT_GENERIC_CONFIDENCE),
             tracking_enabled=data.get("tracking_enabled", True),
@@ -296,6 +302,7 @@ def build_processing_settings(clip_cfg, overrides: Optional[Dict] = None) -> Pro
     merge_gap = get('track_merge_gap', 120)
     values = {
         'sample_rate': get('sample_rate', DEFAULT_SAMPLE_RATE),
+        'max_frames': get('post_analysis_frames', 0),
         'confidence_threshold': get('post_analysis_confidence', DEFAULT_CONFIDENCE_THRESHOLD),
         'generic_confidence': get('post_analysis_generic_confidence', DEFAULT_GENERIC_CONFIDENCE),
         'tracking_enabled': get('tracking_enabled', True),
@@ -815,6 +822,19 @@ class ClipPostProcessor:
             smart_sample_rate = max(1, min(int(fps), 30))
             actual_sample_rate = self.sample_rate if self.sample_rate > 1 else smart_sample_rate
         
+        # "Frames to analyse": a ceiling on the whole clip, on top of the rate.
+        # It was read from the config and thrown away, so a long clip had no
+        # bound at all.
+        max_frames = int(getattr(self.settings, 'max_frames', 0) or 0)
+        if max_frames > 0 and total_frames > 0:
+            needed = -(-total_frames // max_frames)   # ceil
+            if needed > actual_sample_rate:
+                LOGGER.info(
+                    "Sampling every %d frames instead of every %d: %d frames capped to %d",
+                    needed, actual_sample_rate, total_frames, max_frames,
+                )
+                actual_sample_rate = needed
+
         effective_fps = fps / actual_sample_rate
         
         # Build video metadata for logging

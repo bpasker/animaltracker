@@ -1869,10 +1869,14 @@ class StreamWorker:
         
         # Offload clip writing, post-analysis, and notification to thread
         loop = asyncio.get_running_loop()
-        post_analysis_enabled = self.runtime.general.clip.post_analysis
-        post_analysis_frames = self.runtime.general.clip.post_analysis_frames
-        # Check if unified post-processor should be used (new approach)
-        use_unified_processor = getattr(self.runtime.general.clip, 'unified_post_processing', False)
+        # "Post-analysis" is the master switch; "analyse the saved file" is the
+        # only way it is done since the in-memory path was removed. Both were
+        # read here and only the second was obeyed, so turning post-analysis
+        # off on the settings page changed nothing at all.
+        use_unified_processor = bool(
+            self.runtime.general.clip.post_analysis
+            and getattr(self.runtime.general.clip, 'unified_post_processing', False)
+        )
         
         # Capture detector reference for unified processor
         # For split-model architecture, post-processor will create its own SpeciesNet detector
@@ -2915,6 +2919,7 @@ class PipelineOrchestrator:
             functools.partial(self._recover_clip, worker_map),
             enabled=lambda: bool(
                 getattr(clip_cfg, 'recover_unfinished_clips', True)
+                and getattr(clip_cfg, 'post_analysis', True)
                 and getattr(clip_cfg, 'unified_post_processing', False)
             ),
         )

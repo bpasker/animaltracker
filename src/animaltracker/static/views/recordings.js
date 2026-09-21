@@ -856,7 +856,7 @@ function loadMore() {
     });
     S.offset = S.clips.length;
     S.hasMore = !!data.has_more;
-    S.total = data.total || S.total;
+    S.total = typeof data.total === 'number' ? data.total : S.total;
     renderGrid();
   }).catch(function (err) {
     if (!alive() || api.isAbort(err)) return;
@@ -926,8 +926,12 @@ function refreshGrid() {
          longer lists is gone: deleted, or a false positive the
          post-processor removed. Older pages were not refreshed and stay. */
       var before = S.clips.length;
-      if (S.filters.sort === 'newest' && incoming.length) {
-        var complete = !data.has_more;
+      var complete = !data.has_more;
+      /* An empty page still answers: with no more to come it means nothing
+         matches any more, and every card on screen is stale. Only an empty
+         page that claims more behind it is uninformative — there is no
+         window to prune within. */
+      if (S.filters.sort === 'newest' && (incoming.length || complete)) {
         S.clips = S.clips.filter(function (c) {
           if (seen[clipKey(c)]) return true;
           if (complete) return false;
@@ -939,9 +943,22 @@ function refreshGrid() {
         if (S.filters.sort === 'newest') S.clips = fresh.concat(S.clips);
         else S.clips = S.clips.concat(fresh);
       }
-      if (fresh.length || pruned) S.offset = S.clips.length;
-      S.total = data.total || S.total;
-      S.archiveTotal = data.archive_total || S.archiveTotal;
+      if (fresh.length || pruned) {
+        S.offset = S.clips.length;
+        /* The chips are counted over the unfiltered archive, which only
+           loadGrid refreshes: without this, a species whose last clip was
+           just deleted kept its chip and its count, and a newly detected
+           one had none until a reload. One limit=1 request, and only when
+           the archive actually changed. */
+        loadUniverse();
+      }
+      /* `|| S.total` would keep a stale count when the server reports zero:
+         empty the archive and the footer still claimed the old number, and
+         the empty state still offered to clear filters that were hiding
+         nothing. */
+      S.total = typeof data.total === 'number' ? data.total : S.total;
+      S.archiveTotal = typeof data.archive_total === 'number'
+        ? data.archive_total : S.archiveTotal;
       S.facets = data.facets || S.facets;
       renderGrid();
       if (fresh.length) {

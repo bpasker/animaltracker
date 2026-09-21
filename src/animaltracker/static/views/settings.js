@@ -1645,14 +1645,14 @@ function scheduleEnvCheck(name) {
   S.envPending[name] = 1;
   if (S.envTimer) clearTimeout(S.envTimer);
   S.envTimer = setTimeout(function () {
-    if (S.destroyed) return;
+    if (!S || !S || S.destroyed) return;
     var names = [];
     for (var k in S.envPending) if (Object.prototype.hasOwnProperty.call(S.envPending, k)) names.push(k);
     S.envPending = {};
     S.envTimer = null;
     if (!names.length) return;
     api.probeCamera({ env: names }, { signal: S.abort.signal, timeout: 8000 }).then(function (res) {
-      if (S.destroyed || !res || !res.env) return;
+      if (!S || S.destroyed || !res || !res.env) return;
       for (var n in res.env) if (Object.prototype.hasOwnProperty.call(res.env, n)) S.env[n] = !!res.env[n];
       refreshEnvTags();
     }, function () { /* the tag simply stays "unchecked" */ });
@@ -2217,14 +2217,14 @@ function addDestinationDialog(onAdd) {
         function write(i) {
           if (i >= writes.length) { done(); return; }
           api.setSecret({ name: writes[i].name, value: writes[i].value }, { signal: S.abort.signal }).then(function () {
-            if (S.destroyed) return;
+            if (!S || !S || S.destroyed) return;
             S.env[writes[i].name] = true;
             refreshEnvTags();
             write(i + 1);
           }, function (e) {
             busy = false;
             if (addBtn) addBtn.disabled = false;
-            if (S.destroyed || api.isAbort(e)) return;
+            if (!S || S.destroyed || api.isAbort(e)) return;
             errs[writes[i].field] = api.describe(e);
             showErrors();
           });
@@ -2453,7 +2453,7 @@ function setSecretDialog(v, file) {
         busy = true;
         api.setSecret({ name: v.name, value: value }, { signal: S.abort.signal }).then(function (res) {
           busy = false;
-          if (S.destroyed) return;
+          if (!S || !S || S.destroyed) return;
           S.env[v.name] = true;
           input.value = '';
           dlg.close('saved');
@@ -2464,7 +2464,7 @@ function setSecretDialog(v, file) {
           });
         }, function (e) {
           busy = false;
-          if (S.destroyed || api.isAbort(e)) return;
+          if (!S || S.destroyed || api.isAbort(e)) return;
           showErr(api.describe(e));
         });
       } }
@@ -2486,14 +2486,14 @@ function removeSecretDialog(v, file) {
     ]
   });
   dlg.result.then(function (yes) {
-    if (yes !== true || S.destroyed) return;
+    if (yes !== true || !S || S.destroyed) return;
     api.setSecret({ name: v.name, value: '' }, { signal: S.abort.signal }).then(function () {
-      if (S.destroyed) return;
+      if (!S || !S || S.destroyed) return;
       S.env[v.name] = false;
       refreshEnvTags();
       toast.info(v.name + ' removed from ' + file);
     }, function (e) {
-      if (S.destroyed || api.isAbort(e)) return;
+      if (!S || S.destroyed || api.isAbort(e)) return;
       toast.error(v.name + ' was not removed.', { detail: api.describe(e) });
     });
   });
@@ -2669,11 +2669,11 @@ function probeRow(label, iconName, run) {
     show('busy', 'Testing…');
     run().then(function (res) {
       btn.removeAttribute('aria-busy');
-      if (S.destroyed) return;
+      if (!S || !S || S.destroyed) return;
       show(res.ok ? 'ok' : 'bad', res.text, res.detail || null);
     }, function (err) {
       btn.removeAttribute('aria-busy');
-      if (S.destroyed || api.isAbort(err)) return;
+      if (!S || S.destroyed || api.isAbort(err)) return;
       show('bad', api.describe(err));
     });
   }));
@@ -3127,7 +3127,7 @@ function save() {
   });
 
   return api.saveConfig(payload, { timeout: 30000, signal: S.abort.signal }).then(function (res) {
-    if (S.destroyed) return false;
+    if (!S || S.destroyed) return false;
     progress.close();
     S.saving = false;
     setSaveBusy(false);
@@ -3158,7 +3158,7 @@ function save() {
     load({ quiet: true, force: true });
     return true;
   }, function (err) {
-    if (S.destroyed) return false;
+    if (!S || S.destroyed) return false;
     progress.close();
     S.saving = false;
     setSaveBusy(false);
@@ -3212,7 +3212,7 @@ function resetDraft() {
     ]
   });
   dlg.result.then(function (v) {
-    if (v !== true || S.destroyed) return;
+    if (v !== true || !S || S.destroyed) return;
     S.draft = clone(S.baseline);
     if (S.section.indexOf('general.') !== 0 && !S.draft.cameras[S.section]) S.section = DEFAULT_SECTION;
     renderSection();
@@ -3450,7 +3450,7 @@ function removeCamera(id) {
     ]
   });
   dlg.result.then(function (v) {
-    if (v !== true || S.destroyed) return;
+    if (v !== true || !S || S.destroyed) return;
     delete S.draft.cameras[id];
     var idx = S.draft.order.indexOf(id);
     if (idx >= 0) S.draft.order.splice(idx, 1);
@@ -3510,15 +3510,15 @@ function restartService() {
     ]
   });
   dlg.result.then(function (v) {
-    if (v !== true || S.destroyed) return;
+    if (v !== true || !S || S.destroyed) return;
     S.restarting = true;
     renderBanner();
     var progress = toast.progress('Restarting Animal Tracker…', { detail: 'Asking systemd to restart the service' });
     api.restart({ signal: S.abort.signal }).then(function () {
-      if (S.destroyed) return;
+      if (!S || !S || S.destroyed) return;
       waitForServer(progress);
     }, function (err) {
-      if (S.destroyed) return;
+      if (!S || !S || S.destroyed) return;
       progress.close();
       S.restarting = false;
       renderBanner();
@@ -3532,7 +3532,7 @@ function waitForServer(progress) {
   var started = Date.now();
   var sawDown = false;
   function tick() {
-    if (S.destroyed) return;
+    if (!S || !S || S.destroyed) return;
     var elapsed = Math.round((Date.now() - started) / 1000);
     if (elapsed > 300) {
       progress.close();
@@ -3544,7 +3544,7 @@ function waitForServer(progress) {
       return;
     }
     api.cameras({ timeout: 3000, signal: S.abort.signal }).then(function () {
-      if (S.destroyed) return;
+      if (!S || !S || S.destroyed) return;
       if (sawDown || elapsed > 20) {
         progress.close();
         S.restarting = false;
@@ -3555,7 +3555,7 @@ function waitForServer(progress) {
       progress.update({ detail: 'Waiting for the old process to stop… ' + elapsed + ' s' });
       window.setTimeout(tick, 2000);
     }, function (err) {
-      if (S.destroyed || api.isAbort(err)) return;
+      if (!S || S.destroyed || api.isAbort(err)) return;
       sawDown = true;
       progress.update({ detail: 'Waiting for the service to come back… ' + elapsed + ' s' });
       window.setTimeout(tick, 2000);
@@ -3762,7 +3762,7 @@ function load(opts) {
     S.refreshAbort = ctrl;
   }
   return api.config({ signal: ctrl ? ctrl.signal : undefined, timeout: 20000 }).then(function (raw) {
-    if (S.destroyed) return;
+    if (!S || !S || S.destroyed) return;
     S.refreshAbort = null;
     var model = normalize(raw);
     if (o.quiet) {
@@ -3786,7 +3786,7 @@ function load(opts) {
     if (!findGeneralSection(S.section) && !S.draft.cameras[S.section]) S.section = DEFAULT_SECTION;
     buildBody();
   }, function (err) {
-    if (S.destroyed || api.isAbort(err)) return;
+    if (!S || S.destroyed || api.isAbort(err)) return;
     S.refreshAbort = null;
     if (o.quiet) {
       toast.danger('Could not refresh settings', { detail: api.describe(err) });
@@ -3827,7 +3827,7 @@ function confirmLeave(proceed) {
   });
   S.leaveDialog.result.then(function (v) {
     S.leaveDialog = null;
-    if (S.destroyed) return;
+    if (!S || !S || S.destroyed) return;
     if (v === 'go') {
       S.baseline = clone(S.draft);   /* silence the guard, then navigate */
       refreshDirty();
@@ -3836,16 +3836,20 @@ function confirmLeave(proceed) {
       /* "Save and leave" used to save and stay, so the click looked ignored.
          Leaving waits for the write: a rejected save keeps the edits here. */
       save().then(function (saved) {
-        if (saved && !S.destroyed) proceed();
+        if (saved && S && !S.destroyed) proceed();
       });
     }
   });
   return false;
 }
 
+/* Anything that can run after unmount checks the session first: `unmount`
+   sets S to null, so `S.destroyed` on its own throws. The settings page
+   starts long requests (a 20 s config load, a 30 s save) and, since
+   "Save and leave", deliberately navigates away while one is in flight. */
 function installGuards() {
   track(on(window, 'beforeunload', function (ev) {
-    if (S.destroyed || !computeChanges().list.length) return;
+    if (!S || S.destroyed || !computeChanges().list.length) return;
     ev.preventDefault();
     ev.returnValue = '';
     return '';
@@ -3855,7 +3859,7 @@ function installGuards() {
      intercepts. We run first, in the capture phase, and only when there is
      something to lose. */
   track(on(document, 'click', function (ev) {
-    if (S.destroyed || S.saving) return;
+    if (!S || S.destroyed || S.saving) return;
     if (ev.defaultPrevented || ev.button !== 0) return;
     if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
     var node = ev.target;
@@ -3878,12 +3882,12 @@ function installGuards() {
      in silence on a Back press or a trackpad swipe. The router puts the URL
      back for us and leaves the asking to this. */
   track(router.guard(function (to) {
-    if (S.destroyed || S.saving) return true;
+    if (!S || S.destroyed || S.saving) return true;
     return confirmLeave(function () { router.navigate(to); });
   }));
 
   track(on(document, 'visibilitychange', function () {
-    if (S.destroyed) return;
+    if (!S || !S || S.destroyed) return;
     if (document.hidden) {
       if (S.refreshAbort) { S.refreshAbort.abort(); S.refreshAbort = null; }
       return;

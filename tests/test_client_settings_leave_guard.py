@@ -53,7 +53,9 @@ def test_settings_guards_back_with_the_same_dialog_as_a_link_click():
 
 def test_save_and_leave_leaves_only_once_the_write_succeeded():
     leave = body_of(SETTINGS, "confirmLeave")
-    assert re.search(r"save\(\)\.then\(function \(saved\) \{\s*if \(saved && !S\.destroyed\) proceed\(\);", leave)
+    # The session check is null-safe: unmount sets S to null, and this
+    # deliberately navigates away while the save is in flight.
+    assert re.search(r"save\(\)\.then\(function \(saved\) \{\s*if \(saved && S && !S\.destroyed\) proceed\(\);", leave)
 
     save = body_of(SETTINGS, "save")
     assert "return api.saveConfig(" in save            # the caller can wait for it

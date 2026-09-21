@@ -1040,6 +1040,7 @@ function newSession() {
     saving: false,
     restarting: false,
     destroyed: false,
+    leaveDialog: null,   /* the "discard unsaved changes?" dialog, while open */
     navGeneral: null,
     navCameras: null,
     panelEl: null,
@@ -3069,8 +3070,11 @@ function serverPath(p) {
   return String(p || '').split('.');
 }
 
+/** Write the draft. Resolves true when config/cameras.yml was written (or
+    there was nothing to write), false when nothing was saved — so a caller
+    that meant "save and then leave" knows whether it may leave. */
 function save() {
-  if (S.saving || !S.draft || !S.baseline) return;
+  if (S.saving || !S.draft || !S.baseline) return Promise.resolve(false);
 
   var problems = validateModel(S.draft);
   if (problems.length) {
@@ -3081,7 +3085,7 @@ function save() {
     toast.danger('Nothing was saved — ' + problems.length + ' ' + plural(problems.length, 'field') + ' failed validation.', {
       detail: first.message
     });
-    return;
+    return Promise.resolve(false);
   }
 
   var payload;
@@ -3091,13 +3095,13 @@ function save() {
     toast.error('Nothing was sent — the settings payload could not be built.', {
       detail: String(err && err.message ? err.message : err)
     });
-    return;
+    return Promise.resolve(false);
   }
 
   var d = computeChanges();
   var changed = d.list.slice();
   var n = changed.length;
-  if (!n) return;
+  if (!n) return Promise.resolve(true);   /* nothing to lose */
   var restarts = 0;
   for (var r = 0; r < changed.length; r++) if (changed[r].restart) restarts += 1;
 
@@ -3114,8 +3118,8 @@ function save() {
     detail: n + ' ' + plural(n, 'change') + ' · ' + S.draft.order.length + ' ' + plural(S.draft.order.length, 'camera')
   });
 
-  api.saveConfig(payload, { timeout: 30000, signal: S.abort.signal }).then(function (res) {
-    if (S.destroyed) return;
+  return api.saveConfig(payload, { timeout: 30000, signal: S.abort.signal }).then(function (res) {
+    if (S.destroyed) return false;
     progress.close();
     S.saving = false;
     setSaveBusy(false);
@@ -3144,12 +3148,13 @@ function save() {
        runtime annotations) without disturbing anything the operator typed
        since — the quiet reload declines when the draft is dirty. */
     load({ quiet: true, force: true });
+    return true;
   }, function (err) {
-    if (S.destroyed) return;
+    if (S.destroyed) return false;
     progress.close();
     S.saving = false;
     setSaveBusy(false);
-    if (api.isAbort(err)) return;
+    if (api.isAbort(err)) return false;
 
     /* Roll the baseline back: every edit becomes dirty again, still in the
        controls, still editable. A failed write must never eat work. */
@@ -3173,12 +3178,13 @@ function save() {
         detail: serverProblems[0].path + ': ' + serverProblems[0].message,
         retry: save
       });
-      return;
+      return false;
     }
     toast.error('config/cameras.yml was NOT written — your edits are still here.', {
       detail: api.describe(err),
       retry: save
     });
+    return false;
   });
 }
 
@@ -3788,6 +3794,47 @@ function load(opts) {
    NAVIGATION GUARD
    ========================================================================= */
 
+/**
+ * Ask before leaving with unsaved edits, then do what the operator chose.
+ * `proceed()` is how this particular exit leaves once it may.
+ * Returns false when there is something to lose (the caller must not leave).
+ */
+function confirmLeave(proceed) {
+  var d = computeChanges();
+  if (!d.list.length) return true;
+  if (S.leaveDialog) return false;      /* one at a time: a double Back press */
+
+  var n = d.list.length;
+  S.leaveDialog = dialog({
+    role: 'alertdialog',
+    tone: 'danger',
+    title: 'Discard ' + n + ' unsaved ' + plural(n, 'change') + '?',
+    body: 'Leaving this screen throws away edits that were never written to config/cameras.yml.',
+    stakes: describeChanges(d.list),
+    actions: [
+      { label: 'Stay here', variant: 'secondary', value: 'stay', focus: true },
+      { label: 'Save and leave', variant: 'primary', value: 'save' },
+      { label: 'Discard and leave', variant: 'danger', value: 'go' }
+    ]
+  });
+  S.leaveDialog.result.then(function (v) {
+    S.leaveDialog = null;
+    if (S.destroyed) return;
+    if (v === 'go') {
+      S.baseline = clone(S.draft);   /* silence the guard, then navigate */
+      refreshDirty();
+      proceed();
+    } else if (v === 'save') {
+      /* "Save and leave" used to save and stay, so the click looked ignored.
+         Leaving waits for the write: a rejected save keeps the edits here. */
+      save().then(function (saved) {
+        if (saved && !S.destroyed) proceed();
+      });
+    }
+  });
+  return false;
+}
+
 function installGuards() {
   track(on(window, 'beforeunload', function (ev) {
     if (S.destroyed || !computeChanges().list.length) return;
@@ -3812,34 +3859,20 @@ function installGuards() {
     if (node.host && node.host !== window.location.host) return;
     var here = window.location.pathname + window.location.search;
     if (href === here) return;
-    var d = computeChanges();
-    if (!d.list.length) return;
+    if (!computeChanges().list.length) return;
 
     ev.preventDefault();
     ev.stopPropagation();
-    var n = d.list.length;
-    var dlg = dialog({
-      role: 'alertdialog',
-      tone: 'danger',
-      title: 'Discard ' + n + ' unsaved ' + plural(n, 'change') + '?',
-      body: 'Leaving this screen throws away edits that were never written to config/cameras.yml.',
-      stakes: describeChanges(d.list),
-      actions: [
-        { label: 'Stay here', variant: 'secondary', value: 'stay', focus: true },
-        { label: 'Save and leave', variant: 'primary', value: 'save' },
-        { label: 'Discard and leave', variant: 'danger', value: 'go' }
-      ]
-    });
-    dlg.result.then(function (v) {
-      if (v === 'go') {
-        S.baseline = clone(S.draft);   /* silence the guard, then navigate */
-        refreshDirty();
-        router.navigate(href);
-      } else if (v === 'save') {
-        save();
-      }
-    });
+    confirmLeave(function () { router.navigate(href); });
   }, true));
+
+  /* Back and Forward reach no anchor: without this the whole draft went away
+     in silence on a Back press or a trackpad swipe. The router puts the URL
+     back for us and leaves the asking to this. */
+  track(router.guard(function (to) {
+    if (S.destroyed || S.saving) return true;
+    return confirmLeave(function () { router.navigate(to); });
+  }));
 
   track(on(document, 'visibilitychange', function () {
     if (S.destroyed) return;
@@ -3910,6 +3943,8 @@ export var view = {
   unmount: function () {
     if (!S) return;
     S.destroyed = true;
+    /* The dialog lives on <body>: leaving the route does not remove it. */
+    if (S.leaveDialog) { try { S.leaveDialog.close(null); } catch (e0) {} S.leaveDialog = null; }
     if (S.abort && S.abort.abort) { try { S.abort.abort(); } catch (e) {} }
     if (S.refreshAbort) { try { S.refreshAbort.abort(); } catch (e2) {} }
     if (S.envTimer) clearTimeout(S.envTimer);

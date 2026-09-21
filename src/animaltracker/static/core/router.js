@@ -107,6 +107,7 @@ function createRouter() {
   var current = null;          /* ctx */
   var mounted = null;          /* { view, route } */
   var subs = [];
+  var navGuard = null;         /* see api.guard */
 
   function match(path) {
     for (var i = 0; i < routes.length; i++) {
@@ -172,6 +173,9 @@ function createRouter() {
     }
 
     if (mounted) {
+      /* A guard belongs to the view that registered it and never outlives it,
+         even if that view forgets its disposer. */
+      navGuard = null;
       try { mounted.view.unmount(); } catch (err2) {
         if (window.console) console.error('[router] unmount failed', err2);
       }
@@ -209,9 +213,42 @@ function createRouter() {
 
     start: function (mountRoot) {
       root = mountRoot;
-      window.addEventListener('popstate', function () { resolve(); });
+      window.addEventListener('popstate', function () {
+        if (navGuard && current) {
+          var from = current.url;
+          var stay = false;
+          try {
+            stay = navGuard(window.location.pathname + window.location.search, from) === false;
+          } catch (err) {
+            if (window.console) console.error('[router] navigation guard failed', err);
+          }
+          if (stay) {
+            /* popstate cannot be cancelled: the URL has already moved, so put
+               it back. The guard is what asks the operator what to do next. */
+            window.history.pushState(null, '', from);
+            return;
+          }
+        }
+        resolve();
+      });
       resolve();
       return api;
+    },
+
+    /**
+     * Veto Back and Forward while the mounted view has something to lose.
+     * `fn(to, from)` returns false to stay put; the router restores the URL
+     * and leaves it to `fn` to ask the operator and navigate itself. One
+     * guard at a time, since one view is mounted, and it is dropped when that
+     * view unmounts. Returns a disposer.
+     *
+     * In-app links are plain anchors a view can intercept by click, but a
+     * Back press or a trackpad swipe reaches nothing but popstate: without
+     * this, the settings page's whole unsaved draft went away in silence.
+     */
+    guard: function (fn) {
+      navGuard = fn || null;
+      return function () { if (navGuard === fn) navGuard = null; };
     },
 
     subscribe: function (fn) {

@@ -281,18 +281,29 @@ the recovery sweep now triggers that load ~90 s after every start.
 
 ## Awaiting a decision (not a tracking item)
 
-### Storage retention has never deleted anything
+### Storage retention (fixed 2026-09-20)
 
-`src/animaltracker/storage.py` `cleanup()` and `get_clips_sorted_by_age()`
-glob `clips/*/*/*/*`, one level shallower than the real layout
-`clips/<cam>/<YYYY>/<MM>/<DD>/<file>`, so the hourly `ssd-cleaner` timer
-has deleted zero files since the initial commit and `max_days` is not
-enforced. Fixing the glob also arms `ensure_space_for_clip()`, whose
-whole-filesystem utilization check can never be satisfied by deleting
-clips when non-clip data already exceeds `max_utilization_pct` — it then
-deletes every clip and still fails. Fix both together, bound deletion by
-`retention.min_days`, and stop when a pass frees nothing.
+`cleanup()` globbed `clips/*/*/*/*`, one level short of
+`clips/<cam>/<YYYY>/<MM>/<DD>/<file>`, so every match was a directory and
+nothing was ever deleted. `StorageManager.prune_clips` replaces it:
 
-Held back because the first run after the fix will delete everything older
-than `max_days` (120 on production) in one go — that needs an explicit
-go-ahead, not a ride-along in a tracking deploy.
+- ages a clip by the event epoch in its name, not its mtime (a reanalysis
+  rewrites the sidecar and leaves the video alone, so a clip's files
+  disagree about their own age);
+- removes a clip with its key frames and its log;
+- treats `retention.min_days` as a floor nothing overrides, disk pressure
+  included, and honours `max_utilization_pct` after the age pass, oldest
+  first, stopping when nothing more can go;
+- never touches a `*.temp.avi` with no MP4 beside it. Those are events whose
+  transcode never finished, not old clips; `find_interrupted_recordings`
+  lists them for a decision instead.
+
+`cleanup --dry-run` prints what would go (counts, GB, date span, per camera)
+and the command's exit status is now meaningful, so `ssd-cleaner.service`
+can see a failure.
+
+Still open: the first real run on production removes 247 of 438 clips
+(7.5 GB, 24 Dec 2025 to 21 May 2026), 175 of them from `cam2`, a camera no
+longer in `config/cameras.yml`. Nothing forces it — the volume is at 28% of
+298 GB. The three interrupted recordings (3.7 GB, all `cam2`) are separate
+and could be transcoded into real clips instead of deleted.

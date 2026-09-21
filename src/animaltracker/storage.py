@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import glob
+import json
 import shutil
 import subprocess
 import threading
@@ -11,9 +13,9 @@ import time
 import uuid
 import cv2
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
@@ -194,6 +196,42 @@ class StreamingClipWriter:
 # Default storage thresholds
 DEFAULT_MIN_FREE_BYTES = 500 * 1024 * 1024  # 500 MB minimum free space
 DEFAULT_MAX_UTILIZATION_PCT = 80  # Don't use more than 80% of disk
+
+
+CLIP_SUFFIXES = (".mp4", ".avi", ".mkv")
+
+# Half-finished work, not clips: the AVI an event streams to before its
+# transcode, and the MP4 that transcode writes before it renames.
+_INTERMEDIATE_SUFFIXES = (".temp.avi", ".tmp.mp4")
+
+
+def _is_intermediate(path: Path) -> bool:
+    return path.name.endswith(_INTERMEDIATE_SUFFIXES)
+
+# The event epoch a clip's name starts with; the archive dates clips the same way.
+_CLIP_EPOCH_RE = re.compile(r"^(\d{9,10})_")
+
+
+@dataclass
+class PruneReport:
+    """What a retention pass did, or would do with ``dry_run``."""
+    dry_run: bool = True
+    examined: int = 0
+    protected: int = 0            # younger than retention.min_days
+    deleted: List[Path] = field(default_factory=list)
+    deleted_set: set = field(default_factory=set)
+    failed: List[Path] = field(default_factory=list)
+    files_removed: int = 0        # clips plus their key frames and logs
+    freed_bytes: int = 0
+    by_camera: Dict[str, int] = field(default_factory=dict)
+    oldest: Optional[float] = None
+    newest: Optional[float] = None
+    utilization_pct: Optional[float] = None
+    still_over_ceiling: bool = False
+
+    @property
+    def kept(self) -> int:
+        return self.examined - len(self.deleted)
 
 
 # ``build_event_temp_avi`` names: <camera>_<event epoch>_<8 hex>.temp.avi. The
@@ -656,16 +694,191 @@ class StorageManager:
             return 0.0
         return stat.used / stat.total * 100
 
+    def clip_event_time(self, clip: Path, stat=None) -> float:
+        """When the event began: the epoch in the clip's name, else its mtime.
+
+        Pruning by mtime alone gets a clip's age wrong in both directions. The
+        mtime is when the transcode finished, minutes after a long event; and
+        a reanalysis rewrites the sidecar and the key frames without touching
+        the video, so a clip's files disagree about their own age. The epoch
+        in the name is the first detection and never moves. Same rule the
+        archive uses to date a clip.
+        """
+        if stat is None:
+            stat = clip.stat()
+        match = _CLIP_EPOCH_RE.match(clip.name)
+        if match:
+            epoch = int(match.group(1))
+            # Sanity-checked against the clock, not against the file: a clip
+            # whose mtime disagrees with its name is exactly the case this
+            # exists for. Only a prefix that cannot be a time at all (before
+            # 2001, or in the future) falls back.
+            if 1_000_000_000 <= epoch <= time.time() + 86400:
+                return float(epoch)
+        return float(stat.st_mtime)
+
+    def clip_companions(self, clip: Path) -> List[Path]:
+        """A clip's key frames and processing log, which go when it goes.
+
+        Deleting the video alone leaves files the archive never lists (it
+        lists videos) and nothing else prunes. Names come from the sidecar's
+        own list as well as a directory listing, because on the NFS archive a
+        listing can be stale while the files open fine.
+        """
+        stem = clip.stem
+        found: List[Path] = []
+        log = clip.with_suffix(".log.json")
+        names = set()
+        try:
+            with open(log, "r") as fh:
+                entries = json.load(fh).get("thumbnails")
+            if isinstance(entries, list):
+                for entry in entries:
+                    name = entry.get("file") if isinstance(entry, dict) else None
+                    if (isinstance(name, str) and name.startswith(stem + "_thumb_")
+                            and name.endswith(".jpg") and Path(name).name == name):
+                        names.add(name)
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            names.update(p.name for p in clip.parent.glob(f"{glob.escape(stem)}_thumb*.jpg"))
+        except OSError:
+            pass
+        found.extend(clip.parent / name for name in sorted(names))
+        found.append(log)
+        return found
+
+    def find_clips(self) -> List[Path]:
+        """Every saved clip, wherever it sits under ``clips/``.
+
+        ``clips/<camera>/<YYYY>/<MM>/<DD>/<file>``, plus manual clips in the
+        root. The old glob stopped one level short and matched the day
+        directories, so nothing it returned was ever a file and retention has
+        deleted nothing since the first commit.
+        """
+        root = self.storage_root / "clips"
+        if not root.is_dir():
+            return []
+        return [
+            p for p in root.rglob("*")
+            if p.suffix.lower() in CLIP_SUFFIXES and not _is_intermediate(p) and p.is_file()
+        ]
+
+    def find_interrupted_recordings(self) -> List[Path]:
+        """Streaming temp files left in the archive by an event that never finished.
+
+        Not clips, and never pruned as if they were: a ``.temp.avi`` with no
+        MP4 beside it is the only copy of an event whose transcode did not
+        complete, and it can still be turned into one. Deleting it as an "old
+        clip" would throw away footage that was never saved. The cleanup
+        command lists them; what happens to them is a decision, not a sweep.
+        """
+        root = self.storage_root / "clips"
+        if not root.is_dir():
+            return []
+        return sorted(
+            p for p in root.rglob("*")
+            if _is_intermediate(p) and p.is_file()
+            and not p.with_name(p.name.split(".")[0] + ".mp4").exists()
+        )
+
+    def prune_clips(
+        self,
+        max_days: int,
+        min_days: int = 0,
+        max_utilization_pct: Optional[int] = None,
+        dry_run: bool = True,
+    ) -> "PruneReport":
+        """Remove clips past ``max_days``, then more if the disk is over its ceiling.
+
+        Never touches a clip younger than ``min_days``, whatever the disk is
+        doing: that floor is the one guarantee the settings page makes, and it
+        is what stops a full disk erasing this morning's visitors. Each clip
+        goes with its key frames and its log. Nothing is removed when
+        ``dry_run`` is set, which is how the report is meant to be read first.
+        """
+        report = PruneReport(dry_run=dry_run)
+        now = time.time()
+        if min_days > 0 and max_days > 0 and min_days > max_days:
+            LOGGER.warning(
+                "retention.min_days (%d) is past retention.max_days (%d); keeping %d days",
+                min_days, max_days, min_days,
+            )
+        keep_after = now - min_days * 86400 if min_days > 0 else None
+        too_old = now - max_days * 86400 if max_days > 0 else None
+
+        aged: List[tuple] = []
+        for clip in self.find_clips():
+            try:
+                stat = clip.stat()
+            except OSError:
+                continue
+            started = self.clip_event_time(clip, stat)
+            report.examined += 1
+            if keep_after is not None and started >= keep_after:
+                report.protected += 1
+                continue
+            aged.append((started, clip, stat.st_size))
+        aged.sort(key=lambda row: row[0])
+
+        for started, clip, size in aged:
+            if too_old is None or started >= too_old:
+                continue
+            self._prune_one(clip, started, size, report, dry_run, "older than %d days" % max_days)
+
+        if max_utilization_pct:
+            remaining = [row for row in aged if row[1] not in report.deleted_set]
+            for started, clip, size in remaining:
+                used_pct = self._utilization_pct(report.freed_bytes if dry_run else 0)
+                if used_pct is None or used_pct <= max_utilization_pct:
+                    break
+                self._prune_one(clip, started, size, report, dry_run,
+                                "disk at %.0f%%, ceiling %d%%" % (used_pct, max_utilization_pct))
+            report.utilization_pct = self._utilization_pct(report.freed_bytes if dry_run else 0)
+            if (report.utilization_pct is not None
+                    and report.utilization_pct > max_utilization_pct):
+                report.still_over_ceiling = True
+        return report
+
+    def _prune_one(self, clip: Path, started: float, size: int,
+                   report: "PruneReport", dry_run: bool, reason: str) -> None:
+        files = [clip] + self.clip_companions(clip)
+        freed = 0
+        for path in files:
+            try:
+                freed += path.stat().st_size
+            except OSError:
+                continue
+        LOGGER.info("%s %s (%s)", "Would remove" if dry_run else "Removing", clip.name, reason)
+        if not dry_run:
+            for path in files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    LOGGER.warning("Failed to remove %s: %s", path.name, e)
+                    report.failed.append(path)
+        report.deleted.append(clip)
+        report.deleted_set.add(clip)
+        report.freed_bytes += freed
+        report.files_removed += len(files)
+        camera = clip.parent.parts[-4] if len(clip.parent.parts) >= 4 else "manual"
+        report.by_camera[camera] = report.by_camera.get(camera, 0) + 1
+        if report.oldest is None or started < report.oldest:
+            report.oldest = started
+        if report.newest is None or started > report.newest:
+            report.newest = started
+
+    def _utilization_pct(self, assume_freed: int = 0) -> Optional[float]:
+        try:
+            stat = shutil.disk_usage(self.storage_root)
+        except OSError:
+            return None
+        used = max(0, stat.used - assume_freed)
+        return (used / stat.total) * 100 if stat.total else None
+
     def cleanup(self, retention_days: int, dry_run: bool = False) -> list[Path]:
-        deleted: list[Path] = []
-        cutoff = time.time() - retention_days * 86400
-        for path in sorted(self.storage_root.glob("clips/*/*/*/*")):
-            if path.is_file() and path.stat().st_mtime < cutoff:
-                LOGGER.info("%s old clip %s", "Would remove" if dry_run else "Removing", path)
-                if not dry_run:
-                    path.unlink()
-                deleted.append(path)
-        return deleted
+        """Back-compatible wrapper: prune by age alone."""
+        return self.prune_clips(retention_days, dry_run=dry_run).deleted
 
     def get_clips_sorted_by_age(self) -> List[Path]:
         """Get all clip files sorted by modification time (oldest first)."""

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 import asyncio
 import logging
 import os
@@ -178,18 +180,66 @@ def cmd_ptz_test(args: argparse.Namespace) -> None:
             LOGGER.info("  %s: Error - %s", token, e)
 
 
-def cmd_cleanup(args: argparse.Namespace) -> None:
+def cmd_cleanup(args: argparse.Namespace) -> int:
     _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
+    retention = runtime.general.retention
     storage = StorageManager(
         storage_root=Path(runtime.general.storage_root),
         logs_root=Path(runtime.general.logs_root),
+        max_utilization_pct=retention.max_utilization_pct,
     )
-    deleted = storage.cleanup(runtime.general.retention.max_days, dry_run=args.dry_run)
-    if args.dry_run:
-        LOGGER.info("[dry-run] would delete %d clips", len(deleted))
-    else:
-        LOGGER.info("Deleted %d old clips", len(deleted))
+    try:
+        report = storage.prune_clips(
+            max_days=retention.max_days,
+            min_days=retention.min_days,
+            max_utilization_pct=retention.max_utilization_pct,
+            dry_run=args.dry_run,
+        )
+    except OSError as e:
+        LOGGER.error("Retention pass failed: %s", e)
+        return 1
+
+    def when(ts):
+        return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "-"
+
+    lead = "[dry-run] would remove" if report.dry_run else "Removed"
+    LOGGER.info(
+        "%s %d of %d clip(s), %d file(s), %.2f GB — keeping at most %d days, at least %d days",
+        lead, len(report.deleted), report.examined, report.files_removed,
+        report.freed_bytes / 1_073_741_824, retention.max_days, retention.min_days,
+    )
+    if report.deleted:
+        LOGGER.info("  dated %s to %s", when(report.oldest), when(report.newest))
+        for camera in sorted(report.by_camera):
+            LOGGER.info("  %-14s %d", camera, report.by_camera[camera])
+    if report.protected:
+        LOGGER.info("  %d clip(s) held back as younger than %d days", report.protected, retention.min_days)
+    if report.utilization_pct is not None:
+        LOGGER.info("  disk would be at %.0f%% (ceiling %d%%)" if report.dry_run
+                    else "  disk at %.0f%% (ceiling %d%%)",
+                    report.utilization_pct, retention.max_utilization_pct)
+    if report.still_over_ceiling:
+        LOGGER.warning(
+            "  still above the ceiling with nothing left to remove that is older than %d days",
+            retention.min_days,
+        )
+    stranded = storage.find_interrupted_recordings()
+    if stranded:
+        total = sum(f.stat().st_size for f in stranded if f.exists())
+        LOGGER.warning(
+            "  %d interrupted recording(s) left in the archive, %.2f GB, NOT removed: "
+            "an event that never finished its transcode, still recoverable",
+            len(stranded), total / 1_073_741_824,
+        )
+        for f in stranded[:10]:
+            LOGGER.warning("    %s", f.relative_to(storage.storage_root))
+    if report.failed:
+        LOGGER.error("  %d file(s) could not be removed", len(report.failed))
+        return 1
+    if report.dry_run and report.deleted:
+        LOGGER.info("Nothing was removed. Run without --dry-run to apply.")
+    return 0
 
 
 def cmd_zoom_calibrate(args: argparse.Namespace) -> None:
@@ -536,7 +586,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    # A command's non-zero return becomes the exit status, so a failed
+    # retention pass is visible to systemd instead of looking like success.
+    raise SystemExit(args.func(args) or 0)
 
 
 if __name__ == "__main__":

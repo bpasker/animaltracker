@@ -224,19 +224,17 @@ var GENERAL_SECTIONS = [
         { key: 'logs_root', kind: 'text', mono: true, required: true, restart: true,
           label: 'Logs root', hint: 'Application and web access logs.' }
       ] },
-      { id: 'retention', legend: 'Retention', hint: 'Recorded in config/cameras.yml; nothing prunes clips yet (see BUGS.md).', fields: [
-        /* Nothing enforces these yet: the pruning pass they feed has never
-           deleted anything (it looks one directory level above the clips),
-           and arming it is a deliberate decision, not a side effect of
-           editing a field — the first run would remove everything past
-           "keep at most" in one go. The labels say so rather than promising
-           a tidy-up that does not happen. See BUGS.md. */
+      { id: 'retention', legend: 'Retention', hint: 'Applied when the cleanup command runs; preview it with --dry-run.', fields: [
+        /* Enforced by the cleanup command, which prunes nothing on its own
+           schedule: it runs when you run it, or from the ssd-cleaner timer
+           where that is installed. A clip goes with its key frames and log,
+           and "keep at least" is a floor nothing overrides. */
         { key: 'retention.min_days', kind: 'number', min: 1, max: 365, step: 1, int: true,
-          label: 'Keep at least (days)', hint: 'Not enforced yet — recorded for when pruning is switched on.' },
+          label: 'Keep at least (days)', hint: 'A floor: a clip this young is never removed, even when the disk is full.' },
         { key: 'retention.max_days', kind: 'number', min: 1, max: 3650, step: 1, int: true,
-          label: 'Keep at most (days)', hint: 'Not enforced yet — nothing deletes old clips today.' },
+          label: 'Keep at most (days)', hint: 'Clips older than this are removed when cleanup runs.' },
         { key: 'retention.max_utilization_pct', kind: 'slider', min: 50, max: 95, step: 5, unit: '%', restart: true,
-          label: 'Disk usage ceiling', hint: 'Not enforced yet — nothing frees space when the disk fills.' }
+          label: 'Disk usage ceiling', hint: 'Above this, cleanup removes the oldest clips first — never past the floor.' }
       ] }
     ]
   },

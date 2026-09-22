@@ -652,10 +652,12 @@ function saveClipFrom(cam) {
   var t = toast.progress('Saving the last 30 s from ' + (cam.name || cam.id) + '…');
   api.saveClip(cam.id).then(function (res) {
     t.close();
+    /* The server answers {filename, path} once the file exists. */
+    var filename = res && typeof res === 'object' ? res.filename : null;
     toast.success('Clip saved from ' + (cam.name || cam.id), {
-      detail: (res && res.filename) || '',
+      detail: filename || '',
       action: { label: 'View', variant: 'secondary', onClick: function () {
-        router.go('/recordings', {});
+        router.go('/recordings', filename ? { q: filename } : {});
       } }
     });
   }, function (err) {

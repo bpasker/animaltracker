@@ -85,6 +85,18 @@ class FakeWorker:
         self.clip_buffer = FakeClipBuffer(live)
         self.event_state = None
         self.tracking_enabled = bool(cam.ptz_tracking.enabled or cam.ptz_tracking.self_track)
+        self.storage = None   # set by main(), for save_manual_clip
+
+    def save_manual_clip(self):
+        """A stub clip, so the Live page's "Save clip" and the palette work here."""
+        if not self.live or self.storage is None:
+            return None
+        name = f"manual_{self.camera.id}_{int(time.time())}.mp4"
+        path = self.storage / "clips" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        time.sleep(0.5)                       # the real write takes seconds
+        path.write_bytes(b"\x00" * 4096)
+        return name
 
 
 def main() -> None:
@@ -116,6 +128,8 @@ def main() -> None:
     (scratch / "storage" / "clips").mkdir(parents=True, exist_ok=True)
     workers = {cam.id: FakeWorker(cam, live=(i == 0), runtime=runtime)
                for i, cam in enumerate(runtime.cameras)}
+    for w in workers.values():
+        w.storage = scratch / "storage"
 
     registry = ClipAnalysisRegistry()
     for rel in args.analyzing:

@@ -1033,11 +1033,16 @@ function saveClip(card) {
     .then(function (res) {
       t.close();
       busy(card.saveBtn, false);
-      var text = typeof res === 'string' ? res : (res && res.filename) || 'Clip saved.';
-      var m = /Clip saved:\s*(.+)$/.exec(String(text));
-      var filename = m ? m[1].trim() : null;
+      /* The server answers {filename, path} once the file exists; the
+         plain-text "Clip saved: <name>" it used to send is still read in
+         case an older server is behind this page. */
+      var filename = res && typeof res === 'object' ? (res.filename || null) : null;
+      if (!filename) {
+        var m = /Clip saved:\s*(.+)$/.exec(String(res || ''));
+        filename = m ? m[1].trim() : null;
+      }
       toast.success('Clip saved from ' + card.name + '.', {
-        detail: filename || String(text).slice(0, 160),
+        detail: filename || 'Clip saved.',
         action: filename ? {
           label: 'View', variant: 'secondary',
           onClick: function () { router.go('/recordings', { q: filename }); }

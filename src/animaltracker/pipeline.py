@@ -733,7 +733,16 @@ class StreamWorker:
         return cls._shared_postprocess_detector
 
     def save_manual_clip(self) -> Optional[str]:
-        """Save the last 30 seconds of video buffer as a manual clip."""
+        """Write the last 30 s of the rolling buffer as a clip; its filename, or None.
+
+        Blocking: it encodes and transcodes the clip before returning, so run
+        it in an executor. It used to hand the write to a bare thread and
+        answer at once, so the web page said "Clip saved" while the file was
+        still being written, and a write that failed (a full disk, no
+        encoder) was reported only in the log. The clip is stamped at the
+        rate the frames were captured at, like an event clip; a fixed 15
+        played cam1's 30 s as 40.
+        """
         frames = self.clip_buffer.dump()
         if not frames:
             return None
@@ -748,13 +757,11 @@ class StreamWorker:
             
         filename = f"manual_{self.camera.id}_{int(now)}.mp4"
         path = self.storage.storage_root / "clips" / filename
-        
-        # Run in thread to avoid blocking loop
-        threading.Thread(
-            target=self.storage.write_clip,
-            args=(recent_frames, path)
-        ).start()
-        
+        fps = (measured_frame_rate([ts for ts, _frame in recent_frames])
+               or (self.perf_last_snapshot or {}).get('capture_fps')
+               or 15.0)
+        if not self.storage.write_clip(recent_frames, path, fps=fps):
+            return None
         return filename
 
     async def run(self, stop_event: asyncio.Event) -> None:

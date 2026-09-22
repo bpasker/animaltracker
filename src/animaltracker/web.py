@@ -2135,17 +2135,32 @@ class WebServer:
         return buf.tobytes() if ok else b''
 
     async def handle_save_clip(self, request):
+        """POST /save_clip/{camera_id}: the last 30 s of the buffer as a manual clip.
+
+        Answers ``{"filename", "path"}`` once the file exists, which is what
+        the command palette's toast and the live page's "View" link read;
+        the old plain-text "Clip saved: <name>" gave the palette nothing
+        and was sent before the write had happened. The write encodes and
+        transcodes, seconds of work, so it runs on the executor.
+        """
         camera_id = request.match_info['camera_id']
         worker = self.workers.get(camera_id)
         
         if not worker:
-            return web.Response(status=404, text="Camera not found")
+            return web.json_response({'error': 'Camera not found'}, status=404)
             
-        filename = worker.save_manual_clip()
+        loop = asyncio.get_running_loop()
+        filename = await loop.run_in_executor(None, worker.save_manual_clip)
         if not filename:
-            return web.Response(status=500, text="Failed to save clip (buffer empty?)")
-            
-        return web.Response(text=f"Clip saved: {filename}")
+            return web.json_response(
+                {'error': 'No clip was written: the buffer is empty or the write failed (see the log)'},
+                status=500,
+            )
+        # The archive scan is cached for a few seconds; the "View" link the
+        # toast offers must find the clip that was just written.
+        self._invalidate_scan_cache()
+        return web.json_response({'filename': filename, 'path': filename,
+                                  'message': f'Clip saved: {filename}'})
 
     def _confined_clip_path(self, rel_path) -> 'Path | None':
         """The file ``rel_path`` names inside the clips directory, or None.

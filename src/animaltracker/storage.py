@@ -656,22 +656,27 @@ class StorageManager:
                     pass
         return ok
 
-    def write_clip(self, frames: List, output_path: Path, fps: int = 15) -> None:
-        """Encode frames using two-step process for browser compatibility.
-        
-        Ensures sufficient storage space before writing, removing old clips if needed.
+    def write_clip(self, frames: List, output_path: Path, fps: float = 15) -> bool:
+        """Encode ``(timestamp, frame)`` pairs to ``output_path``; True if it exists after.
+
+        Two steps, for browser compatibility: an MJPG AVI, then an H.264 MP4
+        through ffmpeg. ``fps`` is the rate the frames were captured at;
+        a manual clip used to be stamped 15 like the old event clips and
+        played slow motion for the same reason (see ``measured_frame_rate``).
+        Space is checked, never made: freeing it is retention's job, with
+        the ``min_days`` floor the settings page promises.
         """
         if not frames:
             LOGGER.warning("No frames available for clip %s; skipping", output_path)
-            return
+            return False
         
-        # Ensure we have enough space before writing
         estimated_size = self.estimate_clip_size(frames, fps)
         if not self.ensure_space_for_clip(estimated_size):
             LOGGER.error("Skipping clip %s due to insufficient storage space", output_path)
-            return
+            return False
             
         height, width = frames[0][1].shape[:2]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         # 1. Write to temporary AVI using MJPG (fast, safe, widely supported by OpenCV)
         temp_avi = output_path.with_suffix(".temp.avi")
         fourcc = cv2.VideoWriter_fourcc(*'MJPG')
@@ -679,7 +684,7 @@ class StorageManager:
         
         if not out.isOpened():
             LOGGER.error("Failed to open MJPG VideoWriter for %s", temp_avi)
-            return
+            return False
 
         try:
             for _, frame in frames:
@@ -690,7 +695,7 @@ class StorageManager:
         if not temp_avi.exists() or temp_avi.stat().st_size == 0:
             LOGGER.error("Failed to create intermediate AVI %s", temp_avi)
             if temp_avi.exists(): temp_avi.unlink()
-            return
+            return False
 
         # 2. Convert to browser-friendly MP4 (H.264 + YUV420p) using FFmpeg CLI
         # This avoids the 'malloc' crash from piping raw frames and ensures web compatibility
@@ -711,7 +716,7 @@ class StorageManager:
             if not out.isOpened():
                 LOGGER.error("Failed to open fallback VideoWriter")
                 temp_avi.unlink()
-                return
+                return False
                 
             try:
                 while True:
@@ -726,7 +731,7 @@ class StorageManager:
             if tmp_mp4.exists() and tmp_mp4.stat().st_size > 0:
                 tmp_mp4.rename(output_path)
                 LOGGER.info("Saved clip %s (fallback encoding)", output_path)
-            return
+            return output_path.exists()
 
         cmd = [
             "ffmpeg",
@@ -757,6 +762,7 @@ class StorageManager:
                 temp_avi.unlink()
             if tmp_mp4.exists(): # If rename failed
                 tmp_mp4.unlink()
+        return output_path.exists()
 
     def disk_usage_pct(self) -> float:
         stat = shutil.disk_usage(self.storage_root)
@@ -1081,12 +1087,6 @@ class StorageManager:
         """Back-compatible wrapper: prune by age alone."""
         return self.prune_clips(retention_days, dry_run=dry_run).deleted
 
-    def get_clips_sorted_by_age(self) -> List[Path]:
-        """Get all clip files sorted by modification time (oldest first)."""
-        clips = list(self.storage_root.glob("clips/*/*/*/*"))
-        clips = [p for p in clips if p.is_file() and p.suffix in (".mp4", ".avi", ".mkv")]
-        return sorted(clips, key=lambda p: p.stat().st_mtime)
-
     def get_free_space(self) -> int:
         """Get free space in bytes on the storage volume."""
         stat = shutil.disk_usage(self.storage_root)
@@ -1142,47 +1142,22 @@ class StorageManager:
         return True
 
     def ensure_space_for_clip(self, required_bytes: int) -> bool:
-        """Ensure sufficient space exists for a new clip, removing old clips if needed.
-        
-        Removes oldest clips first until enough space is available or no clips remain.
-        
-        Returns:
-            True if sufficient space is available (or was freed)
-            False if unable to free enough space
+        """Whether a clip of ``required_bytes`` fits; it frees nothing.
+
+        This used to delete the oldest clips until the new one fit, with no
+        regard for ``retention.min_days``, taking the video alone and leaving
+        its key frames and log. Its glob was one level short of the archive
+        layout, so it never actually found one; had it, a full disk would
+        have eaten this morning's visitors to save thirty seconds of the
+        live view. Making room is retention's job (``prune_clips``, daily),
+        with the floor the settings page promises.
         """
         if self.has_sufficient_space(required_bytes):
             return True
-        
-        LOGGER.info(
-            "Insufficient storage space. Need %d bytes, have %d bytes free. "
-            "Cleaning up old clips...",
-            required_bytes, self.get_free_space()
-        )
-        
-        # Get clips sorted oldest first
-        old_clips = self.get_clips_sorted_by_age()
-        
-        freed_count = 0
-        for clip_path in old_clips:
-            if self.has_sufficient_space(required_bytes):
-                LOGGER.info("Freed enough space after removing %d old clips", freed_count)
-                return True
-            
-            try:
-                size = clip_path.stat().st_size
-                clip_path.unlink()
-                freed_count += 1
-                LOGGER.info("Removed old clip to free space: %s (%d bytes)", clip_path, size)
-            except OSError as e:
-                LOGGER.warning("Failed to remove clip %s: %s", clip_path, e)
-        
-        # Check one more time after removing all possible clips
-        if self.has_sufficient_space(required_bytes):
-            LOGGER.info("Freed enough space after removing %d old clips", freed_count)
-            return True
-        
         LOGGER.error(
-            "Unable to free enough storage space. Still need %d bytes, have %d bytes free",
-            required_bytes, self.get_free_space()
+            "Not enough space for a %.1f MB clip: %.1f MB free, %.0f MB must stay free "
+            "and the disk may not pass %d%%. Retention runs daily; run `cleanup` to make room now.",
+            required_bytes / 1_048_576, self.get_free_space() / 1_048_576,
+            self.min_free_bytes / 1_048_576, self.max_utilization_pct,
         )
         return False

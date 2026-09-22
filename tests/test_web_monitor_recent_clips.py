@@ -82,3 +82,32 @@ def test_an_empty_archive_gives_an_empty_panel_not_an_error(server):
     (server.storage_root / "clips").mkdir(parents=True, exist_ok=True)
 
     assert recent(server) == []
+
+
+# --- one figure failing does not blank the others ----------------------------------------------
+
+def test_a_worker_without_a_detector_name_still_leaves_the_host_figures_and_the_clips(server):
+    """Every figure is its own attempt. One AttributeError used to be caught
+    by the handler and answered with all of them blank, which is what hid
+    the empty panel in the dev harness (its stand-in worker had no
+    detector) and would hide a real archive behind a stand-in too."""
+    from types import SimpleNamespace
+    write_clip(server, "cam1", "2026-09-19", "1789000000_bird.mp4", 1789000000)
+    server.workers = {"cam1": SimpleNamespace()}          # no .detector, no .runtime
+
+    system, gpu, detector_info, recent = server._monitor_host_stats()
+
+    assert detector_info == {"backend": "unknown", "country": None}
+    assert system["disk_total_gb"] > 0, "the host figures were blanked with it"
+    assert [c["species"] for c in recent] == ["Bird"]
+
+
+def test_a_failing_archive_listing_leaves_the_host_figures(server, monkeypatch):
+    def boom():
+        raise OSError("Stale file handle")
+    monkeypatch.setattr(server, "_scan_recordings_cached", boom)
+    (server.storage_root / "clips").mkdir(parents=True, exist_ok=True)
+
+    system, gpu, detector_info, recent = server._monitor_host_stats()
+
+    assert recent == [] and system["disk_total_gb"] > 0

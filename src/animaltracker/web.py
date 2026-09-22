@@ -2750,39 +2750,49 @@ class WebServer:
         except Exception as e:
             LOGGER.debug("GPU monitoring unavailable: %s", e)
         
+        # Each figure is its own attempt. One failure used to be caught by
+        # the handler and answered with every figure blank, so a detector
+        # stand-in without a backend name (the dev harness) or a stalled
+        # archive listing showed as a dead host: CPU 0, disk 0, no clips.
         # Detector info
         detector_info = {
             'backend': 'unknown',
             'country': None,
         }
-        if self.workers:
-            worker = next(iter(self.workers.values()))
-            detector_info['backend'] = worker.detector.backend_name
-            # Get location from config, not detector object
-            detector_cfg = worker.runtime.general.detector
-            country = getattr(detector_cfg, 'country', None) or ''
-            region = getattr(detector_cfg, 'admin1_region', None) or ''
-            if country and region:
-                detector_info['country'] = f"{country} {region}"
-            elif country:
-                detector_info['country'] = country
+        try:
+            if self.workers:
+                worker = next(iter(self.workers.values()))
+                detector_info['backend'] = worker.detector.backend_name
+                # Get location from config, not detector object
+                detector_cfg = worker.runtime.general.detector
+                country = getattr(detector_cfg, 'country', None) or ''
+                region = getattr(detector_cfg, 'admin1_region', None) or ''
+                if country and region:
+                    detector_info['country'] = f"{country} {region}"
+                elif country:
+                    detector_info['country'] = country
+        except Exception as err:  # noqa: BLE001 - telemetry is best effort
+            LOGGER.debug("Detector figures unavailable: %s", err)
         
         # Recent clips (last 5)
         recent_clips = []
-        clips_dir = self.storage_root / 'clips'
-        if clips_dir.exists():
-            # The archive's own scan, newest first. This used to glob
-            # ``<camera>/*.mp4``, one level above the day directories the
-            # pipeline writes to, so the panel was permanently empty; and it
-            # put the (display, raw) tuple in 'species', which the page would
-            # have rendered as "Deer,deer".
-            for clip in self._scan_recordings_cached()[:5]:
-                recent_clips.append({
-                    'path': clip['path'],
-                    'species': clip['species'],
-                    'time': clip['time'].strftime('%H:%M:%S'),
-                    'camera': clip['camera'],
-                })
+        try:
+            clips_dir = self.storage_root / 'clips'
+            if clips_dir.exists():
+                # The archive's own scan, newest first. This used to glob
+                # ``<camera>/*.mp4``, one level above the day directories the
+                # pipeline writes to, so the panel was permanently empty; and it
+                # put the (display, raw) tuple in 'species', which the page would
+                # have rendered as "Deer,deer".
+                for clip in self._scan_recordings_cached()[:5]:
+                    recent_clips.append({
+                        'path': clip['path'],
+                        'species': clip['species'],
+                        'time': clip['time'].strftime('%H:%M:%S'),
+                        'camera': clip['camera'],
+                    })
+        except Exception as err:  # noqa: BLE001 - telemetry is best effort
+            LOGGER.debug("Recent clips unavailable: %s", err)
 
         return system, gpu, detector_info, recent_clips
 

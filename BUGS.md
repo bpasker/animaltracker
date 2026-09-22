@@ -343,6 +343,37 @@ test on the hardware, because none can be proved without it. Found in the
   `ptz_tracker.py:2831-2838` only when the anchor's source is the PTZ
   camera itself). Not re-checked on 2026-09-21.
 
+The rest of the hunt's PTZ findings, from its report, none re-checked;
+line numbers are as of the hunt (commit `3098a5f`):
+
+- An investigate timeout that lands mid-step with patrol disabled never
+  stops the move; the mode stays `investigate` and later candidates are
+  ignored (`ptz_tracker.py:2194-2196, 2380-2409`; reproduced by script).
+- cam1-driven `SOURCE_TRACKING` is open loop (`ptz_tracker.py:2851-2866`;
+  design level).
+- cam2 detections from before its move can confirm the takeover
+  (`pipeline.py:1120, 1295-1305`; `ptz_tracker.py:1668-1672`).
+- A failed `GotoPreset` retries every tick with no backoff
+  (`ptz_tracker.py:1164-1176, 1219`); the seen-clock is refreshed before
+  size filtering (`:1334, 1537`); no staleness guard on `frame_capture_ts`.
+- The web PTZ dead-man's `finally` can pop its successor (`web.py:545-558`;
+  narrow window).
+- `ptz_set_zoom` swallows ONVIF failures, so a calibration records points
+  at zoom levels the camera never reached (`onvif_client.py:240-246`); the
+  CLI passes the raw profile string (`cli.py:230`).
+- `ptz_set_zoom` sleeps 8 to 16 s holding the client lock, so calibrating
+  from the Live page while tracking stalls the tracker
+  (`onvif_client.py:183-236`).
+- `ptz_find_working_profile` discards a working token if the restore move
+  fails (`onvif_client.py:396-404`).
+- Calibration maths, lower impact: reciprocal `pan_scale` in dead code
+  (`ptz_calibration.py:355-366`); slope estimate undefined for the centre
+  column (`ptz_visual_calibration.py:410-427`); no absolute inlier floor
+  (`ptz_calibration.py:759-794`); stale frames in CLI `zoom-calibrate`
+  (`cli.py:244-272`); timed moves without a stop guarantee
+  (`ptz_visual_calibration.py:122-124`); zoom levels accepted unclamped
+  (`cli.py:275`, `web.py:946`).
+
 ---
 
 ## Awaiting a decision (not a tracking item)

@@ -88,6 +88,17 @@ def test_a_prune_to_nothing_still_repaints_and_resets_the_offset():
     assert REFRESH.index("var pruned = before - S.clips.length;") < REFRESH.index("renderGrid();")
 
 
+def test_a_finished_analysis_clears_the_badge_on_the_kept_card():
+    """The server omits `analysis` once a clip is done; Object.assign cannot
+    remove a key, so the merge must clear it before assigning (bug hunt
+    item 3.25). The rename after every finished analysis keeps the same
+    card, since clips are keyed by camera and event time, so without this
+    a live event's card read "Analyzing…" until a reload."""
+    merge = REFRESH[REFRESH.index("if (cur.path !== inc.path) followRename"):]
+    merge = merge[:merge.index("Object.assign(cur, inc);")]
+    assert "if (!('analysis' in inc)) cur.analysis = null;" in merge
+
+
 def test_a_changed_archive_recounts_the_filter_chips():
     """The chips come from the unfiltered archive, which only loadGrid loads:
     a deleted species kept its chip, a new one had none until a reload."""

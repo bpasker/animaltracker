@@ -919,6 +919,13 @@ function refreshGrid() {
         var cur = known[key];
         if (!cur) { fresh.push(inc); continue; }
         if (cur.path !== inc.path) followRename(cur.path, inc.path);
+        /* The server sends `analysis` only while there is something to say
+           (running, queued, unfinished) and omits it once the clip is done.
+           Object.assign cannot remove a key, so a card that was
+           "Analyzing…" stayed so until a reload; the rename that follows
+           every finished analysis kept the same card (clips are keyed by
+           camera and event time), which is exactly when it matters. */
+        if (!('analysis' in inc)) cur.analysis = null;
         Object.assign(cur, inc);
       }
       /* This page is the newest slice of the archive (or all of it when there

@@ -155,10 +155,46 @@ def test_returned_keys_are_exactly_this_set(server):
         "size",
         "size_mb",
         "thumbnails",
+        "thumbnail",
         "fps",
         "global_settings",
         "unfinished",
     }
+
+
+# --------------------------------------------------------------------------
+# the poster: the same pick the archive card makes
+# --------------------------------------------------------------------------
+
+
+def test_the_poster_is_the_clips_own_species_key_frame(server):
+    """The clip page reads ``clip.thumbnail`` for the player's poster, and this
+    payload never carried one, so there was none until play. The first track
+    is often a generic fragment or another visitor; the card prefers the first
+    key frame labelled with the clip's species, and so does this."""
+    clip = write_clip(server, CARDINAL_CLIP)
+    write_thumb(clip, "animal_t0")
+    write_thumb(clip, "cardinalidae_t1")
+
+    detail = server._get_clip_detail(CARDINAL_CLIP)
+
+    assert detail["thumbnail"] == next(
+        t["url"] for t in detail["thumbnails"] if t["species"] == "Cardinal")
+
+
+def test_the_poster_falls_back_to_the_first_key_frame(server):
+    clip = write_clip(server, CARDINAL_CLIP)
+    write_thumb(clip, "animal_t0")
+
+    detail = server._get_clip_detail(CARDINAL_CLIP)
+
+    assert detail["thumbnail"] == detail["thumbnails"][0]["url"]
+
+
+def test_no_key_frames_means_no_poster_not_an_error(server):
+    write_clip(server, CARDINAL_CLIP)
+
+    assert server._get_clip_detail(CARDINAL_CLIP)["thumbnail"] is None
 
 
 def test_species_is_display_string_and_raw_species_is_taxonomy(server):

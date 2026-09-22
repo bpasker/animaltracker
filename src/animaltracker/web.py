@@ -2610,6 +2610,10 @@ class WebServer:
             'size': stat.st_size,
             'size_mb': stat.st_size / (1024 * 1024),
             'thumbnails': thumbnails,
+            # The same choice the archive card makes, so the player has a
+            # poster. The page read ``clip.thumbnail`` and this payload
+            # never carried one, so there was none until play.
+            'thumbnail': primary_thumbnail({'species': species_display, 'thumbnails': thumbnails}),
             'fps': video_fps,
             'global_settings': global_settings,
             'unfinished': is_unclassified_clip(clip_path) and not has_analysis_sidecar(clip_path),

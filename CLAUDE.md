@@ -58,6 +58,12 @@ The system uses a two-stage detection approach:
   The live `ObjectTracker` is ticked through `_tick_live_tracker`, which
   forgets tracks ByteTrack has given up on, but only between events.
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
+  Every forward pass runs under `self.model_lock`, which is the instance's
+  own lock plus the process-wide `MODEL_LOAD_GATE` held shared; every model
+  build (the three constructors) holds the gate alone, because unpickling
+  SpeciesNet's classifier traces a `torch.fx` GraphModule and the tracer
+  patches `torch.nn.Module.__call__` process-wide while it runs. A new
+  backend must do both, and must never load a model from inside a forward.
 - `tracker.py` - ByteTrack object tracking with persistent IDs
 - `postprocess.py` - Clip post-analysis, track merging, species finalization
   The clip is renamed LAST: key frames and the sidecar are written under the

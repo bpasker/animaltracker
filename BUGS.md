@@ -250,9 +250,17 @@ slows from ~170 ms to ~330 ms per frame while a job runs.
 
 ---
 
-## 5. SpeciesNet load races real-time inference through a torch.fx trace
+## 5. SpeciesNet load races real-time inference through a torch.fx trace (fixed 2026-09-21)
 
-**Status:** open — seen 2026-09-14 06:34:55 on the first clip after a restart
+**Status:** fixed — `ModelLoadGate` in `detector.py`. Forward passes hold
+the gate shared (through `BaseDetector.model_lock`, which every backend's
+forward already ran under), a model build holds it alone, and a waiting
+build blocks new forwards so three cameras cannot starve it. The weights
+are resolved (`ModelInfo`, the download) before the gate is taken. The
+race is reproduced with plain torch in `tests/test_model_load_gate.py`.
+Cost: live detection pauses for the length of the SpeciesNet load, a few
+seconds, once per process, in place of one lost frame and a traceback.
+First seen 2026-09-14 06:34:55 on the first clip after a restart
 **Area:** `src/animaltracker/pipeline.py` (`_get_postprocess_detector`),
 `src/animaltracker/detector.py`
 

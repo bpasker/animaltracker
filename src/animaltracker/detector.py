@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -83,6 +84,119 @@ def _is_edge_anchored_elongated_bbox(bbox: List[float], frame_shape) -> bool:
     return touches_edge and aspect_ratio >= 4.0 and long_side_fraction >= 0.40
 
 
+class ModelLoadGate:
+    """No forward pass runs while a model is being loaded, in this process.
+
+    ``torch.load`` of SpeciesNet's classifier unpickles a ``torch.fx``
+    GraphModule, and torch rebuilds one by tracing it, which patches
+    ``torch.nn.Module.__call__`` process-wide for as long as the trace runs.
+    A MegaDetector forward on another thread during that window fails inside
+    the tracer with "module is not installed as a submodule" (BUGS.md item
+    5): one frame lost and a traceback on the first clip after every
+    restart, since the recovery sweep loads the post-process detector about
+    90 s in. The per-instance ``model_lock`` cannot help; the load belongs
+    to a different instance.
+
+    Forward passes hold the gate shared, a load holds it alone. A load
+    waits for the passes in flight and blocks new ones until it is done,
+    so it cannot be starved by three cameras taking turns; they pause for
+    the load, a few seconds once per process.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._forwards = 0
+        self._loading = False
+        self._loads_waiting = 0
+
+    def begin_forward(self) -> None:
+        with self._cv:
+            while self._loading or self._loads_waiting:
+                self._cv.wait()
+            self._forwards += 1
+
+    def end_forward(self) -> None:
+        with self._cv:
+            self._forwards -= 1
+            if self._forwards == 0:
+                self._cv.notify_all()
+
+    @contextmanager
+    def loading(self):
+        with self._cv:
+            self._loads_waiting += 1
+            try:
+                while self._loading or self._forwards:
+                    self._cv.wait()
+            finally:
+                self._loads_waiting -= 1
+            self._loading = True
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._loading = False
+                self._cv.notify_all()
+
+    @property
+    def forwards_in_flight(self) -> int:
+        return self._forwards
+
+    @property
+    def loading_now(self) -> bool:
+        return self._loading
+
+
+MODEL_LOAD_GATE = ModelLoadGate()
+
+
+def _resolve_model_files(model_name: str) -> None:
+    """Download (or find in the cache) a SpeciesNet model before loading it.
+
+    The library's ``ModelInfo`` fetches the weights on first use, and the
+    constructors call it on their own; calling it here first moves a
+    first-run download, minutes on a fresh host, out from under the load
+    gate, where it would have paused every camera's detection.
+    """
+    try:
+        from speciesnet.utils import ModelInfo  # type: ignore
+    except ImportError:
+        return
+    try:
+        ModelInfo(model_name)
+    except Exception as err:  # noqa: BLE001 - the constructor reports the real failure
+        LOGGER.debug("Could not resolve %s ahead of loading: %s", model_name, err)
+
+
+class _ForwardGuard:
+    """What ``BaseDetector.model_lock`` hands out: the process-wide load gate
+    (shared) and then the instance's own lock, released in reverse.
+
+    One guard per detector, entered by several threads at once, so it keeps
+    nothing per entry: the gate is a counter and the instance lock is looked
+    up each time (a test may swap it out).
+    """
+
+    def __init__(self, detector: "BaseDetector") -> None:
+        self._detector = detector
+
+    def __enter__(self):
+        MODEL_LOAD_GATE.begin_forward()
+        try:
+            self._detector._instance_lock().__enter__()
+        except BaseException:
+            MODEL_LOAD_GATE.end_forward()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self._detector._instance_lock().__exit__(exc_type, exc, tb)
+        finally:
+            MODEL_LOAD_GATE.end_forward()
+        return False
+
+
 class BaseDetector(ABC):
     """Abstract base class for detection backends."""
 
@@ -90,24 +204,37 @@ class BaseDetector(ABC):
     _lock_guard = threading.Lock()
 
     @property
-    def model_lock(self) -> threading.Lock:
-        """The lock every forward pass of this instance runs under.
+    def model_lock(self) -> "_ForwardGuard":
+        """What every forward pass of this instance runs under.
 
-        One detector instance is shared by every camera worker, and the
-        workers call ``infer`` from executor threads at the same time. The
-        YOLOv5 head inside MegaDetector caches its anchor grid per input
-        shape and rebuilds it when the shape changes, so two concurrent
-        calls with differently shaped frames (a 4:3 camera next to a 16:9
-        one letterbox to different heights) corrupt each other's forward
-        pass with "The size of tensor a (96) must match the size of tensor
-        b (120)". Ultralytics YOLO objects are not thread-safe either. The
-        GPU runs one kernel stream at a time anyway, so serialising the
-        forward pass costs little.
+        Two things, entered together: the process-wide ``MODEL_LOAD_GATE``
+        (shared, so no model is being loaded meanwhile) and this instance's
+        own lock. One detector instance is shared by every camera worker,
+        and the workers call ``infer`` from executor threads at the same
+        time. The YOLOv5 head inside MegaDetector caches its anchor grid
+        per input shape and rebuilds it when the shape changes, so two
+        concurrent calls with differently shaped frames (a 4:3 camera next
+        to a 16:9 one letterbox to different heights) corrupt each other's
+        forward pass with "The size of tensor a (96) must match the size of
+        tensor b (120)". Ultralytics YOLO objects are not thread-safe
+        either. The GPU runs one kernel stream at a time anyway, so
+        serialising the forward pass costs little.
 
         Created lazily so it exists for instances built without their
         constructor (tests, ``object.__new__``) and for subclasses that do
-        not call ``super().__init__``.
+        not call ``super().__init__``. The bare instance lock is
+        ``_instance_lock()``, under ``_model_lock`` in ``__dict__``.
         """
+        guard = self.__dict__.get("_forward_guard")
+        if guard is None:
+            with BaseDetector._lock_guard:
+                guard = self.__dict__.get("_forward_guard")
+                if guard is None:
+                    guard = _ForwardGuard(self)
+                    self.__dict__["_forward_guard"] = guard
+        return guard
+
+    def _instance_lock(self) -> threading.Lock:
         lock = self.__dict__.get("_model_lock")
         if lock is None:
             with BaseDetector._lock_guard:
@@ -189,7 +316,8 @@ class YoloDetector(BaseDetector):
                 "Ultralytics YOLO not installed - run: pip install ultralytics"
             )
         
-        self.model = YOLO(model_path)
+        with MODEL_LOAD_GATE.loading():   # see ModelLoadGate
+            self.model = YOLO(model_path)
         self.class_map = class_map or self.model.names
         self.animal_only = animal_only
         LOGGER.info(f"Loaded YOLO model from {model_path} (animal_only={animal_only})")
@@ -309,7 +437,9 @@ class MegaDetectorBackend(BaseDetector):
         # model registry under the hood the first time).
         LOGGER.info(f"Loading MegaDetector (SpeciesNet {model_version} detect-only, in-memory)...")
         model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
-        self._detector = _SNDetector(model_name)
+        _resolve_model_files(model_name)
+        with MODEL_LOAD_GATE.loading():   # see ModelLoadGate
+            self._detector = _SNDetector(model_name)
         LOGGER.info(
             "MegaDetector loaded on %s (in-memory inference path)",
             getattr(self._detector, "device", "?"),
@@ -668,7 +798,11 @@ class SpeciesNetDetector(BaseDetector):
         # Initialize SpeciesNet model (downloads weights automatically from Kaggle)
         LOGGER.info(f"Loading SpeciesNet {model_version}...")
         model_name = f"kaggle:google/speciesnet/pyTorch/{model_version}/1"
-        self._model = SpeciesNet(model_name)
+        _resolve_model_files(model_name)
+        # Under the gate: unpickling the classifier traces a GraphModule,
+        # which breaks any forward pass running meanwhile (ModelLoadGate).
+        with MODEL_LOAD_GATE.loading():
+            self._model = SpeciesNet(model_name)
 
         # Bind the individual components. SpeciesNet(multiprocessing=False)
         # exposes them as plain attributes. Fail here at startup if a future

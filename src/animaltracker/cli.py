@@ -73,49 +73,69 @@ def cmd_run(args: argparse.Namespace) -> None:
     asyncio.run(orchestrator.run())
 
 
-def cmd_discover(args: argparse.Namespace) -> None:
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Report each camera's ONVIF status and profiles; 1 if any camera failed.
+
+    A camera without an ``onvif:`` block is skipped with a note (every
+    production camera lacks one, and this used to die on the first with an
+    AttributeError), and one camera that does not answer does not stop the
+    others from being reported.
+    """
     _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
+    failed = 0
     for camera in runtime.cameras:
+        if camera.onvif is None:
+            LOGGER.info("Camera %s has no onvif: block; skipped", camera.id)
+            continue
         username, password = camera.onvif.credentials()
         if not username or not password:
             LOGGER.warning("Camera %s missing ONVIF credentials", camera.id)
             continue
-        client = OnvifClient(camera.onvif.host, camera.onvif.port, username, password)
-        status = client.get_status()
-        profiles = client.get_profiles()
-        LOGGER.info(
-            "Camera %s (%s) -> %s | Profiles: %d",
-            camera.id,
-            camera.name,
-            status,
-            len(profiles),
-        )
-        if args.inspect:
-            for profile in profiles:
-                LOGGER.info("- %s", profile)
-        
-        # List PTZ presets if requested
-        if args.presets:
-            LOGGER.info("\nPTZ Presets for %s:", camera.id)
-            for profile in profiles:
-                token = profile.metadata.get('token')
-                if token:
-                    try:
-                        presets = client.ptz_get_presets(token)
-                        if presets:
-                            LOGGER.info("  Profile '%s' presets:", token)
-                            for p in presets:
-                                pos_str = ""
-                                if 'pan' in p:
-                                    pos_str = f" (pan={p['pan']:.2f}, tilt={p['tilt']:.2f})"
-                                LOGGER.info("    - Token: '%s', Name: '%s'%s", 
-                                           p.get('token', '?'), p.get('name', '?'), pos_str)
-                    except Exception as e:
-                        LOGGER.debug("Could not get presets for %s: %s", token, e)
+        try:
+            _discover_one(camera, username, password, args)
+        except Exception as e:  # noqa: BLE001 - report and move on to the next camera
+            failed += 1
+            LOGGER.error("Camera %s (%s:%s): %s", camera.id, camera.onvif.host, camera.onvif.port, e)
+    return 1 if failed else 0
 
 
-def cmd_ptz_test(args: argparse.Namespace) -> None:
+def _discover_one(camera, username: str, password: str, args: argparse.Namespace) -> None:
+    client = OnvifClient(camera.onvif.host, camera.onvif.port, username, password)
+    status = client.get_status()
+    profiles = client.get_profiles()
+    LOGGER.info(
+        "Camera %s (%s) -> %s | Profiles: %d",
+        camera.id,
+        camera.name,
+        status,
+        len(profiles),
+    )
+    if args.inspect:
+        for profile in profiles:
+            LOGGER.info("- %s", profile)
+    
+    # List PTZ presets if requested
+    if args.presets:
+        LOGGER.info("\nPTZ Presets for %s:", camera.id)
+        for profile in profiles:
+            token = profile.metadata.get('token')
+            if token:
+                try:
+                    presets = client.ptz_get_presets(token)
+                    if presets:
+                        LOGGER.info("  Profile '%s' presets:", token)
+                        for p in presets:
+                            pos_str = ""
+                            if 'pan' in p:
+                                pos_str = f" (pan={p['pan']:.2f}, tilt={p['tilt']:.2f})"
+                            LOGGER.info("    - Token: '%s', Name: '%s'%s", 
+                                       p.get('token', '?'), p.get('name', '?'), pos_str)
+                except Exception as e:
+                    LOGGER.debug("Could not get presets for %s: %s", token, e)
+
+
+def cmd_ptz_test(args: argparse.Namespace) -> int:
     """Test PTZ capabilities and find working profile."""
     _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
@@ -129,12 +149,15 @@ def cmd_ptz_test(args: argparse.Namespace) -> None:
     
     if not camera:
         LOGGER.error("Camera %s not found in config", camera_id)
-        return
+        return 1
+    if camera.onvif is None:
+        LOGGER.error("Camera %s has no onvif: block; PTZ needs one", camera_id)
+        return 1
     
     username, password = camera.onvif.credentials()
     if not username or not password:
         LOGGER.error("Camera %s missing ONVIF credentials", camera_id)
-        return
+        return 1
     
     client = OnvifClient(camera.onvif.host, camera.onvif.port, username, password)
     
@@ -254,7 +277,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_zoom_calibrate(args: argparse.Namespace) -> None:
+def cmd_zoom_calibrate(args: argparse.Namespace) -> int:
     """Calibrate zoom FOV mapping between wide and zoom cameras."""
     import json
     import cv2
@@ -278,13 +301,16 @@ def cmd_zoom_calibrate(args: argparse.Namespace) -> None:
         return
     if not zoom_cam:
         LOGGER.error("Zoom camera %s not found in config", args.zoom_camera)
-        return
+        return 1
+    if zoom_cam.onvif is None:
+        LOGGER.error("Zoom camera %s has no onvif: block; zoom calibration needs one", args.zoom_camera)
+        return 1
 
     # Get ONVIF client for zoom camera
     username, password = zoom_cam.onvif.credentials()
     if not username or not password:
         LOGGER.error("Zoom camera %s missing ONVIF credentials", args.zoom_camera)
-        return
+        return 1
 
     onvif_client = OnvifClient(zoom_cam.onvif.host, zoom_cam.onvif.port, username, password)
 

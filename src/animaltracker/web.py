@@ -48,6 +48,16 @@ def clip_start_time(clip_file: Path, stat) -> datetime:
     return datetime.fromtimestamp(stat.st_mtime, tz=CENTRAL_TZ)
 
 
+def _query_int(raw, default: int, low: int, high: int) -> int:
+    """An integer query parameter, clamped to [low, high]; the default when
+    it is absent or not a number."""
+    try:
+        value = int(str(raw).strip()) if raw is not None and str(raw).strip() != "" else default
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(high, value))
+
+
 def primary_thumbnail(clip: dict):
     """URL of the thumbnail that shows what the card says.
 
@@ -2848,10 +2858,13 @@ class WebServer:
 
         # Get query params
         camera_id = request.query.get('camera', None)
-        minutes = int(request.query.get('minutes', 30))
+        # Bounded and forgiving: a non-integer used to be a 500, and limit=0
+        # returned everything the fetch cap allowed (logs[-0:] is the whole
+        # list).
+        minutes = _query_int(request.query.get('minutes'), default=30, low=1, high=7 * 24 * 60)
         level = request.query.get('level', 'all')  # all, error, warning
         log_type = request.query.get('type', 'all')  # all, no-http, detection, tracking, events, clips, errors
-        limit = min(int(request.query.get('limit', 200)), 2000)  # Cap at 2000 to prevent memory issues
+        limit = _query_int(request.query.get('limit'), default=200, low=1, high=2000)
 
         # Custom time range support (overrides minutes if provided)
         start_time = request.query.get('start', None)  # ISO format: 2026-01-17T10:00

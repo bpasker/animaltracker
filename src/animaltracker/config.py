@@ -347,6 +347,18 @@ class RuntimeConfig(BaseModel):
     general: GeneralSettings
     cameras: List[CameraConfig]
 
+    @field_validator("cameras")
+    @classmethod
+    def _unique_camera_ids(cls, value: List[CameraConfig]) -> List[CameraConfig]:
+        """Two cameras with one id validated, and then everything keyed by id
+        (the pipeline's workers, the settings page's save) silently kept one."""
+        seen = set()
+        for cam in value:
+            if cam.id in seen:
+                raise ValueError(f"camera id '{cam.id}' is used more than once")
+            seen.add(cam.id)
+        return value
+
     def camera_by_id(self, camera_id: str) -> CameraConfig:
         for cam in self.cameras:
             if cam.id == camera_id:

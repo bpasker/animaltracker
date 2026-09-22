@@ -850,12 +850,17 @@ class StreamWorker:
                     # mid-postprocess sidecars.
                     if self.event_state is not None:
                         if self.event_state.clip_writer is None:
+                            # The seed is the buffer, and this frame was just
+                            # pushed into it: it is already queued. Writing
+                            # it again put a duplicate at the seam of every
+                            # clip, one frame of stutter per event.
                             self.event_state.clip_writer = self._open_event_writer(
                                 self.event_state.start_ts
                             )
-                        # cap.read() returns a fresh ndarray each call, so
-                        # writing by reference is safe -- no copy needed.
-                        self.event_state.clip_writer.write(frame)
+                        else:
+                            # cap.read() returns a fresh ndarray each call, so
+                            # writing by reference is safe -- no copy needed.
+                            self.event_state.clip_writer.write(frame)
 
                         # Force-close events that exceed max duration (prevents memory leak)
                         max_duration = self.runtime.general.clip.max_event_seconds

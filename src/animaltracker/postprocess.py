@@ -2219,7 +2219,8 @@ def process_all_clips(
     camera_filter: Optional[List[str]] = None,
     update_filenames: bool = True,
     regenerate_thumbnails: bool = True,
-    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    sample_rate: Optional[int] = None,
+    settings: Optional[ProcessingSettings] = None,
 ) -> List[PostProcessResult]:
     """Process all clips in storage to improve classifications.
     
@@ -2229,7 +2230,9 @@ def process_all_clips(
         camera_filter: Only process clips from these cameras (None = all)
         update_filenames: Whether to rename files when species changes
         regenerate_thumbnails: Whether to regenerate detection thumbnails
-        sample_rate: Analyze every Nth frame
+        sample_rate: Analyze every Nth frame; overrides ``settings`` when given
+        settings: The post-processor settings, as ``build_processing_settings``
+            makes them from the configuration; the defaults when None
         
     Returns:
         List of PostProcessResult for each clip processed
@@ -2242,6 +2245,7 @@ def process_all_clips(
     processor = ClipPostProcessor(
         detector=detector,
         storage_root=storage_root,
+        settings=settings,
         sample_rate=sample_rate,
     )
     

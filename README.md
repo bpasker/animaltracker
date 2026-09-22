@@ -549,7 +549,7 @@ python -m animaltracker.cli --config config/cameras.yml reprocess --no-rename
 |--------|-------------|
 | `--camera CAM_ID` | Only reprocess clips from this camera |
 | `--clip PATH` | Reprocess a single clip file |
-| `--sample-rate N` | Analyze every Nth frame (default=5, lower=more thorough) |
+| `--sample-rate N` | Analyze every Nth frame (default: `clip.sample_rate` from the config; lower=more thorough) |
 | `--no-rename` | Don't rename files even if species changes |
 | `--no-thumbnails` | Don't regenerate detection thumbnails |
 

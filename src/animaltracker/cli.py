@@ -422,26 +422,42 @@ def cmd_zoom_calibrate(args: argparse.Namespace) -> int:
 
 
 def cmd_reprocess(args: argparse.Namespace) -> None:
-    """Reprocess clips to improve species classifications."""
-    from .detector import create_detector
-    from .postprocess import process_all_clips, ClipPostProcessor
+    """Reprocess clips to improve species classifications.
+
+    The same detector and the same settings the running pipeline uses for
+    a live event or a reanalysis from the clip page: ``postprocess_backend``
+    (it used to read the legacy ``backend`` key, which agrees with it on
+    production only by coincidence) and ``general.clip`` (it used to take
+    the defaults, so the same clip came out differently here than from the
+    web). ``--sample-rate`` and ``--model`` override the configuration.
+
+    This is a second process with its own copy of the model. Beside the
+    running service it competes for the GPU, and neither knows what the
+    other is analysing; prefer the archive's Reanalyze for a few clips.
+    """
+    from .detector import create_detector, create_postprocess_detector
+    from .postprocess import process_all_clips, ClipPostProcessor, build_processing_settings
     
     _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
     
-    # Create detector
     detector_cfg = runtime.general.detector
-    detector = create_detector(
-        backend=detector_cfg.backend,
-        model_path=args.model or detector_cfg.model_path,
-        model_version=detector_cfg.speciesnet_version,
-        country=detector_cfg.country,
-        admin1_region=detector_cfg.admin1_region,
-        latitude=detector_cfg.latitude,
-        longitude=detector_cfg.longitude,
-        generic_confidence=detector_cfg.generic_confidence,
-    )
+    if args.model:
+        detector = create_detector(
+            backend=detector_cfg.postprocess_backend or detector_cfg.backend,
+            model_path=args.model,
+            model_version=detector_cfg.speciesnet_version,
+            country=detector_cfg.country,
+            admin1_region=detector_cfg.admin1_region,
+            latitude=detector_cfg.latitude,
+            longitude=detector_cfg.longitude,
+            generic_confidence=detector_cfg.generic_confidence,
+        )
+    else:
+        detector = create_postprocess_detector(detector_cfg)
     LOGGER.info("Using %s detector for reprocessing", detector.backend_name)
+    overrides = {'sample_rate': args.sample_rate} if args.sample_rate is not None else None
+    settings = build_processing_settings(runtime.general.clip, overrides)
     
     storage_root = Path(runtime.general.storage_root)
     
@@ -461,7 +477,7 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
         processor = ClipPostProcessor(
             detector=detector,
             storage_root=storage_root,
-            sample_rate=args.sample_rate,
+            settings=settings,
         )
         
         result = processor.process_clip(
@@ -492,7 +508,7 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
             camera_filter=args.camera if args.camera else None,
             update_filenames=not args.no_rename,
             regenerate_thumbnails=not args.no_thumbnails,
-            sample_rate=args.sample_rate,
+            settings=settings,
         )
         
         # Print summary
@@ -571,8 +587,8 @@ def build_parser() -> argparse.ArgumentParser:
     reprocess_cmd.add_argument(
         "--sample-rate",
         type=int,
-        default=5,
-        help="Analyze every Nth frame (default=5, lower=more thorough but slower)",
+        default=None,
+        help="Analyze every Nth frame (default: clip.sample_rate from the config; lower=more thorough but slower)",
     )
     reprocess_cmd.add_argument(
         "--no-rename",

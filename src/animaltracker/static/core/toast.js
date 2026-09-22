@@ -186,10 +186,19 @@ export function toast(message, opts) {
   ensureHost().appendChild(el);
   live.push(entry);
   /* A fourth toast collapses the oldest — but never one holding a deadline
-     the user has not seen out. */
+     the user has not seen out. The loop used to dismiss live[0] with
+     fireExpire set, which ran the oldest undo toast's onExpire on the
+     spot: delete four clips quickly and the first was gone with its Undo
+     still promised. A toast with a pending deadline keeps its place; the
+     oldest one without it makes room, and if every one is waiting on the
+     user, the strip grows instead. */
   while (live.length > MAX_VISIBLE) {
-    var oldest = live[0];
-    dismiss(oldest, true);
+    var evict = null;
+    for (var k = 0; k < live.length - 1; k++) {
+      if (!live[k].onExpire) { evict = live[k]; break; }
+    }
+    if (!evict) break;
+    dismiss(evict, false);
   }
 
   startTimer(entry, timeout);

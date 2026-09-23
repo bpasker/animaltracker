@@ -315,3 +315,19 @@ def test_the_real_run_loop_is_restarted_after_it_dies_mid_read(tmp_path, orchest
 
     assert "the decoder fell over" in caplog.text
     assert "Restarting the worker for cam1" in caplog.text
+
+
+def test_a_restart_forgets_detections_that_had_not_opened_an_event(tmp_path):
+    # Bug hunt, 2026-09-22: pending_detection_* survived a crash (and a
+    # reconnect), so the first detection afterwards found min_duration
+    # already met from a sighting before the gap and opened an event alone.
+    w = object.__new__(StreamWorker)
+    w.camera = SimpleNamespace(id="cam1")
+    w.event_state = None
+    w.pending_detection_start_ts = time.time() - 60
+    w.pending_detection_count = 4
+    w.pending_detection_gap = 2
+
+    asyncio.run(w._recover_after_error())
+
+    assert (w.pending_detection_start_ts, w.pending_detection_count, w.pending_detection_gap) == (None, 0, 0)

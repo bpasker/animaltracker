@@ -831,6 +831,10 @@ class StreamWorker:
 
             self._log_rtsp_connected()
             self.stream_connected = True
+            # Sightings from before the gap say nothing about now: kept, the
+            # first detection after it found min_duration already met and
+            # could open an event on its own.
+            self._reset_pending_detection()
             try:
                 while not stop_event.is_set():
                     # Offload blocking OpenCV read to thread to keep web server responsive
@@ -942,6 +946,7 @@ class StreamWorker:
         recording, if there is one, is recovered at the next startup.
         """
         self.stream_connected = False
+        self._reset_pending_detection()
         if self.event_state is None:
             return
         try:
@@ -957,6 +962,12 @@ class StreamWorker:
                 # a while and the camera should restart now.
                 event.clip_writer = None
                 asyncio.get_running_loop().run_in_executor(None, writer.close)
+
+    def _reset_pending_detection(self) -> None:
+        """Forget a run of detections that has not opened an event yet."""
+        self.pending_detection_start_ts = None
+        self.pending_detection_count = 0
+        self.pending_detection_gap = 0
 
     async def _close_event_left_open_offline(self) -> None:
         """Close an event the stream dropped out from under, once it has gone idle.

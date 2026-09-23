@@ -53,7 +53,7 @@ def _temp(storage: StorageManager, name: str, payload: bytes = b"RIFF....AVI ") 
 
 
 def _fake_transcode(calls: list):
-    """Stand-in with the real contract: write the clip, always drop the AVI."""
+    """Stand-in with the real contract on success: write the clip, drop the AVI."""
     def transcode(temp_avi: Path, output_path: Path) -> bool:
         calls.append((temp_avi.name, output_path))
         # The clip appears last: a test that waits for it on another thread
@@ -161,6 +161,43 @@ def test_a_recording_that_cannot_be_read_yields_no_clip(tmp_path):
     assert storage.recover_orphan_event_temp(orphan, "animal") is None
     assert not orphan.exists()
     assert list((storage.storage_root / "clips").rglob("*.mp4")) == []
+
+
+def _failing_ffmpeg(tmp_path: Path, monkeypatch) -> None:
+    """Put an ffmpeg on PATH that fails the way a full disk makes it fail."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ffmpeg = bin_dir / "ffmpeg"
+    ffmpeg.write_text("#!/bin/sh\necho 'No space left on device' >&2\nexit 1\n")
+    ffmpeg.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+
+
+def test_a_failed_transcode_keeps_the_recording(tmp_path, monkeypatch):
+    # The AVI is the event's only copy until the MP4 exists. A transcode
+    # that fails for a passing reason (ENOSPC, the NFS archive away) used to
+    # delete it all the same.
+    _failing_ffmpeg(tmp_path, monkeypatch)
+    storage = _storage(tmp_path)
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    clip = storage.build_clip_path("cam1", "animal", EVENT_TS)
+
+    assert storage.transcode_avi_to_mp4(recording, clip) is False
+
+    assert recording.exists()
+    assert not clip.exists()
+    assert not clip.with_suffix(".tmp.mp4").exists()
+
+
+def test_an_orphan_that_fails_to_transcode_waits_for_the_next_startup(tmp_path, monkeypatch):
+    _failing_ffmpeg(tmp_path, monkeypatch)
+    storage = _storage(tmp_path)
+    orphan = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+
+    assert storage.recover_orphan_event_temp(orphan, RECOVERED_CLIP_LABEL) is None
+
+    assert orphan.exists()
+    assert storage.list_orphan_event_temps() == [orphan]
 
 
 def test_a_real_recording_is_transcoded_end_to_end(tmp_path):

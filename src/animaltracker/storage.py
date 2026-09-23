@@ -534,7 +534,8 @@ class StorageManager:
         Returns the new clip, or None when there is nothing to save: the
         name is not ours, the file is empty, the event's clip already exists
         (the old process died between the rename and the unlink) or the
-        recording cannot be read. The temp file is gone either way.
+        recording cannot be read. A recording that could not be transcoded
+        is kept for the next startup; every other outcome removes it.
         """
         match = _EVENT_TEMP_RE.match(temp_avi.name)
         if match is None:
@@ -573,7 +574,10 @@ class StorageManager:
 
         Counterpart to ``StreamingClipWriter``; the AVI is written
         frame-by-frame in the streaming loop, then this is invoked once at
-        event close. Always deletes the temp AVI on the way out.
+        event close. The AVI is deleted once the MP4 is in place, and kept
+        when the transcode fails: until then it is the event's only copy,
+        and the failure is often passing (a full disk, the NFS archive
+        briefly away). The next startup's orphan recovery tries it again.
 
         Returns True on success.
         """
@@ -644,16 +648,22 @@ class StorageManager:
                         LOGGER.info("Saved clip %s (fallback encoding)", output_path)
                         ok = True
         finally:
-            try:
-                if temp_avi.exists():
-                    temp_avi.unlink()
-            except OSError as e:
-                LOGGER.warning("Failed to remove temp AVI %s: %s", temp_avi, e)
-            if not ok and tmp_mp4.exists():
+            if ok:
                 try:
-                    tmp_mp4.unlink()
-                except OSError:
-                    pass
+                    if temp_avi.exists():
+                        temp_avi.unlink()
+                except OSError as e:
+                    LOGGER.warning("Failed to remove temp AVI %s: %s", temp_avi, e)
+            else:
+                LOGGER.warning(
+                    "Keeping the recording %s: its clip was not saved; the next "
+                    "startup will try again", temp_avi,
+                )
+                if tmp_mp4.exists():
+                    try:
+                        tmp_mp4.unlink()
+                    except OSError:
+                        pass
         return ok
 
     def write_clip(self, frames: List, output_path: Path, fps: float = 15) -> bool:

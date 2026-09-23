@@ -59,3 +59,19 @@ def test_the_stage_obeys_the_flag_that_hides_the_controls():
     # 'no-route' is a CSS class, never a card.state: testing for it guarded nothing.
     assert "card.state === 'no-route'" not in LIVE
     assert "card.state === 'offline'" not in stage
+
+
+def test_frame_a_box_zoom_step_is_dropped_by_a_stop():
+    # Bug hunt, 2026-09-22: the zoom step ran on a bare later() the stop net
+    # could not see, so Escape did not cancel it, and when it fired, pulse()
+    # called stopAllMotion() and ended a jog the operator was holding.
+    frame = body_of("frameBox")
+    assert "card.queuedPulse = later(" in frame
+    flush = body_of("flushPulse")
+    assert "cancel(card.queuedPulse)" in flush
+    assert flush.index("cancel(card.queuedPulse)") < flush.index("if (card.pulseTimer === null")
+
+
+def test_a_new_jog_ends_a_pulse_first():
+    # A centring pulse still counting down sent its Stop mid-jog.
+    assert "stopAllMotion();" in body_of("startJog")

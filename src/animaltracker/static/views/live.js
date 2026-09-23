@@ -435,7 +435,9 @@ function speedFactor(fine) {
  */
 function startJog(card, vec, btn, fine) {
   if (card.controlDown) return;
-  stopJog();
+  /* Pulses too: one still counting down would send its Stop in the middle
+     of this jog. */
+  stopAllMotion();
   var f = speedFactor(fine);
   var v = {
     pan: clamp((vec.pan || 0) * f, -1, 1),
@@ -476,9 +478,15 @@ function pulse(card, vec, ms) {
   }, ms || PULSE_MS);
 }
 
-/** End a pulse now: drop its timer and send the stop it was going to send. */
+/** End a pulse now: drop its timer and send the stop it was going to send.
+    A pulse queued to start later (frame-a-box's zoom step) is dropped too. */
 function flushPulse(card) {
-  if (!card || card.pulseTimer === null || card.pulseTimer === undefined) return;
+  if (!card) return;
+  if (card.queuedPulse !== null && card.queuedPulse !== undefined) {
+    cancel(card.queuedPulse);
+    card.queuedPulse = null;
+  }
+  if (card.pulseTimer === null || card.pulseTimer === undefined) return;
   cancel(card.pulseTimer);
   card.pulseTimer = null;
   if (card.stageEl) card.stageEl.classList.remove('is-jogging');
@@ -517,6 +525,7 @@ function buildCard(cam) {
     retryTimer: null,
     stallTimer: null,
     pulseTimer: null,
+    queuedPulse: null,
     faultCause: '',
     state: 'unknown',
     frameAge: null,
@@ -1159,7 +1168,11 @@ function frameBox(card, box) {
   var fill = Math.max(box.w, box.h);
   if (fill >= 0.85) return;
   var amount = clamp(1 - fill, 0.15, 1);
-  later(function () {
+  /* Kept on the card so stopAllMotion (Escape, blur, a new jog) drops it:
+     otherwise it zoomed a second later anyway and, through pulse(), ended
+     whatever jog the operator had started meanwhile. */
+  card.queuedPulse = later(function () {
+    card.queuedPulse = null;
     pulse(card, { pan: 0, tilt: 0, zoom: clamp(speedFactor(), 0.2, 1) },
       Math.round(300 + amount * 900));
   }, 950);

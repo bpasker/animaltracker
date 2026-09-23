@@ -123,7 +123,11 @@ def test_a_name_without_an_epoch_falls_back_to_the_file(tmp_path):
     stamp = NOW - 200 * DAY
     os.utime(manual, (stamp, stamp))
 
-    assert st.prune_clips(max_days=120, min_days=7, dry_run=False).deleted == [manual]
+    report = st.prune_clips(max_days=120, min_days=7, dry_run=False)
+    assert report.deleted == [manual]
+    # Counted from the clips root: it used to be filed under whatever folder
+    # sat four levels up (the checkout's name on production).
+    assert report.by_camera == {"manual": 1}
 
 
 # --- the floor ----------------------------------------------------------------------

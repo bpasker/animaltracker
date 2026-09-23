@@ -231,9 +231,12 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "-"
 
     lead = "[dry-run] would remove" if report.dry_run else "Removed"
+    # report.deleted also lists interrupted recordings, which are reported on
+    # their own below and are not among the clips examined.
+    clips_removed = len(report.deleted) - report.interrupted_removed
     LOGGER.info(
         "%s %d of %d clip(s), %d file(s), %.2f GB — keeping at most %d days, at least %d days",
-        lead, len(report.deleted), report.examined, report.files_removed,
+        lead, clips_removed, report.examined, report.files_removed,
         report.freed_bytes / 1_073_741_824, retention.max_days, retention.min_days,
     )
     if report.deleted:

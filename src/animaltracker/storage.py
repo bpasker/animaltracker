@@ -1071,6 +1071,8 @@ class StorageManager:
                 used_pct = self._utilization_pct(assumed_freed(), baseline=disk_before)
                 if used_pct is None or used_pct <= max_utilization_pct:
                     break
+                if clip in interrupted:
+                    report.interrupted_removed += 1
                 self._prune_one(clip, started, size, report, dry_run,
                                 "disk at %.0f%%, ceiling %d%%" % (used_pct, max_utilization_pct))
             report.utilization_pct = self._utilization_pct(assumed_freed(), baseline=disk_before)
@@ -1100,7 +1102,14 @@ class StorageManager:
         report.deleted_set.add(clip)
         report.freed_bytes += freed
         report.files_removed += len(files)
-        camera = clip.parent.parts[-4] if len(clip.parent.parts) >= 4 else "manual"
+        # clips/<camera>/<YYYY>/<MM>/<DD>/<file>; a manual clip sits in clips/
+        # itself. Counted from the clips root: four levels up from the end
+        # named some folder above it for a manual clip ("animaltracker").
+        try:
+            rel = clip.relative_to(self.storage_root / "clips")
+        except ValueError:
+            rel = Path(clip.name)
+        camera = rel.parts[0] if len(rel.parts) > 1 else "manual"
         report.by_camera[camera] = report.by_camera.get(camera, 0) + 1
         if report.oldest is None or started < report.oldest:
             report.oldest = started

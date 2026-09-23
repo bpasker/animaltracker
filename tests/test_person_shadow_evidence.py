@@ -17,6 +17,7 @@ as its key frames.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -190,6 +191,7 @@ def closing_worker(tmp_path: Path, detector):
     )
     notifier = FakeNotifier()
     worker = object.__new__(StreamWorker)
+    worker._tracker_lock = threading.Lock()
     worker.camera = camera
     worker.runtime = SimpleNamespace(general=SimpleNamespace(
         clip=SimpleNamespace(pre_seconds=5, post_seconds=5, format="mp4", post_analysis=True,

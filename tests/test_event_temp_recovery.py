@@ -360,6 +360,7 @@ def _closing_worker(storage: StorageManager, temp_avi: Path, notifier: FakeNotif
         unified_post_processing=False,  # the analysis itself is not under test
     )
     worker = object.__new__(StreamWorker)
+    worker._tracker_lock = threading.Lock()
     worker.camera = camera
     worker.runtime = SimpleNamespace(general=SimpleNamespace(
         clip=clip_cfg, detector=SimpleNamespace(), exclusion_list=[],

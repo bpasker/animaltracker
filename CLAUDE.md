@@ -57,6 +57,9 @@ The system uses a two-stage detection approach:
   The web server is deliberately not supervised (a second instance must fail).
   The live `ObjectTracker` is ticked through `_tick_live_tracker`, which
   forgets tracks ByteTrack has given up on, but only between events.
+  `ObjectTracker` is not thread-safe: every use of `self.tracker` holds
+  `_tracker_lock`, because a close forced from the read loop can run while
+  an update is in flight on an executor thread.
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
   Every forward pass runs under `self.model_lock`, which is the instance's
   own lock plus the process-wide `MODEL_LOAD_GATE` held shared; every model

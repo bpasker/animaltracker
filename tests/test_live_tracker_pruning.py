@@ -12,6 +12,7 @@ Then they supplied that event's label and key frames.
 from __future__ import annotations
 
 import gc
+import threading
 import weakref
 from types import SimpleNamespace
 
@@ -116,6 +117,7 @@ def test_the_limit_can_be_given_and_a_reset_starts_the_count_again():
 
 def worker_with(tracker: ObjectTracker, event_open: bool) -> StreamWorker:
     w = object.__new__(StreamWorker)
+    w._tracker_lock = threading.Lock()
     w.camera = SimpleNamespace(id="cam1")
     w.tracker = tracker
     w.event_state = SimpleNamespace() if event_open else None

@@ -10,6 +10,7 @@ straight to whatever was there at reconnection.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,7 @@ def worker_with_open_event(tmp_path: Path, idle_for: float):
     )
     notifier = FakeNotifier()
     w = object.__new__(StreamWorker)
+    w._tracker_lock = threading.Lock()
     w.camera = camera
     w.runtime = SimpleNamespace(general=SimpleNamespace(
         clip=SimpleNamespace(pre_seconds=5, post_seconds=POST_SECONDS, format="mp4", max_event_seconds=300,
@@ -156,3 +158,64 @@ def test_with_no_event_open_there_is_nothing_to_close(tmp_path, dead_camera):
     run_until(worker, lambda: DeadCamera.opened >= 3)
 
     assert notifier.sent == []
+
+
+class SlowTracker:
+    """An ObjectTracker whose update can be held mid-way, logging each call."""
+
+    active_track_count = 1
+
+    def __init__(self) -> None:
+        self.calls: list = []
+        self.inside_update = threading.Event()
+        self.finish_update = threading.Event()
+
+    def update(self, detections, frame, frame_idx):
+        self.calls.append("update-start")
+        self.inside_update.set()
+        self.finish_update.wait(5)
+        self.calls.append("update-end")
+        return detections
+
+    def prune_stale_tracks(self) -> int:
+        return 0
+
+    def get_unique_species(self):
+        self.calls.append("read")
+        return [("animal", 0.9)]
+
+    def get_all_species(self):
+        return {}
+
+    def get_track_species(self, tid):
+        return None, 0.0, None
+
+    def reset(self) -> None:
+        self.calls.append("reset")
+
+
+def test_a_forced_close_waits_for_the_tracker_update_in_flight(tmp_path):
+    # The read loop force-closes an event at max_event_seconds while the
+    # inference task may be inside tracker.update() on an executor thread.
+    # ObjectTracker has no lock of its own, and the close's reads raised
+    # "dictionary changed size during iteration", which restarted the camera.
+    worker, storage, notifier, start = worker_with_open_event(tmp_path, idle_for=1)
+    tracker = SlowTracker()
+    worker.tracker = tracker
+    worker.event_state.tracker = tracker
+
+    update = threading.Thread(target=worker._tick_live_tracker, args=([], None, 1))
+    update.start()
+    try:
+        assert tracker.inside_update.wait(5)
+        closing = threading.Thread(target=lambda: asyncio.run(worker._maybe_close_event(time.time(), force=True)))
+        closing.start()
+        time.sleep(0.2)
+        assert "read" not in tracker.calls          # held back while the update runs
+    finally:
+        tracker.finish_update.set()
+        update.join(5)
+    closing.join(5)
+
+    assert tracker.calls[:2] == ["update-start", "update-end"]
+    assert tracker.calls.index("read") < tracker.calls.index("reset")

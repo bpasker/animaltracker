@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -198,6 +199,7 @@ def worker_with_open_event(tmp_path: Path):
         notification=SimpleNamespace(priority=0, sound=None, destinations=None),
     )
     w = object.__new__(StreamWorker)
+    w._tracker_lock = threading.Lock()
     w.camera = camera
     w.runtime = SimpleNamespace(general=SimpleNamespace(
         clip=SimpleNamespace(pre_seconds=5, post_seconds=5, format="mp4", post_analysis=True,

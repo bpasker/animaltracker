@@ -572,6 +572,10 @@ class StreamWorker:
         self.tracker: Optional[ObjectTracker] = create_tracker(
             enabled=tracking_enabled, frame_rate=15
         )
+        # Held around every update and around the event close's reads and
+        # reset. An update is only ByteTrack bookkeeping (no model), so the
+        # event loop never waits on it for long.
+        self._tracker_lock = threading.Lock()
 
         # Cached post-process detector (lazy initialization to avoid loading if not needed)
         # This prevents creating a new SpeciesNet model for every clip (VRAM leak fix)
@@ -674,13 +678,15 @@ class StreamWorker:
         forgotten. During an event nothing is, so an animal that left earlier
         in the event still counts towards its label. Runs on the executor
         thread that does the update, so the two never touch the track table
-        at once.
+        at once, and under ``_tracker_lock``, which an event close takes too:
+        a close forced from the read loop can run while this is mid-update.
         """
-        result = self.tracker.update(detections, frame, frame_idx)
-        if self.event_state is None:
-            pruned = self.tracker.prune_stale_tracks()
-            if pruned:
-                LOGGER.debug("Forgot %d stale live track(s) for %s", pruned, self.camera.id)
+        with self._tracker_lock:
+            result = self.tracker.update(detections, frame, frame_idx)
+            if self.event_state is None:
+                pruned = self.tracker.prune_stale_tracks()
+                if pruned:
+                    LOGGER.debug("Forgot %d stale live track(s) for %s", pruned, self.camera.id)
         return result
 
     def _save_event_clip(self, temp_avi: Optional[Path], clip_path: Path) -> bool:
@@ -2354,11 +2360,18 @@ class StreamWorker:
                 if not handed_over:
                     release()
 
-        # Use tracked species if available (more accurate than raw detections)
-        tracked_species = self.event_state.get_tracked_species_label()
-        if tracked_species and self.event_state.tracker:
-            LOGGER.info("Tracked species for event: %s (from %d tracked objects)", 
-                       tracked_species, self.event_state.tracker.active_track_count)
+        # Use tracked species if available (more accurate than raw detections).
+        # The tracker is read under ``_tracker_lock``: a close forced from
+        # the read loop (max event length, a crash, the stream gone) runs
+        # while the inference task may be inside ``tracker.update()`` on an
+        # executor thread, and ObjectTracker is not thread-safe.
+        with self._tracker_lock:
+            tracked_species = self.event_state.get_tracked_species_label()
+            if tracked_species and self.event_state.tracker:
+                LOGGER.info("Tracked species for event: %s (from %d tracked objects)",
+                           tracked_species, self.event_state.tracker.active_track_count)
+            # Use tracked key frames if available
+            species_key_frames = self.event_state.get_tracked_key_frames()
         
         ctx_base = {
             'species': tracked_species or self.event_state.species_label,
@@ -2368,9 +2381,7 @@ class StreamWorker:
             'event_started_at': self.event_state.start_ts,
             'event_duration': self.event_state.duration,
         }
-        
-        # Use tracked key frames if available
-        species_key_frames = self.event_state.get_tracked_key_frames()
+
 
         # Detach the event from the stream loop *before* the writer drains.
         # ``close()`` joins the writer thread, so it runs in an executor and
@@ -2393,7 +2404,8 @@ class StreamWorker:
         # drains is not reset out from under itself.
         if self.tracker is not None:
             try:
-                self.tracker.reset()
+                with self._tracker_lock:
+                    self.tracker.reset()
             except Exception as e:
                 LOGGER.debug("tracker.reset failed for %s: %s", self.camera.id, e)
         if self.ptz_tracker is not None and self.ptz_drives_tracking:

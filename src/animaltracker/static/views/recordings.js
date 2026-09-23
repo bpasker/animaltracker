@@ -896,6 +896,13 @@ function followRename(oldPath, newPath) {
   if (S.anchor === oldPath) S.anchor = newPath;
   if (S.focusKey === oldPath) S.focusKey = newPath;
   if (S.pendingDelete.has(oldPath)) { S.pendingDelete.delete(oldPath); S.pendingDelete.add(newPath); }
+  /* The delete itself must follow too: it used to send the old name, the
+     server answered "File not found" (counted as deleted), and the clip
+     stayed on disk under its new name with its card hidden. */
+  S.deleteBatches.forEach(function (batch) {
+    var i = batch.paths.indexOf(oldPath);
+    if (i >= 0) batch.paths[i] = newPath;
+  });
 }
 
 function refreshGrid() {
@@ -1093,6 +1100,10 @@ function deleteSelection() {
   var paths = [];
   S.selected.forEach(function (p) { paths.push(p); });
   if (!paths.length) return;
+  /* A clip can be renamed (its analysis finishing) before the undo window
+     closes; followRename keeps `batch.paths` on the current names. */
+  var batch = { paths: paths };
+  S.deleteBatches.add(batch);
 
   /* Collapse first (the class animates), then mask from the model. */
   paths.forEach(function (p) {
@@ -1106,7 +1117,7 @@ function deleteSelection() {
   setSelectMode(false);
   renderGrid();
   later(function () {
-    paths.forEach(function (p) { S.collapsing.delete(p); });
+    batch.paths.forEach(function (p) { S.collapsing.delete(p); });
     renderGrid();
   }, 200);
 
@@ -1115,7 +1126,9 @@ function deleteSelection() {
 
   function restore() {
     undone = true;
-    paths.forEach(function (p) { S.pendingDelete.delete(p); S.collapsing.delete(p); });
+    if (!S) return;
+    S.deleteBatches.delete(batch);
+    batch.paths.forEach(function (p) { S.pendingDelete.delete(p); S.collapsing.delete(p); });
     S.total = restoreTotal;
     renderGrid();
     S.els.live.textContent = plural(paths.length, 'clip') + ' restored';
@@ -1130,7 +1143,7 @@ function deleteSelection() {
       onUndo: restore,
       onExpire: function () {
         if (undone) return;
-        commitDelete(paths, restoreTotal);
+        commitDelete(batch, restoreTotal);
       }
     }
   });
@@ -1144,7 +1157,8 @@ function deleteSelection() {
   S.intervals.push(tick);
 }
 
-function commitDelete(paths, restoreTotal) {
+function commitDelete(batch, restoreTotal) {
+  var paths = batch.paths.slice();
   api.bulkDelete(paths, {}).then(function (res) {
     /* The server answers per clip, and may refuse some: one that is being
        analysed, one that is already gone. Only what it really deleted leaves
@@ -1164,6 +1178,7 @@ function commitDelete(paths, restoreTotal) {
       });
     }
     if (!S) return;
+    S.deleteBatches.delete(batch);
     /* Success: drop them from the model for good. Refused ones come back. */
     S.clips = S.clips.filter(function (c) { return deleted.indexOf(c.path) < 0; });
     paths.forEach(function (p) { S.pendingDelete.delete(p); S.collapsing.delete(p); });
@@ -1174,12 +1189,13 @@ function commitDelete(paths, restoreTotal) {
   }).catch(function (err) {
     /* Failure returns every card to its exact position. */
     if (S) {
+      S.deleteBatches.delete(batch);
       paths.forEach(function (p) { S.pendingDelete.delete(p); S.collapsing.delete(p); });
       S.total = restoreTotal;
       renderGrid();
     }
     reportError('The server refused to delete those clips', err, function () {
-      commitDelete(paths, restoreTotal);
+      commitDelete(batch, restoreTotal);
     });
   });
 }
@@ -2656,6 +2672,7 @@ export const view = {
       collapsing: new Set(),
       selected: new Set(),
       pendingDelete: new Set(),
+      deleteBatches: new Set(),   /* { paths } of each delete still in its undo window or in flight */
       selectMode: false,
       anchor: null,
       focusKey: null,

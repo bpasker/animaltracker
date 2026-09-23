@@ -60,6 +60,9 @@ The system uses a two-stage detection approach:
   `ObjectTracker` is not thread-safe: every use of `self.tracker` holds
   `_tracker_lock`, because a close forced from the read loop can run while
   an update is in flight on an executor thread.
+  The blur filter (`thresholds.blur_threshold`) only runs on a camera the
+  PTZ tracker moves, within `BLUR_AFTER_MOVE_S` of a move: on a fixed camera
+  it dropped every night infrared frame (Otteson1 never recorded at night).
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
   Every forward pass runs under `self.model_lock`, which is the instance's
   own lock plus the process-wide `MODEL_LOAD_GATE` held shared; every model

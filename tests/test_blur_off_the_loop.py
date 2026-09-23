@@ -1,4 +1,4 @@
-"""The blur check runs on the executor, not on the event loop.
+"""The blur check runs on the executor, not on the event loop, and only after a PTZ move.
 
 Background (bug hunt, 2026-09-19): every inferred frame of every camera with
 ``blur_threshold`` above 0 (the default is 50) had a Laplacian variance taken
@@ -25,15 +25,23 @@ from animaltracker.pipeline import StreamWorker
 WIDTH, HEIGHT = 160, 120
 
 
-def worker(blur_threshold: float) -> StreamWorker:
+MOVED_AT = 1789000000.0
+
+
+def worker(blur_threshold: float, ptz: bool = True, moved_at: float = MOVED_AT) -> StreamWorker:
+    """A camera whose own head the PTZ tracker moved at ``moved_at``, or a fixed one."""
     w = object.__new__(StreamWorker)
     w.camera = SimpleNamespace(
         id="cam1",
-        thresholds=SimpleNamespace(blur_threshold=blur_threshold, confidence=0.5, generic_confidence=0.9),
+        thresholds=SimpleNamespace(blur_threshold=blur_threshold, confidence=0.5, generic_confidence=0.9,
+                                   ptz_settle_time=0.0),
         detect_enabled=True,
     )
     w.tracker = None
     w.event_state = None
+    client = object()
+    w.onvif_client = client if ptz else None
+    w.ptz_tracker = SimpleNamespace(onvif_client=client, get_last_move_time=lambda: moved_at) if ptz else None
     return w
 
 
@@ -118,4 +126,43 @@ def test_a_blurry_frame_is_counted_for_the_monitor():
 
     run(lambda: w._process_frame(flat_frame(), 1789000000.0, 0))
 
+    assert w.perf_frames_skipped_blur == 1
+
+
+class ReachedTheDetector(Exception):
+    pass
+
+
+def reaches_detector(w, ts):
+    """Run one frame; True if it got past the blur filter to inference."""
+    def infer(*a, **k):
+        raise ReachedTheDetector
+
+    w.detector = SimpleNamespace(infer=infer)
+    w.camera.thresholds.inference_max_width = 0
+    try:
+        run(lambda: w._process_frame(flat_frame(), ts, 0))
+    except ReachedTheDetector:
+        return True
+    return False
+
+
+def test_a_fixed_camera_is_never_blur_filtered():
+    # 2026-09-22: Otteson1's night infrared picture scored ~24 against the
+    # default 50 and it never recorded at night. The filter is for frames a
+    # PTZ move smeared; a fixed camera's dim frame goes to the detector.
+    w = worker(50.0, ptz=False)
+    assert reaches_detector(w, MOVED_AT)
+    assert w.perf_frames_skipped_blur == 0
+
+
+def test_a_ptz_camera_long_after_its_last_move_is_not_blur_filtered():
+    w = worker(50.0, moved_at=MOVED_AT - 60)
+    assert reaches_detector(w, MOVED_AT)
+    assert w.perf_frames_skipped_blur == 0
+
+
+def test_a_ptz_camera_just_after_a_move_is_blur_filtered():
+    w = worker(50.0, moved_at=MOVED_AT - 1)
+    assert not reaches_detector(w, MOVED_AT)
     assert w.perf_frames_skipped_blur == 1

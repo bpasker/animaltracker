@@ -1334,10 +1334,36 @@ class StreamWorker:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return cv2.Laplacian(gray, cv2.CV_64F).var()
 
+    # How long after a PTZ move a frame can still be smeared by it; the blur
+    # filter runs only within this window (see _process_frame).
+    BLUR_AFTER_MOVE_S = 3.0
+
+    def _drives_own_ptz(self) -> bool:
+        """Whether the PTZ tracker moves this camera's own head."""
+        tracker = getattr(self, 'ptz_tracker', None)
+        client = getattr(self, 'onvif_client', None)
+        return tracker is not None and client is not None and tracker.onvif_client is client
+
+    def _ptz_moved_recently(self, ts: float) -> bool:
+        if not self._drives_own_ptz():
+            return False
+        try:
+            last_move = float(self.ptz_tracker.get_last_move_time() or 0.0)
+        except Exception:  # noqa: BLE001 - no move time: treat as moving, as before
+            return True
+        return (ts - last_move) < max(self.BLUR_AFTER_MOVE_S, self.camera.thresholds.ptz_settle_time)
+
     async def _process_frame(self, frame: np.ndarray, ts: float, frame_idx: int = 0) -> None:
         loop = asyncio.get_running_loop()
 
-        # --- Blur detection: skip processing blurry frames (PTZ motion blur) ---
+        # --- Blur detection: skip frames smeared by a PTZ move ---
+        # Only on a camera the PTZ tracker drives, and only for
+        # BLUR_AFTER_MOVE_S after its last move. It used to run on every
+        # camera all the time, and a fixed camera's night infrared picture
+        # is soft and low in contrast: Otteson1 scored about 24 against the
+        # default 50, so every frame was dropped from dusk to dawn and it
+        # never once recorded at night. A dim frame is the detector's to
+        # judge, at a low confidence, not this filter's to throw away.
         # On the executor, never here: a Laplacian over a full frame is 2.5 ms
         # at 1080p and 4.9 ms at 2688x1512, and this runs on every inferred
         # frame of every camera with blur_threshold > 0 (the default is 50).
@@ -1346,7 +1372,7 @@ class StreamWorker:
         # full frame, as the configured thresholds were tuned against, not on
         # the downscaled copy inference may use.
         blur_threshold = self.camera.thresholds.blur_threshold
-        if blur_threshold > 0:
+        if blur_threshold > 0 and self._ptz_moved_recently(ts):
             blur_score = await loop.run_in_executor(None, self._compute_blur_score, frame)
             if blur_score < blur_threshold:
                 self.perf_frames_skipped_blur += 1
@@ -1374,12 +1400,7 @@ class StreamWorker:
         # commands on a separate zoom camera would suppress its own detections
         # every time it issued a move, causing tracking to never engage.
         ptz_settle_time = self.camera.thresholds.ptz_settle_time
-        if (
-            ptz_settle_time > 0
-            and self.ptz_tracker is not None
-            and self.onvif_client is not None
-            and self.ptz_tracker.onvif_client is self.onvif_client
-        ):
+        if ptz_settle_time > 0 and self._drives_own_ptz():
             if self.ptz_tracker.is_settling(ptz_settle_time):
                 LOGGER.debug(
                     "[PTZ_SETTLE] %s: PTZ still settling (moved %.2fs ago, need %.2fs), skipping detection",

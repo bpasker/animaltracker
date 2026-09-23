@@ -335,7 +335,7 @@ var CAMERA_GROUPS = [
       label: 'Minimum size while following a subject (% of frame)',
       hint: 'Relaxed floor used while the PTZ tracker is following a subject, and for a box that overlaps the subject of an open event, so an animal that sits down or walks away keeps its clip going.' },
     { key: 'thresholds.blur_threshold', kind: 'number', min: 0, max: 1000, step: 10, advanced: true,
-      label: 'Blur threshold', hint: 'Frames with Laplacian variance below this are skipped as blurry. 0 disables; 50–100 suits most cameras.' },
+      label: 'Blur threshold', hint: 'On a PTZ camera, frames taken within 3 seconds of a move with Laplacian variance below this are skipped as smeared. Fixed cameras are never filtered: a dim night picture scores low without being blurred. 0 disables; 50–100 suits most PTZ cameras.' },
     { key: 'thresholds.ptz_settle_time', kind: 'number', min: 0, max: 5, step: 0.1, advanced: true,
       label: 'PTZ settle time (seconds)', hint: 'Ignore detections this long after a PTZ move while the image steadies.' }
   ] },

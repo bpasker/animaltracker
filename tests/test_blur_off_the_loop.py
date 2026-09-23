@@ -107,3 +107,15 @@ def test_the_metric_is_the_full_frame_laplacian():
 
     assert StreamWorker._compute_blur_score(frame) == pytest.approx(expected)
     assert StreamWorker._compute_blur_score(flat_frame()) == pytest.approx(0.0)
+
+
+def test_a_blurry_frame_is_counted_for_the_monitor():
+    # The monitor's detector card says why a camera checks nothing: at night
+    # Otteson1's clean infrared frames scored ~24 against the default 50,
+    # so every one was dropped here and the camera was blind until dawn.
+    w = worker(50.0)
+    w.detector = SimpleNamespace(infer=lambda *a, **k: [])
+
+    run(lambda: w._process_frame(flat_frame(), 1789000000.0, 0))
+
+    assert w.perf_frames_skipped_blur == 1

@@ -4811,6 +4811,9 @@ body.is-locked{
 }
 .caplegend__key--live{ background:var(--c-info); }
 .caplegend__key--analysis{ background:var(--c-accent); }
+.caplegend__key--both{
+  background:repeating-linear-gradient(135deg,var(--c-info) 0 3px,var(--c-accent) 3px 6px);
+}
 
 .capcams{
   list-style:none;margin:0;padding:var(--s-3) 0 0;

@@ -421,9 +421,13 @@ export const view = {
     var capLegLive = h('span', { text: '' });
     var capLegAnalysis = h('span', { text: '' });
     var capLegFree = h('span', { text: '' });
+    var capLegBoth = h('span', { text: '' });
+    var capLegBothItem = h('span.caplegend__item', { hidden: true },
+      h('span.caplegend__key.caplegend__key--both', { 'aria-hidden': 'true' }), capLegBoth);
     var capLegend = h('div.caplegend.t-micro.t-2',
       h('span.caplegend__item', h('span.caplegend__key.caplegend__key--live', { 'aria-hidden': 'true' }), capLegLive),
       h('span.caplegend__item', h('span.caplegend__key.caplegend__key--analysis', { 'aria-hidden': 'true' }), capLegAnalysis),
+      capLegBothItem,
       h('span.caplegend__item', h('span.caplegend__key', { 'aria-hidden': 'true' }), capLegFree));
     var capCams = h('ul.capcams', { 'aria-label': 'Frames checked per camera' });
     var capAnalysis = h('p.capline', { text: '' });
@@ -670,6 +674,8 @@ export const view = {
       capLegLive.textContent = 'Live detection ' + (available ? fmtPct(live) + '%' : '--');
       capLegAnalysis.textContent = 'Species analysis ' + (available ? fmtPct(analysis) + '%' : '--');
       capLegFree.textContent = 'Free ' + (available ? fmtPct(free) + '%' : '--');
+      capLegBothItem.hidden = !(both > 0.5);
+      capLegBoth.textContent = 'Both at once ' + fmtPct(both) + '%';
 
       renderCapacityCameras(data.cameras || []);
 

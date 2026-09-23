@@ -66,9 +66,9 @@ def test_the_key_frames_and_the_log_are_already_there_when_the_rename_runs(tmp_p
     seen = {}
     real = ClipPostProcessor._rename_clip
 
-    def watched(self, clip_path, new_species):
+    def watched(self, clip_path, new_species, **kw):
         seen["at_rename"] = sorted(p.name for p in clip_path.parent.iterdir())
-        return real(self, clip_path, new_species)
+        return real(self, clip_path, new_species, **kw)
 
     monkeypatch.setattr(ClipPostProcessor, "_rename_clip", watched)
 
@@ -102,7 +102,7 @@ def test_a_kill_while_the_log_is_being_written_leaves_a_clip_the_sweep_redoes(tm
 def test_a_kill_before_the_rename_leaves_a_clip_the_sweep_redoes(tmp_path, monkeypatch):
     clip = make_clip(tmp_path)
 
-    def killed(self, clip_path, new_species):
+    def killed(self, clip_path, new_species, **kw):
         raise KeyboardInterrupt("the service was restarted here")
 
     monkeypatch.setattr(ClipPostProcessor, "_rename_clip", killed)
@@ -117,7 +117,7 @@ def test_a_kill_before_the_rename_leaves_a_clip_the_sweep_redoes(tmp_path, monke
 def test_a_rename_that_cannot_happen_leaves_the_clip_for_the_sweep(tmp_path, monkeypatch):
     clip = make_clip(tmp_path)
 
-    def refuses(self, clip_path, new_species):
+    def refuses(self, clip_path, new_species, **kw):
         return None                                            # e.g. the target appeared meanwhile
 
     monkeypatch.setattr(ClipPostProcessor, "_rename_clip", refuses)
@@ -226,3 +226,42 @@ def test_two_manual_clips_of_the_same_species_both_keep_their_own_identity(tmp_p
 
     assert a.exists() and b.exists()
     assert has_analysis_sidecar(a) and has_analysis_sidecar(b)
+
+
+def _earlier_runs_key_frames(clip: Path) -> list:
+    old = [clip.with_name(f"{clip.stem}_thumb_mammalia_carnivora_felidae_t0.jpg"),
+           clip.with_name(f"{clip.stem}_thumb_animal_t1.jpg")]
+    for path in old:
+        cv2.imwrite(str(path), np.zeros((8, 8, 3), dtype=np.uint8))
+    return old
+
+
+def test_a_reanalysis_that_renames_the_clip_drops_the_earlier_runs_key_frames(tmp_path):
+    # With the rename last, this run's key frames are already under the new
+    # name when it happens, and the earlier run's were moved in beside them:
+    # a clip reanalysed from cat to dog showed both runs' crops for good.
+    clip = make_clip(tmp_path)
+    old = _earlier_runs_key_frames(clip)
+
+    result = processor(tmp_path).process_clip(clip)
+
+    target = clip.with_name(f"{EPOCH}_{DOG}.mp4")
+    assert result.new_path == target
+    thumbs = sorted(p.name for p in target.parent.glob(f"{target.stem}_thumb_*.jpg"))
+    assert thumbs == sorted(p.name for p in result.thumbnails_saved)
+    assert thumbs and not any("felidae" in name or "animal_t1" in name for name in thumbs)
+    assert not any(path.exists() for path in old)
+
+
+def test_a_rename_that_keeps_the_old_key_frames_carries_them_over(tmp_path):
+    clip = make_clip(tmp_path)
+    _earlier_runs_key_frames(clip)
+
+    result = processor(tmp_path).process_clip(clip, regenerate_thumbnails=False)
+
+    target = clip.with_name(f"{EPOCH}_{DOG}.mp4")
+    assert result.new_path == target
+    assert sorted(p.name for p in target.parent.glob("*_thumb_*.jpg")) == [
+        f"{target.stem}_thumb_animal_t1.jpg",
+        f"{target.stem}_thumb_mammalia_carnivora_felidae_t0.jpg",
+    ]

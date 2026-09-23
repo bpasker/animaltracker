@@ -644,7 +644,9 @@ class ClipPostProcessor:
         # Everything this run produced is on disk under the new name: commit.
         new_path = None
         if rename_to is not None:
-            new_path = self._rename_clip(clip_path, new_species)
+            new_path = self._rename_clip(
+                clip_path, new_species, carry_thumbnails=not regenerate_thumbnails,
+            )
             if new_path is None:
                 # The outputs sit under a name the clip did not take. The clip
                 # keeps its generic name and has no sidecar of its own, so the
@@ -1744,9 +1746,18 @@ class ClipPostProcessor:
             return None
         return new_path
 
-    def _rename_clip(self, clip_path: Path, new_species: str) -> Optional[Path]:
+    def _rename_clip(
+        self, clip_path: Path, new_species: str, carry_thumbnails: bool = True,
+    ) -> Optional[Path]:
         """Rename clip file with new species classification.
-        
+
+        Key frames still under the old name come from an earlier run. They
+        follow the clip when this run kept the old ones
+        (``carry_thumbnails``), and are removed when it made its own, which
+        are already under the new name: carried over, a reanalysis that
+        changed the species showed the old run's "Dog" crops beside the new
+        "Cat" ones, and nothing ever swept them because their clip exists.
+
         Returns new path if renamed, None if failed.
         """
         try:
@@ -1759,9 +1770,11 @@ class ClipPostProcessor:
             LOGGER.info("Renamed clip: %s -> %s", clip_path.name, new_path.name)
             
             # Thumbnails this run wrote are already under the new name (they
-            # are written before the rename); this moves any an earlier run
-            # left under the old one.
-            self._rename_thumbnails(clip_path, new_path)
+            # are written before the rename).
+            if carry_thumbnails:
+                self._rename_thumbnails(clip_path, new_path)
+            else:
+                self._remove_thumbnails(clip_path)
             
             return new_path
             
@@ -1769,6 +1782,15 @@ class ClipPostProcessor:
             LOGGER.error("Failed to rename clip %s: %s", clip_path, e, exc_info=True)
             return None
     
+    @staticmethod
+    def _remove_thumbnails(clip_path: Path) -> None:
+        """Delete the key frames filed under this clip name."""
+        for thumb in clip_path.parent.glob(f"{clip_path.stem}_thumb_*.jpg"):
+            try:
+                thumb.unlink()
+            except OSError as e:
+                LOGGER.warning("Failed to remove old thumbnail %s: %s", thumb, e)
+
     def _rename_thumbnails(self, old_clip_path: Path, new_clip_path: Path) -> None:
         """Rename existing thumbnails to match new clip name."""
         old_stem = old_clip_path.stem

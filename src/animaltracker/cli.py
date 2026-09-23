@@ -425,7 +425,7 @@ def cmd_zoom_calibrate(args: argparse.Namespace) -> int:
     LOGGER.info("  ZoomFOVCalibration.from_dict(json.load(open('%s')))", output_path)
 
 
-def cmd_reprocess(args: argparse.Namespace) -> None:
+def cmd_reprocess(args: argparse.Namespace) -> int:
     """Reprocess clips to improve species classifications.
 
     The same detector and the same settings the running pipeline uses for
@@ -504,6 +504,8 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
             LOGGER.info("  Thumbnails saved: %d", len(result.thumbnails_saved))
         else:
             LOGGER.error("Failed: %s - %s", result.original_path, result.error)
+            return 1
+        return 0
     else:
         # Process all clips
         results = process_all_clips(
@@ -532,6 +534,8 @@ def cmd_reprocess(args: argparse.Namespace) -> None:
             for r in updated:
                 LOGGER.info("  %s: %s -> %s", 
                            r.original_path.name, r.original_species, r.new_species)
+        # Scripts and the shell can tell a run that failed on some clips.
+        return 1 if failed else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

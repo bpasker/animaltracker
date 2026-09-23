@@ -105,3 +105,31 @@ def test_an_explicit_model_still_builds_that_model_on_the_post_processing_backen
 def test_the_parser_has_no_sample_rate_of_its_own():
     parsed = build_parser().parse_args(["--config", "x.yml", "reprocess"])
     assert parsed.sample_rate is None
+
+
+def test_the_exit_status_says_whether_a_clip_failed(tmp_path, seen, monkeypatch):
+    # Bug hunt, 2026-09-22: `reprocess --clip` returned None whatever
+    # happened, so a failed analysis exited 0.
+    import animaltracker.postprocess as pp
+
+    cfg = write_config(tmp_path)
+    outcome = {"success": False}
+
+    def process_clip(self, clip_path, **kwargs):
+        return SimpleNamespace(success=outcome["success"], original_path=clip_path, error="no model",
+                               original_species="animal", new_species="animal", confidence=0.0,
+                               frames_analyzed=0, total_frames=0, species_results={},
+                               new_path=None, thumbnails_saved=[])
+
+    monkeypatch.setattr(pp.ClipPostProcessor, "__init__", lambda self, **kw: None)
+    monkeypatch.setattr(pp.ClipPostProcessor, "process_clip", process_clip)
+
+    assert cmd_reprocess(args(cfg, clip="1789000000_animal.mp4")) == 1
+    outcome["success"] = True
+    assert cmd_reprocess(args(cfg, clip="1789000000_animal.mp4")) == 0
+
+    failed = SimpleNamespace(success=False, new_path=None)
+    monkeypatch.setattr(pp, "process_all_clips", lambda *a, **kw: [failed])
+    assert cmd_reprocess(args(cfg)) == 1
+    monkeypatch.setattr(pp, "process_all_clips", lambda *a, **kw: [])
+    assert cmd_reprocess(args(cfg)) == 0

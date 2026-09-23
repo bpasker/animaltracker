@@ -13,6 +13,21 @@
         "cam1/2026/09/14/1789385669_animal.mp4"
       ],
       "port": 8081
+    },
+    {
+      "name": "monitor-dev",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "scripts/dev_web.py",
+        "config/cameras.sample.yml",
+        "--port",
+        "8082",
+        "--analyzing",
+        "cam1/2026/09/14/1789385669_animal.mp4",
+        "--blurry",
+        "cam2"
+      ],
+      "port": 8082
     }
   ]
 }

@@ -2,9 +2,12 @@
    views/monitor.js — system health and logs.  Route: /app/monitor
 
    WHAT THIS SCREEN OWES THE OPERATOR
-   · Resource gauges (CPU / memory / disk / GPU) with a 60-sample sparkline,
+   · Resource gauges (CPU / memory / disk) with a 60-sample sparkline,
      a threshold WORD as well as a colour, and a once-per-crossing error toast
      rather than one toast every two seconds.
+   · The detector's load: the share of the last minute each model ran, how
+     many of each camera's frames get checked and why not the rest, the
+     clips waiting for species analysis; the GPU chip reading is fine print.
    · A per-camera pipeline card built from .readout + .meter: buffer fill,
      event state, active tracks, connection status.
    · Live reanalyze (reprocessing) progress. This is the ONLY page in the app
@@ -46,6 +49,9 @@ var SPARK_N = 60;          /* samples kept per gauge */
 var ROW_CAP = 400;         /* hard ceiling on log rows held in the DOM */
 var WARN_AT = 80;
 var CRIT_AT = 92;
+var CAP_BUSY_AT = 75;      /* live detector share of the last minute */
+var CAP_FULL_AT = 92;
+var GPU_AVG_N = 30;        /* one minute of polls */
 var TZ_KEY = 'logTimezone';
 
 /* --- Filter option tables (verbatim from the old Monitor page) ------------ */
@@ -337,6 +343,7 @@ export const view = {
     var monitorFailing = false;
     var logsFailing = false;
     var criticalAlerted = {};
+    var gpuSamples = [];       /* GPU chip utilisation, last GPU_AVG_N polls */
     var cameraOptionSig = '';
 
     var logRows = [];          /* oldest-first, each carrying _key */
@@ -377,14 +384,13 @@ export const view = {
     var gCpu = makeGauge('CPU', '%');
     var gMem = makeGauge('Memory', '%');
     var gDisk = makeGauge('Disk', '%');
-    var gGpu = makeGauge('GPU', '%');
 
     var systemError = h('p.empty__cause.t-danger', { hidden: true, role: 'status' });
 
     page.appendChild(h('section.stack.stack--tight', { 'aria-label': 'System resources' },
       h('h2.overline.overline--strong', { text: 'System' }),
       systemError,
-      h('div.gaugerow.stack', gCpu.el, gMem.el, gDisk.el, gGpu.el)));
+      h('div.gaugerow.stack', gCpu.el, gMem.el, gDisk.el)));
 
     /* --- 2 · detector panel ---------------------------------------------- */
 
@@ -396,15 +402,43 @@ export const view = {
       };
     }
 
-    var rBackend = readout('Backend');
-    var rRegion = readout('Region');
-    var rCameras = readout('Cameras');
-    var rUpdated = readout('Sampled');
+    /* The detector's load, in place of the GPU gauge. NVML's utilisation is
+       the share of a short sample in which a kernel ran; read every two
+       seconds it swung 0-70% between polls and could not say whether
+       detection keeps up: every camera takes turns on one live model, which
+       can be fully booked while the chip reads 25%. This shows the share of
+       the last minute each model ran (detector.ModelBusyMeter), how many of
+       each camera's frames get checked and why not the rest, and the clips
+       waiting for species analysis. The chip reading is fine print. */
+    var capValueText = document.createTextNode('--');
+    var capUnit = h('span.readout__unit', { text: '' });
+    var capState = h('span.gauge__state', { text: '' });
+    var capSegLive = h('span.capbar__seg.capbar__seg--live');
+    var capSegBoth = h('span.capbar__seg.capbar__seg--both');
+    var capSegAnalysis = h('span.capbar__seg.capbar__seg--analysis');
+    var capBar = h('div.capbar', { role: 'img', 'aria-label': '' },
+      capSegLive, capSegBoth, capSegAnalysis);
+    var capLegLive = h('span', { text: '' });
+    var capLegAnalysis = h('span', { text: '' });
+    var capLegFree = h('span', { text: '' });
+    var capLegend = h('div.caplegend.t-micro.t-2',
+      h('span.caplegend__item', h('span.caplegend__key.caplegend__key--live', { 'aria-hidden': 'true' }), capLegLive),
+      h('span.caplegend__item', h('span.caplegend__key.caplegend__key--analysis', { 'aria-hidden': 'true' }), capLegAnalysis),
+      h('span.caplegend__item', h('span.caplegend__key', { 'aria-hidden': 'true' }), capLegFree));
+    var capCams = h('ul.capcams', { 'aria-label': 'Frames checked per camera' });
+    var capAnalysis = h('p.capline', { text: '' });
+    var capFine = h('p.t-micro.t-3', { style: { margin: '0' }, text: '' });
+    var capCard = h('div.gauge.gauge--unavailable', { role: 'group', 'aria-label': 'Detector load' },
+      h('div.gauge__head',
+        h('div.readout',
+          h('span.readout__label', { text: 'Live detector busy' }),
+          h('span.readout__value', capValueText, capUnit)),
+        capState),
+      capBar, capLegend, capCams, capAnalysis, capFine);
 
     page.appendChild(h('section.stack.stack--tight', { 'aria-label': 'Detector' },
       h('h2.overline.overline--strong', { text: 'Detector' }),
-      h('div.gauge',
-        h('div.readout-strip', rBackend.el, rRegion.el, rCameras.el, rUpdated.el))));
+      capCard));
 
     /* --- 3 · live reanalyze progress ------------------------------------- */
 
@@ -569,9 +603,14 @@ export const view = {
         joinMeta(fmtGb(sys.disk_used_gb) + ' of ' + fmtGb(sys.disk_total_gb) + ' GB'), {});
       if (c) crossed.push('Disk');
 
-      gGpu.set(gpu.available ? gpu.utilization : null,
-        gpu.available ? joinMeta(gpu.name, gpu.temperature ? gpu.temperature + ' °C' : '') : 'No GPU reported',
-        { available: !!gpu.available });
+      /* The chip reading, averaged over the last minute of polls, for the
+         detector card's fine print. */
+      if (gpu.available && num(gpu.utilization) !== null) {
+        gpuSamples.push(num(gpu.utilization));
+        if (gpuSamples.length > GPU_AVG_N) gpuSamples.shift();
+      } else {
+        gpuSamples.length = 0;
+      }
 
       /* One persistent toast per crossing, not one every poll. */
       for (var i = 0; i < crossed.length; i++) {
@@ -598,12 +637,119 @@ export const view = {
     }
 
     function renderDetector(data) {
+      var cap = data.capacity || {};
       var det = data.detector || {};
-      rBackend.value.textContent = det.backend ? String(det.backend) : 'unknown';
-      rRegion.value.textContent = det.country ? String(det.country) : 'unset';
-      rCameras.value.textContent = String((data.cameras || []).length);
+      var gpu = data.gpu || {};
+      var available = !!cap.available;
+      var live = available ? (num(cap.live_pct) || 0) : 0;
+      var analysis = available ? (num(cap.analysis_pct) || 0) : 0;
+      var busy = available ? (num(cap.busy_pct) || 0) : 0;
+      /* The two jobs can run at the same time; the bar shows each alone and
+         the overlap, so it never adds up past what the minute held. */
+      var both = Math.max(0, Math.min(live, analysis, live + analysis - busy));
+      var liveOnly = Math.max(0, live - both);
+      var analysisOnly = Math.max(0, analysis - both);
+      var free = Math.max(0, 100 - busy);
+
+      var mod = 'nominal', word = 'keeping up';
+      if (!available) { mod = 'unavailable'; word = 'unavailable'; }
+      else if (live >= CAP_FULL_AT) { mod = 'critical'; word = 'fully booked'; }
+      else if (live >= CAP_BUSY_AT) { mod = 'warn'; word = 'busy'; }
+      capCard.className = 'gauge gauge--' + mod;
+      capState.textContent = word;
+      capValueText.nodeValue = available ? fmtPct(live) : '--';
+      capUnit.textContent = available ? '%' : '';
+
+      capSegLive.style.width = liveOnly + '%';
+      capSegBoth.style.width = both + '%';
+      capSegAnalysis.style.width = analysisOnly + '%';
+      capBar.setAttribute('aria-label', available
+        ? 'Last minute: live detection ' + fmtPct(live) + '%, species analysis ' +
+          fmtPct(analysis) + '%, free ' + fmtPct(free) + '%'
+        : 'Detector load unavailable');
+      capLegLive.textContent = 'Live detection ' + (available ? fmtPct(live) + '%' : '--');
+      capLegAnalysis.textContent = 'Species analysis ' + (available ? fmtPct(analysis) + '%' : '--');
+      capLegFree.textContent = 'Free ' + (available ? fmtPct(free) + '%' : '--');
+
+      renderCapacityCameras(data.cameras || []);
+
+      var running = (data.analysis_active || []).length;
+      var waiting = cap.analysis_waiting == null ? null : num(cap.analysis_waiting);
+      capAnalysis.textContent = 'Species analysis: ' + (running
+        ? plural(running, 'clip', 'clips') + ' in progress'
+        : 'idle') + (waiting ? ' · ' + waiting + ' waiting' : (waiting === 0 ? ' · none waiting' : ''));
+
+      var chip = null;
+      if (gpuSamples.length) {
+        var sum = 0;
+        for (var i = 0; i < gpuSamples.length; i++) sum += gpuSamples[i];
+        chip = sum / gpuSamples.length;
+      }
       var stamp = String(data.timestamp || '');
-      rUpdated.value.textContent = stamp ? stamp.slice(11, 19) : '--';
+      capFine.textContent = joinMeta(
+        det.backend ? String(det.backend) : '',
+        det.country ? String(det.country) : '',
+        cap.live_ms_avg != null ? Math.round(cap.live_ms_avg) + ' ms per check' : '',
+        gpu.available ? joinMeta(
+          gpu.name,
+          chip !== null ? 'chip busy ' + fmtPct(chip) + '% (1-min avg)' : '',
+          gpu.memory_used_mb != null && num(gpu.memory_total_mb)
+            ? fmtGb(gpu.memory_used_mb / 1024) + ' of ' + fmtGb(gpu.memory_total_mb / 1024) + ' GB'
+            : '',
+          gpu.temperature ? gpu.temperature + ' °C' : '') : 'No GPU reported',
+        stamp ? 'sampled ' + stamp.slice(11, 19) : '');
+    }
+
+    /* One row per camera: how many of the frames it records get checked. */
+    function cameraCoverage(cam) {
+      if (cam.detect_enabled === false) return { share: 0, text: 'Detection off', mod: 'off' };
+      var d = cam.detection;
+      if (!d) return { share: 0, text: 'No recent frames', mod: 'off' };
+      var cap = num(d.capture_fps) || 0;
+      var checked = num(d.checked_fps) || 0;
+      var blurry = num(d.blurry_fps) || 0;
+      var settling = num(d.settling_fps) || 0;
+      var share = cap > 0 ? Math.max(0, Math.min(1, checked / cap)) : 0;
+      var fps = function (v) { return (Math.round(v * 10) / 10).toString(); };
+      if (checked <= 0 && blurry > 0) {
+        return {
+          share: 0, mod: 'warn',
+          text: 'None checked · every frame rejected as too blurry' +
+            (cam.blur_threshold != null ? ' (blur threshold ' + cam.blur_threshold + ')' : '')
+        };
+      }
+      if (checked <= 0 && settling > 0) {
+        return { share: 0, mod: 'warn', text: 'None checked · waiting for the PTZ to settle' };
+      }
+      var turnedAway = blurry + settling;
+      var parts = [fps(checked) + ' of ' + fps(cap) + ' fps checked'];
+      if (checked > 0) parts.push('every ' + (Math.round(10 / checked) / 10) + ' s');
+      if (turnedAway > 0 && checked + turnedAway > 0) {
+        parts.push(Math.round(blurry / (checked + turnedAway) * 100) + '% too blurry');
+      }
+      return { share: share, text: parts.join(' · '), mod: checked > 0 ? 'live' : 'off' };
+    }
+
+    function renderCapacityCameras(cams) {
+      keyedList(capCams, cams, {
+        key: function (cam) { return String(cam.id); },
+        create: function () {
+          var name = h('span.capcams__name.truncate', { text: '' });
+          var fill = h('span.capcams__fill');
+          var bar = h('span.capcams__bar', { 'aria-hidden': 'true' }, fill);
+          var text = h('span.capcams__text', { text: '' });
+          var li = h('li.capcams__row', name, bar, text);
+          li._parts = { name: name, fill: fill, text: text };
+          return li;
+        },
+        update: function (li, cam) {
+          var c = cameraCoverage(cam);
+          li._parts.name.textContent = cam.name ? String(cam.name) : String(cam.id);
+          li._parts.fill.style.width = Math.round(c.share * 100) + '%';
+          li._parts.text.textContent = c.text;
+          li.className = 'capcams__row capcams__row--' + c.mod;
+        }
+      });
     }
 
     function camState(cam) {

@@ -5,6 +5,7 @@ import gc
 import logging
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -150,6 +151,79 @@ class ModelLoadGate:
 MODEL_LOAD_GATE = ModelLoadGate()
 
 
+class ModelBusyMeter:
+    """How much of the last minute each model spent running, by job.
+
+    The GPU's own utilisation (NVML) is the share of a short sample in which
+    a kernel ran. Read every two seconds it swings from 0 to 70% between
+    polls, and it says nothing about what the operator needs to know: the
+    live detector is one model that every camera takes turns on, one frame
+    at a time, so it can be fully booked (cameras skipping frames) while
+    the chip reads 25%. This records the time each forward pass holds its
+    model (``_ForwardGuard``), tagged with the detector's ``usage`` ("live"
+    for real-time detection, "analysis" for post-processing), and reports
+    the share of wall time each used, and the union of the two.
+    """
+
+    WINDOW_S = 60.0
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._spans: List[Tuple[float, float, str]] = []
+        self._started = clock()
+
+    def record(self, usage: str, start: float, end: float) -> None:
+        with self._lock:
+            self._spans.append((start, end, usage))
+            cutoff = end - self.WINDOW_S
+            if self._spans[0][1] < cutoff:
+                self._spans = [s for s in self._spans if s[1] >= cutoff]
+
+    def now(self) -> float:
+        return self._clock()
+
+    def summary(self) -> dict:
+        """Shares of the last ``WINDOW_S`` (or of the uptime, if shorter), 0-100."""
+        now = self._clock()
+        window = min(self.WINDOW_S, max(now - self._started, 1e-6))
+        lo = now - window
+        with self._lock:
+            spans = [(max(a, lo), min(b, now), u) for a, b, u in self._spans if b > lo]
+        per_usage: dict = {}
+        counts: dict = {}
+        for a, b, u in spans:
+            per_usage[u] = per_usage.get(u, 0.0) + (b - a)
+            counts[u] = counts.get(u, 0) + 1
+        busy = 0.0
+        run_start = run_end = None
+        for a, b, _ in sorted(spans):
+            if run_end is None or a > run_end:
+                if run_end is not None:
+                    busy += run_end - run_start
+                run_start, run_end = a, b
+            else:
+                run_end = max(run_end, b)
+        if run_end is not None:
+            busy += run_end - run_start
+
+        def pct(seconds: float) -> float:
+            return round(min(100.0, seconds / window * 100.0), 1)
+
+        return {
+            "window_s": round(window, 1),
+            "busy_pct": pct(busy),
+            "live_pct": pct(per_usage.get("live", 0.0)),
+            "analysis_pct": pct(per_usage.get("analysis", 0.0)),
+            "live_ms_avg": round(per_usage["live"] / counts["live"] * 1000.0, 1) if counts.get("live") else None,
+            "live_runs": counts.get("live", 0),
+            "analysis_runs": counts.get("analysis", 0),
+        }
+
+
+MODEL_BUSY = ModelBusyMeter()
+
+
 def _resolve_model_files(model_name: str) -> None:
     """Download (or find in the cache) a SpeciesNet model before loading it.
 
@@ -187,13 +261,20 @@ class _ForwardGuard:
         except BaseException:
             MODEL_LOAD_GATE.end_forward()
             raise
+        # On the detector, not the guard's own state: only the thread that
+        # holds the instance lock reads or writes it, and it is taken back
+        # before the lock is released.
+        self._detector.__dict__["_forward_started"] = MODEL_BUSY.now()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        started = self._detector.__dict__.pop("_forward_started", None)
         try:
             self._detector._instance_lock().__exit__(exc_type, exc, tb)
         finally:
             MODEL_LOAD_GATE.end_forward()
+            if started is not None:
+                MODEL_BUSY.record(self._detector.__dict__.get("usage", "live"), started, MODEL_BUSY.now())
         return False
 
 
@@ -1508,7 +1589,7 @@ def create_realtime_detector(detector_cfg) -> BaseDetector:
     
     LOGGER.info(f"Creating realtime detector: {backend}")
     
-    return create_detector(
+    detector = create_detector(
         backend=backend,
         model_path=detector_cfg.model_path,
         model_version=detector_cfg.speciesnet_version,
@@ -1518,6 +1599,8 @@ def create_realtime_detector(detector_cfg) -> BaseDetector:
         longitude=detector_cfg.longitude,
         generic_confidence=detector_cfg.generic_confidence,
     )
+    detector.usage = "live"       # ModelBusyMeter
+    return detector
 
 
 def create_postprocess_detector(detector_cfg) -> BaseDetector:
@@ -1536,7 +1619,7 @@ def create_postprocess_detector(detector_cfg) -> BaseDetector:
     
     LOGGER.info(f"Creating postprocess detector: {backend}")
     
-    return create_detector(
+    detector = create_detector(
         backend=backend,
         model_path=detector_cfg.model_path,
         model_version=detector_cfg.speciesnet_version,
@@ -1546,6 +1629,8 @@ def create_postprocess_detector(detector_cfg) -> BaseDetector:
         longitude=detector_cfg.longitude,
         generic_confidence=detector_cfg.generic_confidence,
     )
+    detector.usage = "analysis"   # ModelBusyMeter
+    return detector
 
 
 # Keep backward compatibility

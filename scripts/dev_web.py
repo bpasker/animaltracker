@@ -27,6 +27,7 @@ import logging
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from animaltracker import configstore  # noqa: E402
 from animaltracker.analysis_recovery import ClipAnalysisRegistry  # noqa: E402
+from animaltracker.detector import MODEL_BUSY  # noqa: E402
 from animaltracker.web import WebServer  # noqa: E402
 
 
@@ -86,6 +88,20 @@ class FakeWorker:
         self.event_state = None
         self.tracking_enabled = bool(cam.ptz_tracking.enabled or cam.ptz_tracking.self_track)
         self.storage = None   # set by main(), for save_manual_clip
+        self.blurry = False   # --blurry: every frame turned away by the blur filter
+
+    def get_perf_stats(self):
+        """The monitor's detector card reads this; a live camera checks
+        about one frame in six, a --blurry one none at all."""
+        if not self.live and not self.blurry:
+            return {}
+        checked, blurry = (0.0, 4.7) if self.blurry else (3.5, 0.0)
+        return {
+            'window_sec': 10.0, 'capture_fps': 20.0, 'inferred_fps': checked,
+            'frames_dropped_busy': 150 if self.blurry else 165,
+            'skipped_blur_fps': blurry, 'skipped_settle_fps': 0.0,
+            'frame_age_avg_ms': 160.0, 'at': time.time(),
+        }
 
     def save_manual_clip(self):
         """A stub clip, so the Live page's "Save clip" and the palette work here."""
@@ -99,6 +115,19 @@ class FakeWorker:
         return name
 
 
+def fake_model_work(analysing: bool) -> None:
+    """Feed the detector card's meter: a 126 ms live check every 285 ms, and
+    with --analyzing a 300 ms species-analysis pass every second."""
+    last_analysis = 0.0
+    while True:
+        start = MODEL_BUSY.now()
+        MODEL_BUSY.record("live", start, start + 0.126)
+        if analysing and start - last_analysis >= 1.0:
+            MODEL_BUSY.record("analysis", start + 0.05, start + 0.35)
+            last_analysis = start
+        time.sleep(0.285)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("config", nargs="?", default=str(REPO / "config" / "cameras.sample.yml"))
@@ -106,6 +135,8 @@ def main() -> None:
     ap.add_argument("--scratch", default=None, help="directory for the config copy, storage and logs")
     ap.add_argument("--analyzing", action="append", default=[], metavar="CLIP",
                     help="clip path (relative to storage/clips) to show as being analysed; repeatable")
+    ap.add_argument("--blurry", action="append", default=[], metavar="CAMERA",
+                    help="camera id whose frames the blur filter rejects (monitor card); repeatable")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -130,6 +161,7 @@ def main() -> None:
                for i, cam in enumerate(runtime.cameras)}
     for w in workers.values():
         w.storage = scratch / "storage"
+        w.blurry = w.camera.id in args.blurry
 
     registry = ClipAnalysisRegistry()
     for rel in args.analyzing:
@@ -154,6 +186,7 @@ def main() -> None:
                         w.latest_frame_ts = time.time()
                 await asyncio.sleep(1)
         asyncio.create_task(heartbeat())
+        threading.Thread(target=fake_model_work, args=(bool(args.analyzing),), daemon=True).start()
         await server.start()
 
     asyncio.run(run())

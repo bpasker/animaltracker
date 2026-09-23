@@ -2812,6 +2812,72 @@ class WebServer:
 
         return system, gpu, detector_info, recent_clips
 
+    # A camera's perf window is ten seconds and only closes while frames
+    # arrive; older than this, the camera has stopped delivering them.
+    PERF_STALE_AFTER_S = 30.0
+
+    def _camera_detection_figures(self, worker) -> dict:
+        """How much of what a camera records gets checked, and why not the rest.
+
+        From the worker's last ten-second perf window. ``checked_fps`` of
+        ``capture_fps`` were run through the live detector; the rest were
+        either never taken (the detector was still busy with an earlier
+        frame, ``busy_fps``) or taken and turned away before it ran: too
+        blurry for ``thresholds.blur_threshold`` (``blurry_fps``), or the PTZ
+        still settling (``settling_fps``).
+        """
+        try:
+            camera = worker.camera
+            figures = {
+                'detect_enabled': bool(getattr(camera, 'detect_enabled', True)),
+                'blur_threshold': getattr(getattr(camera, 'thresholds', None), 'blur_threshold', None),
+                'detection': None,
+            }
+            perf = worker.get_perf_stats() if hasattr(worker, 'get_perf_stats') else {}
+            at = perf.get('at')
+            if not perf or at is None or (_time.time() - at) > self.PERF_STALE_AFTER_S:
+                return figures
+            window = perf.get('window_sec') or 0
+            busy = perf.get('frames_dropped_busy', 0)
+            figures['detection'] = {
+                'window_s': window,
+                'capture_fps': perf.get('capture_fps', 0.0),
+                'checked_fps': perf.get('inferred_fps', 0.0),
+                'busy_fps': round(busy / window, 2) if window else 0.0,
+                'blurry_fps': perf.get('skipped_blur_fps', 0.0),
+                'settling_fps': perf.get('skipped_settle_fps', 0.0),
+                'frame_age_ms': perf.get('frame_age_avg_ms'),
+            }
+            return figures
+        except Exception as err:  # noqa: BLE001 - telemetry is best effort
+            LOGGER.debug("Detection figures unavailable for %s: %s", getattr(worker, 'camera', None), err)
+            return {'detect_enabled': None, 'blur_threshold': None, 'detection': None}
+
+    def _detector_capacity(self) -> dict:
+        """Share of the last minute each model ran, and the clips waiting for analysis.
+
+        See ``detector.ModelBusyMeter``: what the monitor's capacity card
+        shows in place of the raw GPU utilisation.
+        """
+        try:
+            from .detector import MODEL_BUSY
+            capacity = MODEL_BUSY.summary()
+        except Exception as err:  # noqa: BLE001 - telemetry is best effort
+            LOGGER.debug("Model busy figures unavailable: %s", err)
+            return {'available': False}
+        capacity['available'] = True
+        waiting = None
+        for worker in self.workers.values():
+            queue_ = getattr(type(worker), '_analysis_workers', None)
+            if queue_ is not None:
+                try:
+                    waiting = int(queue_.waiting)
+                except Exception:  # noqa: BLE001
+                    waiting = None
+                break
+        capacity['analysis_waiting'] = waiting
+        return capacity
+
     async def handle_get_monitor_data(self, request):
         """Get real-time pipeline monitoring data as JSON."""
         cameras = []
@@ -2833,6 +2899,7 @@ class WebServer:
                 'tracking_enabled': worker.tracking_enabled,
                 'tracks_active': len(worker.event_state.tracker.tracks) if worker.event_state and worker.event_state.tracker else 0,
             }
+            camera_data.update(self._camera_detection_figures(worker))
             cameras.append(camera_data)
         
         # Host figures are gathered off the loop (see _monitor_host_stats) on
@@ -2871,6 +2938,7 @@ class WebServer:
             'cameras': cameras,
             'system': system,
             'gpu': gpu,
+            'capacity': self._detector_capacity(),
             'detector': detector_info,
             'recent_clips': recent_clips,
             'reprocessing_jobs': reprocessing,

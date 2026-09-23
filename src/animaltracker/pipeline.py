@@ -457,6 +457,10 @@ class StreamWorker:
     # every core, so two at once only slow each other and the capture threads;
     # the job is seconds to a couple of minutes, so the queue stays short.
     _transcode_lock: threading.Lock = threading.Lock()
+    # Skip counters for the perf window, also set in __init__; class defaults
+    # so a worker built without it (tests use object.__new__) can count.
+    perf_frames_skipped_blur: int = 0
+    perf_frames_skipped_settle: int = 0
     # Where a closed event's analysis and alert run (see AnalysisWorkers).
     # One worker per post-processing slot; the semaphore stays the limit the
     # recovery sweep shares.
@@ -539,6 +543,8 @@ class StreamWorker:
         self.perf_frame_age_max: float = 0.0
         self.perf_frames_read: int = 0           # frames pulled off cap.read() in window
         self.perf_frames_dropped_busy: int = 0   # frames skipped because previous inference still running
+        self.perf_frames_skipped_blur: int = 0   # taken for inference, rejected by the blur filter
+        self.perf_frames_skipped_settle: int = 0 # taken for inference, skipped while the PTZ settles
         self._perf_window_start: float = time.time()
         self._perf_log_interval: float = 10.0    # seconds
         # Last published per-window snapshot (for /api/cameras).
@@ -1088,6 +1094,11 @@ class StreamWorker:
             'drop_pct': round(drop_pct, 1),
             'frame_age_avg_ms': round(frame_age_avg * 1000.0, 1),
             'frame_age_max_ms': round(self.perf_frame_age_max * 1000.0, 1),
+            # Frames that reached the detector's queue and were turned away
+            # before it ran: the monitor shows why a camera checks nothing.
+            'skipped_blur_fps': round(self.perf_frames_skipped_blur / elapsed, 2) if elapsed > 0 else 0.0,
+            'skipped_settle_fps': round(self.perf_frames_skipped_settle / elapsed, 2) if elapsed > 0 else 0.0,
+            'at': now,
         }
         self.perf_last_snapshot = snapshot
         # Pull per-stage timing from the realtime detector if it exposes
@@ -1128,6 +1139,8 @@ class StreamWorker:
         self.perf_frame_age_max = 0.0
         self.perf_frames_read = 0
         self.perf_frames_dropped_busy = 0
+        self.perf_frames_skipped_blur = 0
+        self.perf_frames_skipped_settle = 0
 
     def get_perf_stats(self) -> Dict[str, float]:
         """Return the most recent perf snapshot (empty dict before first window)."""
@@ -1336,6 +1349,7 @@ class StreamWorker:
         if blur_threshold > 0:
             blur_score = await loop.run_in_executor(None, self._compute_blur_score, frame)
             if blur_score < blur_threshold:
+                self.perf_frames_skipped_blur += 1
                 LOGGER.debug(
                     "[BLUR_SKIP] %s: frame too blurry (score=%.1f < threshold=%.1f), skipping detection",
                     self.camera.id, blur_score, blur_threshold
@@ -1380,6 +1394,7 @@ class StreamWorker:
                 # physically moved, jerking the PTZ on stale data.
                 self.latest_detections = []
                 self.latest_detection_ts = ts
+                self.perf_frames_skipped_settle += 1
                 # Tick the tracker on settle skips too -- same reasoning as
                 # the blur-skip branch above.
                 if self.tracker is not None:

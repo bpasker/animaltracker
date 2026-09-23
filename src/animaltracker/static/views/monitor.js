@@ -51,6 +51,10 @@ var WARN_AT = 80;
 var CRIT_AT = 92;
 var CAP_BUSY_AT = 75;      /* live detector share of the last minute */
 var CAP_FULL_AT = 92;
+/* A detecting camera checked less often than this is falling behind: an
+   animal can cross its view between two checks. Only this turns the card
+   red; a fully booked detector is the normal load with two cameras on. */
+var CAM_MIN_CHECK_FPS = 1;
 var GPU_AVG_N = 30;        /* one minute of polls */
 var TZ_KEY = 'logTimezone';
 
@@ -655,9 +659,13 @@ export const view = {
       var analysisOnly = Math.max(0, analysis - both);
       var free = Math.max(0, 100 - busy);
 
+      var behind = (data.cameras || []).filter(function (cam) {
+        return cameraCoverage(cam).mod === 'critical';
+      }).length;
       var mod = 'nominal', word = 'keeping up';
       if (!available) { mod = 'unavailable'; word = 'unavailable'; }
-      else if (live >= CAP_FULL_AT) { mod = 'critical'; word = 'fully booked'; }
+      else if (behind) { mod = 'critical'; word = behind > 1 ? behind + ' cameras falling behind' : 'a camera is falling behind'; }
+      else if (live >= CAP_FULL_AT) { mod = 'warn'; word = 'fully booked'; }
       else if (live >= CAP_BUSY_AT) { mod = 'warn'; word = 'busy'; }
       capCard.className = 'gauge gauge--' + mod;
       capState.textContent = word;
@@ -733,10 +741,28 @@ export const view = {
       if (turnedAway > 0 && checked + turnedAway > 0) {
         parts.push(Math.round(blurry / (checked + turnedAway) * 100) + '% too blurry');
       }
+      /* Frames recorded, few checked, and not because the filters turned
+         them away: the detector cannot get to this camera often enough. */
+      if (cap > 0 && checked < CAM_MIN_CHECK_FPS) {
+        parts.push('falling behind');
+        return { share: share, text: parts.join(' · '), mod: 'critical' };
+      }
       return { share: share, text: parts.join(' · '), mod: checked > 0 ? 'live' : 'off' };
     }
 
     function renderCapacityCameras(cams) {
+      /* Two cameras can share a name (production has two "Front Door"s at
+         different locations); the row then adds the location, or the id. */
+      var seen = {};
+      cams.forEach(function (cam) {
+        var n = cam.name ? String(cam.name) : String(cam.id);
+        seen[n] = (seen[n] || 0) + 1;
+      });
+      function rowName(cam) {
+        var n = cam.name ? String(cam.name) : String(cam.id);
+        if (seen[n] < 2) return n;
+        return n + ' · ' + (cam.location ? String(cam.location) : String(cam.id));
+      }
       keyedList(capCams, cams, {
         key: function (cam) { return String(cam.id); },
         create: function () {
@@ -750,7 +776,8 @@ export const view = {
         },
         update: function (li, cam) {
           var c = cameraCoverage(cam);
-          li._parts.name.textContent = cam.name ? String(cam.name) : String(cam.id);
+          li._parts.name.textContent = rowName(cam);
+          li._parts.name.title = joinMeta(cam.name, cam.id, cam.location);
           li._parts.fill.style.width = Math.round(c.share * 100) + '%';
           li._parts.text.textContent = c.text;
           li.className = 'capcams__row capcams__row--' + c.mod;

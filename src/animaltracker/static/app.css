@@ -4822,7 +4822,7 @@ body.is-locked{
 }
 .capcams__row{
   display:grid;align-items:center;gap:var(--s-1) var(--s-3);
-  grid-template-columns:minmax(0,7rem) minmax(0,1fr);
+  grid-template-columns:minmax(0,9rem) minmax(0,1fr);
 }
 .capcams__name{ min-width:0; }
 .capcams__bar{
@@ -4832,9 +4832,11 @@ body.is-locked{
 .capcams__fill{ display:block;height:100%;width:0;background:var(--c-info); }
 .capcams__text{ grid-column:1 / -1;font-size:var(--t-micro);color:var(--c-text-3); }
 .capcams__row--warn .capcams__text{ color:var(--c-stale-text); }
+.capcams__row--critical .capcams__text{ color:var(--c-danger-text); }
+.capcams__row--critical .capcams__fill{ background:var(--c-danger); }
 .capcams__row--off .capcams__bar{ opacity:.5; }
 @media (min-width:640px){
-  .capcams__row{ grid-template-columns:minmax(0,8rem) minmax(0,1fr) minmax(0,16rem); }
+  .capcams__row{ grid-template-columns:minmax(0,11rem) minmax(0,1fr) minmax(0,16rem); }
   .capcams__text{ grid-column:auto; }
 }
 .capline{

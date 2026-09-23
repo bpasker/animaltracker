@@ -980,7 +980,8 @@ class ClipPostProcessor:
                     tracker, non_animal_boxes, dropped_boxes=shadow_track_boxes)
                 processing_log.extend(shadow_log)
             dropped_species = self._drop_person_shadow_species(
-                species_results, processing_log, non_animal_boxes, cap)
+                species_results, processing_log, non_animal_boxes, cap,
+                shadow_track_boxes=shadow_track_boxes)
             if dropped_species:
                 processing_log.append(ProcessingLogEntry(
                     frame_idx=-1, event="person_shadow", species=", ".join(dropped_species),
@@ -1423,6 +1424,7 @@ class ClipPostProcessor:
         processing_log: List[ProcessingLogEntry],
         non_animal_boxes: NonAnimalBoxes,
         cap: Optional[cv2.VideoCapture] = None,
+        shadow_track_boxes: Optional[set] = None,
     ) -> List[str]:
         """Rebuild the per-frame (non-tracked) species votes without shadows.
 
@@ -1433,6 +1435,13 @@ class ClipPostProcessor:
         times went out at the shadow's 0.93, with three crops of the person
         as its key frames.
 
+        ``shadow_track_boxes`` are the detections of tracks dropped as a
+        person's shadow (``_drop_person_shadow_tracks``). A track is dropped
+        when most of it sits on the person, so some of its detections do not
+        overlap one on their own; left in, those named the clip when every
+        track had been dropped ("bird" from a person, with no evidence frame
+        to show for it) and the recovery sweep kept it.
+
         Returns the species that had no detection left and were removed.
         """
         kept: Dict[str, List[ProcessingLogEntry]] = {}
@@ -1440,7 +1449,8 @@ class ClipPostProcessor:
         for entry in processing_log:
             if entry.event != "accepted" or entry.frame_idx < 0 or not entry.bbox:
                 continue
-            if self._is_person_shadow(entry.bbox, entry.frame_idx, non_animal_boxes):
+            if (shadow_track_boxes and (entry.frame_idx, tuple(entry.bbox)) in shadow_track_boxes) \
+                    or self._is_person_shadow(entry.bbox, entry.frame_idx, non_animal_boxes):
                 shadows += 1
                 continue
             kept.setdefault(entry.species, []).append(entry)

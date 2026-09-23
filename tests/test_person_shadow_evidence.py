@@ -124,6 +124,28 @@ def test_a_clip_with_only_the_person_has_none(tmp_path):
     assert result.species_results == {} and result.detection_frames == 0
 
 
+def test_a_shadow_track_that_drifts_off_the_person_does_not_name_the_clip(tmp_path):
+    # The person is read as a crow for twelve frames; on the last four the
+    # box drifts off the person (IoU below the threshold) while most of the
+    # track still sits on it, so the track is dropped as a shadow. Its four
+    # drifting detections used to stay in the per-frame votes, and with no
+    # track left they named the clip "crow" with no evidence frame at all.
+    x0, y0, x1, y1 = PERSON_BOX
+    step = (x1 - x0) * 0.3
+
+    def script(call):
+        if 5 <= call <= 16:
+            shift = step * max(0, call - 12)
+            return [animal(CROW, 0.93, (x0 + shift, y0, x1 + shift, y1))], [a_person()]
+        return [], [a_person()]
+
+    result = analyse(tmp_path, script)
+
+    assert (result.tracking_summary or {}).get("person_shadow_tracks") == 1
+    assert result.species_results == {}
+    assert result.detection_frames == 0
+
+
 def test_without_tracking_a_species_is_rebuilt_from_its_real_detections(tmp_path):
     def script(call):                                  # the person is a crow; so is a real crow, twice
         detections, filtered = [], []

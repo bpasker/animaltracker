@@ -219,3 +219,50 @@ def test_a_forced_close_waits_for_the_tracker_update_in_flight(tmp_path):
 
     assert tracker.calls[:2] == ["update-start", "update-end"]
     assert tracker.calls.index("read") < tracker.calls.index("reset")
+
+
+class ClosingWriter(FakeWriter):
+    def __init__(self, temp_avi: Path) -> None:
+        super().__init__(temp_avi)
+        self.closed = threading.Event()
+
+    def close(self) -> Path:
+        self.closed.set()
+        return self.temp_avi
+
+
+def test_an_event_whose_clip_path_cannot_be_made_still_closes_its_writer(tmp_path):
+    # build_clip_path creates the day directory on the archive and ran
+    # before the try: when it raised (NFS away) the writer was never closed,
+    # its thread waited for ever with the file open, and the only trace was
+    # asyncio's "Future exception was never retrieved".
+    worker, storage, notifier, start = worker_with_open_event(tmp_path, idle_for=1)
+    writer = ClosingWriter(worker.event_state.clip_writer.temp_avi)
+    worker.event_state.clip_writer = writer
+
+    def unreachable(*args, **kwargs):
+        raise OSError("Stale file handle")
+
+    storage.build_clip_path = unreachable
+
+    asyncio.run(worker._maybe_close_event(time.time(), force=True))
+
+    assert writer.closed.wait(5)
+    assert writer.temp_avi.exists()            # kept for the next startup's recovery
+    assert notifier.sent == []
+
+
+def test_an_event_that_cannot_be_closed_after_a_crash_still_closes_its_writer(tmp_path):
+    worker, storage, notifier, start = worker_with_open_event(tmp_path, idle_for=1)
+    writer = ClosingWriter(worker.event_state.clip_writer.temp_avi)
+    worker.event_state.clip_writer = writer
+
+    async def fails(*args, **kwargs):
+        raise RuntimeError("the close failed too")
+
+    worker._maybe_close_event = fails
+
+    asyncio.run(worker._recover_after_error())
+
+    assert worker.event_state is None
+    assert writer.closed.wait(5)

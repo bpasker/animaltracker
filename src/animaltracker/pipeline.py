@@ -948,7 +948,15 @@ class StreamWorker:
             await self._maybe_close_event(time.time(), force=True)
         except Exception:  # noqa: BLE001
             LOGGER.exception("Could not close the open event for %s after the error; dropping it", self.camera.id)
-            self.event_state = None
+            event, self.event_state = self.event_state, None
+            writer = getattr(event, 'clip_writer', None) if event is not None else None
+            if writer is not None:
+                # Its thread and file handle would otherwise live as long as
+                # the process. Closed, the recording waits in event_temp for
+                # the next startup's recovery. Not awaited: a drain can take
+                # a while and the camera should restart now.
+                event.clip_writer = None
+                asyncio.get_running_loop().run_in_executor(None, writer.close)
 
     async def _close_event_left_open_offline(self) -> None:
         """Close an event the stream dropped out from under, once it has gone idle.
@@ -2308,7 +2316,19 @@ class StreamWorker:
             when it ends, or here if it never gets that far.
             """
             registry = StreamWorker.analysis_registry
-            clip_path = self.storage.build_clip_path(camera_id, ctx_base['species'], start_ts, clip_format)
+            try:
+                # Creates the day directory on the archive, which can fail
+                # (NFS away, disk full). Nothing here closed the writer then:
+                # its thread waited for ever with the file open.
+                clip_path = self.storage.build_clip_path(camera_id, ctx_base['species'], start_ts, clip_format)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception(
+                    "No clip path for %s event @ %s; its recording stays in event_temp "
+                    "for the next startup", camera_id, start_ts,
+                )
+                if writer is not None:
+                    writer.close()
+                return
             registry.live_begin()
             claimed = registry.begin(clip_path, source='event')
 

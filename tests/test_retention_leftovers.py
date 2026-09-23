@@ -240,7 +240,7 @@ def test_a_dry_runs_ceiling_estimate_counts_the_leftovers(tmp_path, monkeypatch)
     event(st, "cam1", 200, video=False, thumbs=3)
     seen = []
 
-    def usage(assume_freed=0):
+    def usage(assume_freed=0, **kw):
         seen.append(assume_freed)
         return 50.0
 

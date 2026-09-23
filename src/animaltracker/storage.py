@@ -991,6 +991,9 @@ class StorageManager:
         """
         report = PruneReport(dry_run=dry_run)
         now = time.time()
+        # One reading, before anything goes; the ceiling pass subtracts what
+        # this run frees from it (see below).
+        disk_before = self._disk_usage() if max_utilization_pct else None
         if min_days > 0 and max_days > 0 and min_days > max_days:
             LOGGER.warning(
                 "retention.min_days (%d) is past retention.max_days (%d); keeping %d days",
@@ -1054,17 +1057,23 @@ class StorageManager:
             self._prune_leftover(group, report, dry_run)
 
         if max_utilization_pct:
+            # Measured as the reading taken before this run less what it has
+            # freed, in the real run as in the dry run. Re-reading the disk
+            # after each delete let the real run go on deleting whenever the
+            # volume is slow to report freed space (an NFS server that keeps
+            # snapshots, deferred frees): down to the min_days floor, far past
+            # what the dry run had predicted.
             def assumed_freed() -> int:
-                return report.freed_bytes + report.leftover_bytes if dry_run else 0
+                return report.freed_bytes + report.leftover_bytes
 
             remaining = [row for row in aged if row[1] not in report.deleted_set]
             for started, clip, size in remaining:
-                used_pct = self._utilization_pct(assumed_freed())
+                used_pct = self._utilization_pct(assumed_freed(), baseline=disk_before)
                 if used_pct is None or used_pct <= max_utilization_pct:
                     break
                 self._prune_one(clip, started, size, report, dry_run,
                                 "disk at %.0f%%, ceiling %d%%" % (used_pct, max_utilization_pct))
-            report.utilization_pct = self._utilization_pct(assumed_freed())
+            report.utilization_pct = self._utilization_pct(assumed_freed(), baseline=disk_before)
             if (report.utilization_pct is not None
                     and report.utilization_pct > max_utilization_pct):
                 report.still_over_ceiling = True
@@ -1113,10 +1122,16 @@ class StorageManager:
         report.leftover_files += len(group.files)
         report.leftover_bytes += group.size
 
-    def _utilization_pct(self, assume_freed: int = 0) -> Optional[float]:
+    def _disk_usage(self):
         try:
-            stat = shutil.disk_usage(self.storage_root)
+            return shutil.disk_usage(self.storage_root)
         except OSError:
+            return None
+
+    def _utilization_pct(self, assume_freed: int = 0, baseline=None) -> Optional[float]:
+        """Percent used, less ``assume_freed``, from ``baseline`` or a fresh reading."""
+        stat = baseline if baseline is not None else self._disk_usage()
+        if stat is None:
             return None
         used = max(0, stat.used - assume_freed)
         return (used / stat.total) * 100 if stat.total else None

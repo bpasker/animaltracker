@@ -155,7 +155,7 @@ def test_a_disk_over_its_ceiling_takes_the_oldest_first(tmp_path, monkeypatch):
     newest = add_clip(st, "cam1", 80, species="bird")
     # Well inside max_days, but the disk is full. Usage falls as clips
     # actually go, which is what the real pass re-measures between deletes.
-    def usage(assume_freed=0):
+    def usage(assume_freed=0, **kw):
         left = len([p for p in (st.storage_root / "clips").rglob("*.mp4") if p.is_file()])
         return 95.0 if left > 1 else 50.0
 
@@ -171,11 +171,35 @@ def test_a_disk_over_its_ceiling_takes_the_oldest_first(tmp_path, monkeypatch):
 def test_it_says_so_when_it_cannot_get_under_the_ceiling(tmp_path, monkeypatch):
     st = storage(tmp_path)
     add_clip(st, "cam1", 3)                       # protected by the floor
-    monkeypatch.setattr(st, "_utilization_pct", lambda assume_freed=0: 99.0)
+    monkeypatch.setattr(st, "_utilization_pct", lambda assume_freed=0, **kw: 99.0)
 
     report = st.prune_clips(max_days=365, min_days=7, max_utilization_pct=80, dry_run=False)
 
     assert report.deleted == [] and report.still_over_ceiling is True
+
+
+def test_a_volume_slow_to_report_freed_space_is_not_emptied(tmp_path, monkeypatch):
+    # Bug hunt, 2026-09-22: the real run re-read the disk after every delete,
+    # so on a volume that reports frees late (an NFS server keeping
+    # snapshots) usage never seemed to fall and it deleted down to the
+    # min_days floor, far past what its dry run had listed.
+    from collections import namedtuple
+
+    from animaltracker import storage as storage_mod
+
+    Usage = namedtuple("Usage", "total used free")
+    st = storage(tmp_path)
+    clips = [add_clip(st, "cam1", age, size=10_000) for age in (100, 90, 80, 70, 60)]
+    # 83% of 100 kB used, and the reading never changes: one 10 kB clip
+    # brings it under the 80% ceiling.
+    monkeypatch.setattr(storage_mod.shutil, "disk_usage", lambda path: Usage(100_000, 83_000, 17_000))
+
+    preview = st.prune_clips(max_days=365, min_days=7, max_utilization_pct=80, dry_run=True)
+    report = st.prune_clips(max_days=365, min_days=7, max_utilization_pct=80, dry_run=False)
+
+    assert len(preview.deleted) == 1 and report.deleted == preview.deleted
+    assert not clips[0].exists() and all(c.exists() for c in clips[1:])
+    assert report.still_over_ceiling is False
 
 
 # --- the dry run ----------------------------------------------------------------------

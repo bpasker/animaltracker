@@ -25,9 +25,20 @@ def test_an_adopted_job_ends_when_the_server_says_the_clip_is_free():
     poll = re.search(r"function pollJob\(\) \{.*?\n\}\n", DETAIL, re.S).group(0)
     ended = poll.index("S.job.adopted && payload && !payload.reprocessing")
     stop = poll.index("stopJobPolling();")
-    assert "S.job = null;" in poll[ended:stop]          # cleared first, so the stop below applies to it
+    assert "dropJob();" in poll[ended:stop]             # cleared first, so the stop below applies to it
 
 
 def test_the_queued_watch_comes_back_with_the_tab():
     handler = re.search(r"function installVisibility\(\) \{.*?\n  \}\)\);", DETAIL, re.S).group(0)
     assert "S.job || (S.clip && S.clip.analysis === 'queued')" in handler
+
+
+def test_every_way_a_job_ends_closes_its_progress_toast():
+    # Bug hunt, 2026-09-22: progress toasts have no timeout, and the adopted
+    # job's end, the 404 and the follow-the-rename path set S.job to null
+    # without closing it, so "Reanalysis already running" spun for good.
+    drop = re.search(r"function dropJob\(\) \{.*?\n\}\n", DETAIL, re.S).group(0)
+    assert "S.job.toast.close()" in drop
+    for name in ("pollJob", "followRenamedClip"):
+        body = re.search(r"function %s\(.*?\n\}\n" % name, DETAIL, re.S).group(0)
+        assert "S.job = null" not in body, name

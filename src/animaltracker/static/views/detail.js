@@ -1492,7 +1492,7 @@ function pollJob() {
          clear it, and a clip that keeps its name sends no rename to follow.
          Left alone, the page polled every two seconds for as long as it
          stayed open, counting "Elapsed" upwards with Reanalyze disabled. */
-      S.job = null;
+      dropJob();
       jobLog('The analysis has finished.', 'info');
     } else if (S.job && wasReprocessing && !payload.reprocessing) {
       S.job.note = 'Finishing up — writing thumbnails and the log.';
@@ -1508,7 +1508,7 @@ function pollJob() {
     if (err && err.status === 404) {
       /* Gone for good — deleted by the post-processor, most likely. */
       stopJobPolling();
-      S.job = null;
+      dropJob();
       renderError(err);
       return;
     }
@@ -1516,6 +1516,14 @@ function pollJob() {
     paintJobState();
   });
   loadProcessingLog(true);
+}
+
+/** Forget the job and close its progress toast. Progress toasts have no
+    timeout: one left open (a 409 adopted into "Reanalysis already running")
+    spun until someone dismissed it by hand. */
+function dropJob() {
+  if (S.job && S.job.toast) S.job.toast.close();
+  S.job = null;
 }
 
 /** A job this page did not start but is now watching. */
@@ -1534,7 +1542,7 @@ function followRenamedClip(err) {
   var to = err && err.status === 404 && err.body && err.body.renamed_to;
   if (!to || to === S.path) return false;
   stopJobPolling();
-  S.job = null;
+  dropJob();
   toast.info('Analysed · this clip was renamed by the post-processor.');
   router.navigate(clipHref(to, S.query), { replace: true });
   return true;

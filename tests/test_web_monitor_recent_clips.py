@@ -111,3 +111,34 @@ def test_a_failing_archive_listing_leaves_the_host_figures(server, monkeypatch):
     system, gpu, detector_info, recent = server._monitor_host_stats()
 
     assert recent == [] and system["disk_total_gb"] > 0
+
+
+def test_polling_the_monitor_does_not_rescan_the_archive_every_few_seconds(server, monkeypatch):
+    # Bug hunt, 2026-09-22: the page polls every 2 s and the scan cache
+    # lives 3 s, so an open monitor walked the whole NFS archive about every
+    # 4 s. The panel now keeps its clips for RECENT_CLIPS_TTL.
+    from animaltracker import web as web_mod
+
+    write_clip(server, "cam1", "2026-09-19", "1789000000_bird.mp4", 1789000000)
+    scans = []
+    real = server._scan_recordings
+    monkeypatch.setattr(server, "_scan_recordings", lambda: scans.append(1) or real())
+    clock = [1000.0]
+    monkeypatch.setattr(web_mod._time, "monotonic", lambda: clock[0])
+
+    for _ in range(10):                 # twenty seconds of polling
+        recent(server)
+        clock[0] += 2.0
+    assert len(scans) == 1
+
+    clock[0] += web_mod.RECENT_CLIPS_TTL
+    recent(server)
+    assert len(scans) == 2
+
+
+def test_a_delete_through_the_server_shows_at_the_next_poll(server):
+    clip = write_clip(server, "cam1", "2026-09-19", "1789000000_bird.mp4", 1789000000)
+    assert recent(server)
+    clip.unlink()
+    server._invalidate_scan_cache()
+    assert recent(server) == []

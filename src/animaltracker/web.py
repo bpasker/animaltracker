@@ -176,6 +176,12 @@ STALE_AFTER_SECONDS = 5.0
 # notices, while repeat reads within a burst become free.
 RECORDINGS_CACHE_TTL = 3.0
 
+# The monitor page polls every 2 s, so its recent-clips panel would outlive the scan
+# cache on every other poll and walk the whole NFS archive about every 4 s for as long
+# as the page stays open. It keeps its five clips this long instead, and takes a fresher
+# list whenever some other request has just paid for a scan.
+RECENT_CLIPS_TTL = 30.0
+
 # Static assets live next to this module and are served straight from the git
 # checkout (production runs an editable install), so a deploy is just `git pull`.
 STATIC_DIR = Path(__file__).parent / 'static'
@@ -449,6 +455,7 @@ class WebServer:
         # Short-lived cache of the archive scan; see RECORDINGS_CACHE_TTL.
         self._scan_cache = None
         self._scan_cache_ts = 0.0
+        self._recent_clips = None      # (monotonic time, the monitor's five newest clips)
         self.asset_version = _compute_asset_version(STATIC_DIR)
         LOGGER.info("Static asset version: %s", self.asset_version)
         self.app = web.Application(middlewares=[_static_cache_middleware])
@@ -1110,6 +1117,7 @@ class WebServer:
     def _invalidate_scan_cache(self) -> None:
         """Drop the archive cache after a mutation this process performed."""
         self._scan_cache = None
+        self._recent_clips = None
 
     def _scan_recordings_cached(self):
         """TTL-cached archive scan for request handlers.
@@ -1124,6 +1132,14 @@ class WebServer:
         self._scan_cache = clips
         self._scan_cache_ts = now
         return clips
+
+    def _recent_clips_for_monitor(self):
+        """The five newest clips, rescanned at most every RECENT_CLIPS_TTL."""
+        now = _time.monotonic()
+        fresh_scan = self._scan_cache is not None and (now - self._scan_cache_ts) < RECORDINGS_CACHE_TTL
+        if fresh_scan or self._recent_clips is None or (now - self._recent_clips[0]) >= RECENT_CLIPS_TTL:
+            self._recent_clips = (now, self._scan_recordings_cached()[:5])
+        return self._recent_clips[1]
 
     def _scan_recordings(self):
         clips_dir = self.storage_root / 'clips'
@@ -2784,7 +2800,7 @@ class WebServer:
                 # pipeline writes to, so the panel was permanently empty; and it
                 # put the (display, raw) tuple in 'species', which the page would
                 # have rendered as "Deer,deer".
-                for clip in self._scan_recordings_cached()[:5]:
+                for clip in self._recent_clips_for_monitor():
                     recent_clips.append({
                         'path': clip['path'],
                         'species': clip['species'],

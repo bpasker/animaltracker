@@ -475,6 +475,12 @@ class ObjectTracker:
         category = categories.get(lineage[0], 'animal') if lineage else 'animal'
         return (category, species_rank(species))
 
+    @staticmethod
+    def _is_lineage_ancestor(generic: str, specific: str) -> bool:
+        """Whether ``generic`` names a level above ``specific`` on its own branch."""
+        ancestor = species_lineage(generic)
+        return species_lineage(specific)[:len(ancestor)] == ancestor
+
     def _species_compatible(self, species1: str, species2: str) -> bool:
         """Check if two species are compatible for merging.
         
@@ -624,7 +630,8 @@ class ObjectTracker:
         1. Tracks don't overlap in time (not two animals at once)
         2. Tracks are temporally adjacent (within max_frame_gap)
         3. The specific track has enough detections to be reliable (min_specific_detections)
-        4. Species are hierarchically compatible (same animal type family)
+        4. The generic track's label is an ancestor of the specific one's
+           (its lineage is a prefix of the specific lineage)
         
         Args:
             max_frame_gap: Maximum gap between tracks to consider merging
@@ -681,10 +688,16 @@ class ObjectTracker:
                 if generic['specificity'] >= specific['specificity']:
                     continue
                 
-                # Check species compatibility
-                if not self._species_compatible(specific['species'], generic['species']):
-                    LOGGER.debug("Skipping merge: %s and %s not compatible", 
-                                specific['species'], generic['species'])
+                # Only the specific track's own ancestors: "animal",
+                # "mammalia" or "mammalia_carnivora" into canidae, never
+                # "mammalia_rodentia_rodent". This pass has no spatial test,
+                # so a same-class test let any mammal within 120 frames
+                # anywhere in the frame be folded in, and the vote then
+                # settled the two animals as one. Misreads that contradict
+                # the lineage are left to the spatial passes.
+                if not self._is_lineage_ancestor(generic['species'], specific['species']):
+                    LOGGER.debug("Skipping merge: %s is not an ancestor of %s",
+                                generic['species'], specific['species'])
                     continue
                 
                 generic_info = generic['info']

@@ -3086,7 +3086,8 @@ function save(opts) {
      equals the file, so there is nothing to "change", and without this the
      Save button looked like it did nothing at all. */
   var force = !!(opts && opts.apply);
-  if (S.saving || !S.draft || !S.baseline) return Promise.resolve(false);
+  /* The error toast's Retry outlives the page and calls this after unmount. */
+  if (!S || S.destroyed || S.saving || !S.draft || !S.baseline) return Promise.resolve(false);
 
   var problems = validateModel(S.draft);
   if (problems.length) {
@@ -3885,8 +3886,9 @@ function confirmLeave(proceed) {
     ]
   });
   S.leaveDialog.result.then(function (v) {
+    /* unmount closes the dialog and nulls S before this runs. */
+    if (!S || S.destroyed) return;
     S.leaveDialog = null;
-    if (!S || !S || S.destroyed) return;
     if (v === 'go') {
       S.baseline = clone(S.draft);   /* silence the guard, then navigate */
       refreshDirty();
@@ -3914,32 +3916,11 @@ function installGuards() {
     return '';
   }));
 
-  /* In-app links (tab bar, app bar, rail) are plain anchors that app.js
-     intercepts. We run first, in the capture phase, and only when there is
-     something to lose. */
-  track(on(document, 'click', function (ev) {
-    if (!S || S.destroyed || S.saving) return;
-    if (ev.defaultPrevented || ev.button !== 0) return;
-    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-    var node = ev.target;
-    while (node && node !== document && node.tagName !== 'A') node = node.parentElement;
-    if (!node || node === document || !node.getAttribute) return;
-    var href = node.getAttribute('href');
-    if (!href || href.charAt(0) === '#') return;
-    if (node.target && node.target !== '_self') return;
-    if (node.host && node.host !== window.location.host) return;
-    var here = window.location.pathname + window.location.search;
-    if (href === here) return;
-    if (!computeChanges().list.length) return;
-
-    ev.preventDefault();
-    ev.stopPropagation();
-    confirmLeave(function () { router.navigate(href); });
-  }, true));
-
-  /* Back and Forward reach no anchor: without this the whole draft went away
-     in silence on a Back press or a trackpad swipe. The router puts the URL
-     back for us and leaves the asking to this. */
+  /* Every in-app way off this page goes through the router and asks here
+     first: links (app.js intercepts them), Back and Forward (the router puts
+     the URL back), shortcuts, the command palette, search and toasts. Only
+     the link used to be caught, by a click listener, so `g l` or a search
+     threw the draft away in silence. */
   track(router.guard(function (to) {
     if (!S || S.destroyed || S.saving) return true;
     return confirmLeave(function () { router.navigate(to); });

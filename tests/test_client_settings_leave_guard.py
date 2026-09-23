@@ -28,11 +28,11 @@ def body_of(source: str, name: str) -> str:
 
 def test_the_router_can_be_vetoed_and_puts_the_url_back():
     start = re.search(r"start: function \(mountRoot\) \{.*?\n    \},", ROUTER, re.S).group(0)
-    assert "navGuard(" in start
+    assert "guardAllows(" in start
     # popstate cannot be cancelled, so the guard's "no" is honoured by pushing
     # the previous URL back before resolve() would have mounted anything.
-    assert "window.history.pushState(null, '', from);" in start
-    assert start.index("pushState(null, '', from)") < start.index("resolve();")
+    assert "window.history.pushState(null, '', current.url);" in start
+    assert start.index("pushState(null, '', current.url)") < start.index("resolve();")
     assert "guard: function (fn)" in ROUTER
 
 
@@ -45,7 +45,9 @@ def test_a_guard_never_outlives_the_view_that_registered_it():
 def test_settings_guards_back_with_the_same_dialog_as_a_link_click():
     guards = body_of(SETTINGS, "installGuards")
     assert "router.guard(function (to)" in guards
-    assert guards.count("confirmLeave(") == 2          # the click handler and the guard
+    # One guard for every exit: the router asks it on links, Back/Forward
+    # and navigate() alike (see test_client_router_guard.py).
+    assert guards.count("confirmLeave(") == 1
     assert "track(router.guard(" in guards             # dropped when the view unmounts
     # The dialog itself is built once, in the shared function.
     assert SETTINGS.count("'Save and leave'") == 1
@@ -59,7 +61,7 @@ def test_save_and_leave_leaves_only_once_the_write_succeeded():
 
     save = body_of(SETTINGS, "save")
     assert "return api.saveConfig(" in save            # the caller can wait for it
-    # already saving / no draft, validation, payload: nothing was written
+    # gone / already saving / no draft, validation, payload: nothing was written
     assert save.count("return Promise.resolve(false)") == 3
     assert "return Promise.resolve(true)" in save             # nothing to save: safe to leave
     assert "return true;" in save and save.count("return false;") >= 2

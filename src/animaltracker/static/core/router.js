@@ -137,6 +137,33 @@ function createRouter() {
     };
   }
 
+  /* Whether showing `url` would unmount the mounted view: another route or
+     view, another route param, or a view that cannot update in place. A
+     query change on the same view (a settings section, a filter) keeps the
+     view and whatever it holds, so it is not leaving. */
+  function leavesView(url) {
+    if (!mounted || !current) return false;
+    var u = new URL(url, window.location.href);
+    var found = match(appPath(u.pathname));
+    var view = found ? found.route.view : (fallback && fallback.view);
+    if (view !== mounted.view || (found ? found.route.pattern : null) !== mounted.route) return true;
+    for (var k in found.params) {
+      if (found.params[k] !== current.params[k]) return true;
+    }
+    return !mounted.view.update;
+  }
+
+  /* Ask the guard, if there is one and the navigation leaves the view. */
+  function guardAllows(to, from) {
+    if (!navGuard || !leavesView(to)) return true;
+    try {
+      return navGuard(to, from) !== false;
+    } catch (err) {
+      if (window.console) console.error('[router] navigation guard failed', err);
+      return true;
+    }
+  }
+
   function notify(ctx) {
     var list = subs.slice();
     for (var i = 0; i < list.length; i++) {
@@ -214,20 +241,13 @@ function createRouter() {
     start: function (mountRoot) {
       root = mountRoot;
       window.addEventListener('popstate', function () {
-        if (navGuard && current) {
-          var from = current.url;
-          var stay = false;
-          try {
-            stay = navGuard(window.location.pathname + window.location.search, from) === false;
-          } catch (err) {
-            if (window.console) console.error('[router] navigation guard failed', err);
-          }
-          if (stay) {
-            /* popstate cannot be cancelled: the URL has already moved, so put
-               it back. The guard is what asks the operator what to do next. */
-            window.history.pushState(null, '', from);
-            return;
-          }
+        /* A fragment link (the skip link's #main) fires popstate too, with
+           the URL unchanged; guardAllows only asks when the view would go. */
+        if (current && !guardAllows(window.location.pathname + window.location.search, current.url)) {
+          /* popstate cannot be cancelled: the URL has already moved, so put
+             it back. The guard is what asks the operator what to do next. */
+          window.history.pushState(null, '', current.url);
+          return;
         }
         resolve();
       });
@@ -236,15 +256,15 @@ function createRouter() {
     },
 
     /**
-     * Veto Back and Forward while the mounted view has something to lose.
-     * `fn(to, from)` returns false to stay put; the router restores the URL
-     * and leaves it to `fn` to ask the operator and navigate itself. One
-     * guard at a time, since one view is mounted, and it is dropped when that
-     * view unmounts. Returns a disposer.
-     *
-     * In-app links are plain anchors a view can intercept by click, but a
-     * Back press or a trackpad swipe reaches nothing but popstate: without
-     * this, the settings page's whole unsaved draft went away in silence.
+     * Veto leaving the mounted view while it has something to lose.
+     * `fn(to, from)` returns false to stay put and is then left to ask the
+     * operator and navigate itself. It is asked on every way out that goes
+     * through the router: Back and Forward (the URL is put back), links,
+     * and `navigate` / `go` / `setQuery` from shortcuts, the command
+     * palette, search or a toast. Only a navigation that would unmount the
+     * view asks; one it handles with `update()` does not. One guard at a
+     * time, since one view is mounted, and it is dropped when that view
+     * unmounts. Returns a disposer.
      */
     guard: function (fn) {
       navGuard = fn || null;
@@ -269,6 +289,7 @@ function createRouter() {
       var target = String(url);
       var here = window.location.pathname + window.location.search;
       if (target === here && !o.force) return;
+      if (!guardAllows(target, here)) return;
       if (o.replace) window.history.replaceState(o.state || null, '', target);
       else window.history.pushState(o.state || null, '', target);
       resolve();

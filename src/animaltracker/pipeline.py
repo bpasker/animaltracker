@@ -2600,6 +2600,10 @@ class StreamWorker:
         return best_species, best_confidence
 
 
+class PipelineAlreadyRunning(RuntimeError):
+    """Another pipeline holds this configuration's ``event_temp``."""
+
+
 class PipelineOrchestrator:
     def __init__(
         self,
@@ -2646,10 +2650,9 @@ class PipelineOrchestrator:
             logs_root=Path(self.runtime.general.logs_root),
             max_utilization_pct=self.runtime.general.retention.max_utilization_pct,
         )
-        # Recordings the previous run never turned into clips. Listed now,
-        # before any camera records, so nothing in the list is ours; they
-        # are saved in the background once the pipeline is up (``run``).
-        self._orphan_event_temps = self.storage.list_orphan_event_temps()
+        # Recordings the previous run never turned into clips are listed by
+        # ``run`` once it holds ``event_temp``, before any camera records.
+        self._event_temp_claim = None
         self._orphan_stop = threading.Event()
         cameras = runtime.cameras
         if camera_filter:
@@ -2659,6 +2662,16 @@ class PipelineOrchestrator:
         self.cameras = cameras
 
     async def run(self) -> None:
+        # Before anything else: a second pipeline on the same logs_root would
+        # take this one's open recordings for orphans (and its web server
+        # would fail to bind only after it had).
+        self._event_temp_claim = self.storage.claim_event_temp()
+        if self._event_temp_claim is None:
+            raise PipelineAlreadyRunning(
+                f"another pipeline is already running on {self.storage.logs_root}; "
+                "stop it first (systemctl stop animaltracker)"
+            )
+        orphan_event_temps = self.storage.list_orphan_event_temps()
         stop_event = asyncio.Event()
 
         # Initialize post-processing concurrency limit from config
@@ -3005,10 +3018,10 @@ class PipelineOrchestrator:
         )
         
         recovery.start()
-        if self._orphan_event_temps:
+        if orphan_event_temps:
             threading.Thread(
                 target=self._recover_orphan_recordings,
-                args=(list(self._orphan_event_temps), recovery),
+                args=(orphan_event_temps, recovery),
                 name="orphan-recordings", daemon=True,
             ).start()
         try:

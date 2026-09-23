@@ -77,6 +77,50 @@ def test_constructing_a_storage_manager_leaves_open_recordings_alone(tmp_path):
     assert second.list_orphan_event_temps() == [live]
 
 
+def test_only_one_process_can_hold_event_temp(tmp_path):
+    first = _storage(tmp_path)
+    second = StorageManager(storage_root=first.storage_root, logs_root=first.logs_root)
+
+    held = first.claim_event_temp()
+    assert held is not None
+    assert second.claim_event_temp() is None
+
+    held.close()                      # what the kernel does when the process exits
+    again = second.claim_event_temp()
+    assert again is not None
+    again.close()
+
+
+def test_a_second_pipeline_leaves_the_running_ones_recordings_alone(tmp_path, monkeypatch):
+    # ``run --camera cam1`` beside the service used to list the service's
+    # open recordings as orphans, transcode and delete them, and only then
+    # fail to bind the web port.
+    from animaltracker import pipeline as pipeline_mod
+    from animaltracker.config import load_runtime_config
+    from animaltracker.pipeline import PipelineAlreadyRunning
+
+    monkeypatch.setattr(pipeline_mod, "create_realtime_detector",
+                        lambda cfg: SimpleNamespace(backend_name="yolo"))
+    cfg = load_runtime_config(Path(__file__).resolve().parents[1] / "config" / "cameras.sample.yml")
+    cfg.general.storage_root = str(tmp_path / "storage")
+    cfg.general.logs_root = str(tmp_path / "logs")
+
+    service = StorageManager(storage_root=tmp_path / "storage", logs_root=tmp_path / "logs")
+    claim = service.claim_event_temp()
+    live = _temp(service, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    recover = []
+    monkeypatch.setattr(PipelineOrchestrator, "_recover_orphan_recordings",
+                        lambda self, *a: recover.append(a))
+    try:
+        with pytest.raises(PipelineAlreadyRunning):
+            asyncio.run(PipelineOrchestrator(runtime=cfg).run())
+    finally:
+        claim.close()
+
+    assert live.exists()
+    assert recover == []
+
+
 def test_orphans_are_listed_oldest_event_first_and_a_missing_directory_is_empty(tmp_path):
     storage = _storage(tmp_path)
     assert storage.list_orphan_event_temps() == []

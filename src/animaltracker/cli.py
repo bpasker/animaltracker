@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .config import load_runtime_config
 from .onvif_client import OnvifClient
-from .pipeline import PipelineOrchestrator
+from .pipeline import PipelineAlreadyRunning, PipelineOrchestrator
 from .logging_setup import attach_file_log, configure_logging
 from .storage import StorageManager
 
@@ -43,7 +43,7 @@ def _load_secrets(config_path: str) -> None:
         LOGGER.debug("No secrets.env found at %s", secrets_path)
 
 
-def cmd_run(args: argparse.Namespace) -> None:
+def cmd_run(args: argparse.Namespace) -> int | None:
     _load_secrets(args.config)
 
     # Enable debug logging if requested
@@ -70,7 +70,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
     target_cams = args.camera if args.camera else [cam.id for cam in runtime.cameras]
     LOGGER.info("Launching pipeline for cameras: %s", ", ".join(target_cams))
-    asyncio.run(orchestrator.run())
+    try:
+        asyncio.run(orchestrator.run())
+    except PipelineAlreadyRunning as exc:
+        LOGGER.error("Not starting: %s", exc)
+        return 1
 
 
 def cmd_discover(args: argparse.Namespace) -> int:

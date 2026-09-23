@@ -1,6 +1,7 @@
 """Storage management for clips and logs."""
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import re
@@ -502,12 +503,39 @@ class StorageManager:
         # new one from the same (camera, second).
         return tmp_dir / f"{camera_id}_{int(event_ts)}_{uuid.uuid4().hex[:8]}.temp.avi"
 
+    def claim_event_temp(self):
+        """Take ``event_temp`` for this process; None if another holds it.
+
+        A pipeline that starts treats every recording there as left behind
+        by a dead run and transcodes and deletes it. That is only true when
+        no other pipeline is recording into the same directory: ``run
+        --camera cam1`` beside the service used to take the service's open
+        recordings, and its web server failed to bind only afterwards. The
+        claim is an advisory lock on a file in ``event_temp`` (local disk),
+        released by the kernel when the process exits, however it exits.
+        Keep the returned file open for as long as the pipeline runs.
+        """
+        tmp_dir = self.logs_root / "event_temp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        handle = open(tmp_dir / ".pipeline.lock", "a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        return handle
+
     def list_orphan_event_temps(self) -> List[Path]:
         """Streaming temp AVIs in ``event_temp``, oldest event first.
 
-        Only meaningful before this process records anything: call it once
-        at pipeline startup, when every file there belongs to a run that is
-        gone. Later the directory also holds the live events' recordings.
+        Only meaningful before this process records anything, and only
+        while it holds ``claim_event_temp``: call it once at pipeline
+        startup, when every file there belongs to a run that is gone. Later
+        the directory also holds the live events' recordings.
         """
         tmp_dir = self.logs_root / "event_temp"
         if not tmp_dir.is_dir():

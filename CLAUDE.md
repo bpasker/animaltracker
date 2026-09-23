@@ -133,6 +133,9 @@ The system uses a two-stage detection approach:
   builds one next to the running service). At startup the pipeline turns
   whatever a previous run left behind into `<epoch>_animal.mp4` clips
   (`recover_orphan_event_temp`), which the recovery sweep then analyses.
+  That is only safe because `run` first takes `claim_event_temp` (a flock
+  in `event_temp`) and refuses to start if another pipeline holds it; a
+  transcode that fails keeps the AVI for the next startup.
   Retention is `prune_clips`, run by `cleanup` from the daily
   `ssd-cleaner.timer`. Its `find_leftovers` sweeps key frames and logs whose
   clip is gone; it groups files by directory and event epoch, never by name,

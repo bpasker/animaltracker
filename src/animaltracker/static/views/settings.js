@@ -295,7 +295,7 @@ var CAMERA_GROUPS = [
     { key: 'rtsp.transport', kind: 'select', options: TRANSPORT_OPTIONS, restart: true,
       label: 'Transport', hint: 'TCP is reliable; UDP has lower latency. rtsps:// streams need TCP.' },
     { key: 'rtsp.hwaccel', kind: 'switch', restart: true,
-      label: 'Hardware decoding (CUDA)', hint: 'Decode on the NVIDIA GPU through FFmpeg. Falls back to software if the stream fails to open.' },
+      label: 'Hardware decoding (CUDA)', hint: 'Has no effect today: the OpenCV build the service uses cannot hardware-decode, so every stream is decoded on the CPU whatever this says (checked on the production host, 2026-09-23).' },
     { key: 'rtsp.latency_ms', kind: 'number', min: 0, max: 5000, step: 100, int: true, restart: true,
       label: 'Latency buffer (ms)', hint: 'Jitter buffer for the stream reader.' },
     { key: 'rtsp.frame_skip', kind: 'number', min: 0, max: 30, step: 1, int: true, restart: true,

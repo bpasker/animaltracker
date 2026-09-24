@@ -62,7 +62,11 @@ def build_ffmpeg_uri(rtsp_uri: str, transport: str = "tcp", hwaccel: bool = Fals
     Args:
         rtsp_uri: RTSP stream URL
         transport: tcp or udp
-        hwaccel: If True, enable CUDA hardware decoding (requires FFmpeg with CUDA support)
+        hwaccel: If True, ask for CUDA hardware decoding. OpenCV's capture
+            does not read ``hwaccel`` from these options, and the pip build
+            has no hardware decoders anyway (CAP_PROP_HW_ACCELERATION reads
+            0 on production, NVDEC stays at 0%): every stream is decoded on
+            the CPU either way.
     """
     import os
     

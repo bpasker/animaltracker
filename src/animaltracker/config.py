@@ -205,7 +205,7 @@ class RTSPSettings(BaseModel):
     frame_skip: int = Field(default=1, ge=0, description="Process every Nth frame (0 or 1=all frames, 2=half, etc)")
     transport: str = Field(default="tcp", pattern="^(tcp|udp)$")
     latency_ms: int = Field(default=0, ge=0)
-    hwaccel: bool = Field(default=False, description="Use NVDEC GPU hardware decoding (requires GStreamer)")
+    hwaccel: bool = Field(default=False, description="Asks FFmpeg for CUDA decoding. No effect with the pip OpenCV build: its FFmpeg has no hardware decoders, so streams decode on the CPU either way (CAP_PROP_HW_ACCELERATION reads 0).")
 
 
 class ThresholdSettings(BaseModel):

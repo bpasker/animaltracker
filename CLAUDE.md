@@ -63,6 +63,14 @@ The system uses a two-stage detection approach:
   The blur filter (`thresholds.blur_threshold`) only runs on a camera the
   PTZ tracker moves, within `BLUR_AFTER_MOVE_S` of a move: on a fixed camera
   it dropped every night infrared frame (Otteson1 never recorded at night).
+  `motion.MotionGate` (`thresholds.motion_gate`: off / observe / on,
+  default observe) compares each frame with a 160-px background before the
+  live detector. Observing, it checks every frame and only counts the
+  frames it would skip, and those that held a detection ("missed", logged
+  as `[MOTION_GATE]`, shown on the Monitor card); switch a camera to `on`
+  only once that count stays at zero. It never skips while an event is
+  open and lets a frame through every `HEARTBEAT_S`; skipped frames do not
+  tick the tracker, so a still animal's track does not age out.
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
   Every forward pass runs under `self.model_lock`, which is the instance's
   own lock plus the process-wide `MODEL_LOAD_GATE` held shared; every model

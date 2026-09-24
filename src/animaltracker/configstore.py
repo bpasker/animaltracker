@@ -147,6 +147,7 @@ CAMERA_FIELDS: Dict[str, bool] = {
     "thresholds.tracking_min_detection_area": True,
     "thresholds.blur_threshold": True,
     "thresholds.ptz_settle_time": True,
+    "thresholds.motion_gate": True,
     "ptz_tracking": False,    # the whole block; the tracker is built at startup
     "include_species": True,
     "exclude_species": True,

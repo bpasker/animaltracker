@@ -21,6 +21,7 @@ from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector, cleanup_gpu_memory
 from .notification import NotificationContext, PushoverNotifier
 from .storage import StorageManager, StreamingClipWriter, measured_frame_rate
+from .motion import MotionGate
 from .onvif_client import OnvifClient
 from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
@@ -465,6 +466,7 @@ class StreamWorker:
     # so a worker built without it (tests use object.__new__) can count.
     perf_frames_skipped_blur: int = 0
     perf_frames_skipped_settle: int = 0
+    perf_frames_skipped_motion: int = 0
     # Where a closed event's analysis and alert run (see AnalysisWorkers).
     # One worker per post-processing slot; the semaphore stays the limit the
     # recovery sweep shares.
@@ -549,6 +551,7 @@ class StreamWorker:
         self.perf_frames_dropped_busy: int = 0   # frames skipped because previous inference still running
         self.perf_frames_skipped_blur: int = 0   # taken for inference, rejected by the blur filter
         self.perf_frames_skipped_settle: int = 0 # taken for inference, skipped while the PTZ settles
+        self.perf_frames_skipped_motion: int = 0 # taken for inference, skipped by the motion gate ("on")
         self._perf_window_start: float = time.time()
         self._perf_log_interval: float = 10.0    # seconds
         # Last published per-window snapshot (for /api/cameras).
@@ -1102,6 +1105,7 @@ class StreamWorker:
             # before it ran: the monitor shows why a camera checks nothing.
             'skipped_blur_fps': round(self.perf_frames_skipped_blur / elapsed, 2) if elapsed > 0 else 0.0,
             'skipped_settle_fps': round(self.perf_frames_skipped_settle / elapsed, 2) if elapsed > 0 else 0.0,
+            'skipped_motion_fps': round(self.perf_frames_skipped_motion / elapsed, 2) if elapsed > 0 else 0.0,
             'at': now,
         }
         self.perf_last_snapshot = snapshot
@@ -1145,6 +1149,7 @@ class StreamWorker:
         self.perf_frames_dropped_busy = 0
         self.perf_frames_skipped_blur = 0
         self.perf_frames_skipped_settle = 0
+        self.perf_frames_skipped_motion = 0
 
     def get_perf_stats(self) -> Dict[str, float]:
         """Return the most recent perf snapshot (empty dict before first window)."""
@@ -1338,6 +1343,18 @@ class StreamWorker:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return cv2.Laplacian(gray, cv2.CV_64F).var()
 
+    def _motion_gate_for_camera(self) -> MotionGate:
+        gate = self.__dict__.get('_motion_gate')
+        if gate is None:
+            gate = MotionGate(self.camera.id)
+            self.__dict__['_motion_gate'] = gate
+        return gate
+
+    def motion_gate_summary(self) -> dict:
+        """The motion gate's last one-minute roll-up (empty until it has one)."""
+        gate = self.__dict__.get('_motion_gate')
+        return dict(gate.last_summary) if gate is not None else {}
+
     # How long after a PTZ move a frame can still be smeared by it; the blur
     # filter runs only within this window (see _process_frame).
     BLUR_AFTER_MOVE_S = 3.0
@@ -1432,6 +1449,36 @@ class StreamWorker:
                 await self._maybe_close_event(ts)
                 return
 
+        # --- Motion gate: is there anything new in this frame? ---
+        # See motion.MotionGate. "observe" (the default) checks every frame
+        # as before and only counts what the gate would have skipped, and
+        # which of those held a detection that passed the filters; "on"
+        # skips them. Never skips while an event is open, and lets one frame
+        # through every few seconds whatever it measures.
+        gate_mode = getattr(self.camera.thresholds, 'motion_gate', 'off')
+        gate = None
+        gate_reading = None
+        gate_reason = ''
+        if gate_mode in ('observe', 'on'):
+            gate = self._motion_gate_for_camera()
+            try:
+                gate_reading = await loop.run_in_executor(None, gate.measure, frame)
+            except Exception as e:  # noqa: BLE001 - a broken gate must not stop detection
+                LOGGER.debug("Motion gate failed for %s: %s", self.camera.id, e)
+                gate_reading = None
+            if gate_reading is not None:
+                gate_reason = gate.wants_check(gate_reading, self.event_state is not None)
+                if gate_reason:
+                    gate.note_check()
+                elif gate_mode == 'on':
+                    # Nothing moved: whatever the detector would see here it
+                    # saw on the last frame that did. The tracker is not
+                    # ticked with an empty list, which would age a still
+                    # animal's track towards lost.
+                    gate.record(gate_reading, gate_reason, skipped=True, found=0)
+                    self.perf_frames_skipped_motion += 1
+                    return
+
         # --- Inference (with optional pre-inference downscale) ---
         # If the camera config sets inference_max_width and the captured
         # frame is wider, run inference on a CPU-resized copy and scale the
@@ -1510,6 +1557,12 @@ class StreamWorker:
         # This prevents false positives from triggering clip recording
         frame_h, frame_w = frame.shape[:2]
         filtered = self._filter_false_positives(filtered, frame_w, frame_h)
+
+        if gate is not None and gate_reading is not None:
+            # What decides whether "on" is safe: a frame the gate would have
+            # skipped in which the detector found something that could
+            # start an event.
+            gate.record(gate_reading, gate_reason, skipped=False, found=len(filtered))
 
         # Log if detections were filtered out
         if detections and not filtered:

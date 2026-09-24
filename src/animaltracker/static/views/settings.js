@@ -61,6 +61,12 @@ var SPECIES_CATALOG = [
     'bat', 'mouse', 'rat', 'mole', 'weasel', 'otter', 'mink', 'badger']]
 ];
 
+var MOTION_GATE_OPTIONS = [
+  ['observe', 'Observe (check every frame, count what it would skip)'],
+  ['on', 'On (skip frames without motion)'],
+  ['off', 'Off']
+];
+
 var TRANSPORT_OPTIONS = [
   ['tcp', 'TCP (reliable)'],
   ['udp', 'UDP (lower latency)']
@@ -337,7 +343,9 @@ var CAMERA_GROUPS = [
     { key: 'thresholds.blur_threshold', kind: 'number', min: 0, max: 1000, step: 10, advanced: true,
       label: 'Blur threshold', hint: 'On a PTZ camera, frames taken within 3 seconds of a move with Laplacian variance below this are skipped as smeared. Fixed cameras are never filtered: a dim night picture scores low without being blurred. 0 disables; 50–100 suits most PTZ cameras.' },
     { key: 'thresholds.ptz_settle_time', kind: 'number', min: 0, max: 5, step: 0.1, advanced: true,
-      label: 'PTZ settle time (seconds)', hint: 'Ignore detections this long after a PTZ move while the image steadies.' }
+      label: 'PTZ settle time (seconds)', hint: 'Ignore detections this long after a PTZ move while the image steadies.' },
+    { key: 'thresholds.motion_gate', kind: 'select', options: MOTION_GATE_OPTIONS, advanced: true,
+      label: 'Motion gate', hint: 'Only send frames in which something moved to the live detector, plus one every 5 seconds and every frame while a clip records. Observe counts what it would skip, and any skipped frame that had a detection, on the Monitor page and in the log; switch it on once that count stays at zero.' }
   ] },
   { id: 'ptz', legend: 'PTZ auto-tracking',
     hint: 'The tracker is built at startup; changes take effect after a restart.', fields: [

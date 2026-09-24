@@ -2828,10 +2828,19 @@ class WebServer:
         """
         try:
             camera = worker.camera
+            thresholds = getattr(camera, 'thresholds', None)
+            summary = worker.motion_gate_summary() if hasattr(worker, 'motion_gate_summary') else {}
             figures = {
                 'detect_enabled': bool(getattr(camera, 'detect_enabled', True)),
-                'blur_threshold': getattr(getattr(camera, 'thresholds', None), 'blur_threshold', None),
+                'blur_threshold': getattr(thresholds, 'blur_threshold', None),
                 'detection': None,
+                # The last one-minute roll-up of motion.MotionGate: how much
+                # it skipped (or, observing, would have) and how many of
+                # those frames held a detection.
+                'motion_gate': {
+                    'mode': getattr(thresholds, 'motion_gate', 'off'),
+                    'summary': summary if summary and (_time.time() - summary.get('at', 0)) < 180 else None,
+                },
             }
             perf = worker.get_perf_stats() if hasattr(worker, 'get_perf_stats') else {}
             at = perf.get('at')
@@ -2846,12 +2855,13 @@ class WebServer:
                 'busy_fps': round(busy / window, 2) if window else 0.0,
                 'blurry_fps': perf.get('skipped_blur_fps', 0.0),
                 'settling_fps': perf.get('skipped_settle_fps', 0.0),
+                'no_motion_fps': perf.get('skipped_motion_fps', 0.0),
                 'frame_age_ms': perf.get('frame_age_avg_ms'),
             }
             return figures
         except Exception as err:  # noqa: BLE001 - telemetry is best effort
             LOGGER.debug("Detection figures unavailable for %s: %s", getattr(worker, 'camera', None), err)
-            return {'detect_enabled': None, 'blur_threshold': None, 'detection': None}
+            return {'detect_enabled': None, 'blur_threshold': None, 'detection': None, 'motion_gate': None}
 
     def _detector_capacity(self) -> dict:
         """Share of the last minute each model ran, and the clips waiting for analysis.

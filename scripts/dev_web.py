@@ -90,6 +90,14 @@ class FakeWorker:
         self.storage = None   # set by main(), for save_manual_clip
         self.blurry = False   # --blurry: every frame turned away by the blur filter
 
+    def motion_gate_summary(self):
+        """A motion gate observing a quiet yard, for the monitor card."""
+        if not self.live:
+            return {}
+        return {'window_s': 60.0, 'frames': 210, 'would_skip': 181, 'skipped': 0, 'missed': 0,
+                'skip_pct': 86.2, 'changed_px_median': 1, 'changed_px_p90': 3,
+                'hit_px_min': None, 'at': time.time()}
+
     def get_perf_stats(self):
         """The monitor's detector card reads this; a live camera checks
         about one frame in six, a --blurry one none at all."""

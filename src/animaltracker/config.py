@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import os
 import re
@@ -217,6 +217,15 @@ class ThresholdSettings(BaseModel):
     tracking_min_detection_area: float = Field(default=0.0005, ge=0.0, le=0.5, description="Relaxed min area used instead of min_detection_area while the PTZ tracker is already TRACKING. A subject being followed routinely shrinks below min_detection_area in the wide view; dropping it there starves the PTZ controller and makes it return to patrol on a target it can still see. Also the floor for a box that overlaps the subject of an open event, so an animal that sits down or walks away keeps its clip going.")
     blur_threshold: float = Field(default=50.0, ge=0.0, le=1000.0, description="Laplacian variance below this value = blurry frame, skip detection. Applies only to a camera the PTZ tracker moves, within 3 s of a move. 0 = disabled. 50-100 works for most PTZ cameras.")
     ptz_settle_time: float = Field(default=0.5, ge=0.0, le=5.0, description="Seconds to wait after PTZ movement before processing detections (0 = disabled)")
+    motion_gate: Literal["off", "observe", "on"] = Field(
+        default="observe",
+        description=(
+            "Skip the live detector on frames in which nothing moved (motion.MotionGate). "
+            "'observe' checks every frame as before and only counts what the gate would "
+            "have skipped, and any skipped frame that held a detection; 'on' skips them; "
+            "'off' does neither."
+        ),
+    )
 
 
 class PTZTrackingSettings(BaseModel):

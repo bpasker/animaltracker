@@ -736,10 +736,18 @@ export const view = {
         return { share: 0, mod: 'warn', text: 'None checked · waiting for the PTZ to settle' };
       }
       var turnedAway = blurry + settling;
+      var noMotion = num(d.no_motion_fps) || 0;
       var parts = [fps(checked) + ' of ' + fps(cap) + ' fps checked'];
       if (checked > 0) parts.push('every ' + (Math.round(10 / checked) / 10) + ' s');
       if (turnedAway > 0 && checked + turnedAway > 0) {
         parts.push(Math.round(blurry / (checked + turnedAway) * 100) + '% too blurry');
+      }
+      var gateNote = motionGateNote(cam.motion_gate);
+      if (gateNote) parts.push(gateNote);
+      /* Few checks because nothing moves is the gate working, not a camera
+         falling behind: it still checks every few seconds. */
+      if (noMotion > 0 && checked < CAM_MIN_CHECK_FPS) {
+        return { share: share, text: parts.join(' · '), mod: 'live' };
       }
       /* Frames recorded, few checked, and not because the filters turned
          them away: the detector cannot get to this camera often enough. */
@@ -748,6 +756,20 @@ export const view = {
         return { share: share, text: parts.join(' · '), mod: 'critical' };
       }
       return { share: share, text: parts.join(' · '), mod: checked > 0 ? 'live' : 'off' };
+    }
+
+    /* The motion gate's last minute, in the camera's row. Observing, it
+       says what share it would skip and how many of those frames held a
+       detection: the number that must stay at zero before it goes on. */
+    function motionGateNote(g) {
+      if (!g || !g.summary || !g.summary.frames) return '';
+      var sm = g.summary;
+      if (g.mode === 'observe') {
+        return 'motion gate would skip ' + Math.round(sm.skip_pct) + '%' +
+          (sm.missed ? ', ' + sm.missed + ' with a detection' : ', none with a detection');
+      }
+      if (g.mode === 'on') return 'motion gate skipping ' + Math.round(sm.skip_pct) + '%';
+      return '';
     }
 
     function renderCapacityCameras(cams) {

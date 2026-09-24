@@ -214,3 +214,5 @@ def test_observing_counts_a_detection_on_a_frame_it_would_have_skipped(caplog):
     gate = w._motion_gate_for_camera()
     assert gate._window["missed"] >= 1
     assert "would have skipped a frame with 1 detection" in caplog.text
+    # Where it was, so a fixed spot (a still object) can be told from an animal.
+    assert "animal 0.90 at (" in caplog.text

@@ -1562,7 +1562,8 @@ class StreamWorker:
             # What decides whether "on" is safe: a frame the gate would have
             # skipped in which the detector found something that could
             # start an event.
-            gate.record(gate_reading, gate_reason, skipped=False, found=len(filtered))
+            gate.record(gate_reading, gate_reason, skipped=False, found=len(filtered),
+                        detections=filtered)
 
         # Log if detections were filtered out
         if detections and not filtered:

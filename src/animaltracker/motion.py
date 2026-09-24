@@ -71,12 +71,14 @@ class MotionGate:
         self._window = self._empty_window()
         self.last_summary: dict = {}
         self._last_miss_log = 0.0
+        self._frame_size = (0, 0)       # (w, h) of the last frame measured
 
     # --- measuring ------------------------------------------------------
 
     def measure(self, frame: np.ndarray) -> MotionReading:
         """Compare ``frame`` with the background, then fold it in."""
         small = self._small_grey(frame)
+        self._frame_size = (frame.shape[1], frame.shape[0])
         now = self._clock()
         with self._lock:
             bg = self._background
@@ -128,11 +130,15 @@ class MotionGate:
     @staticmethod
     def _empty_window() -> dict:
         return {"frames": 0, "would_skip": 0, "skipped": 0, "missed": 0,
-                "changed_px": [], "hit_px": []}
+                "changed_px": [], "hit_px": [], "missed_at": []}
 
-    def record(self, reading: MotionReading, reason: str, skipped: bool, found: int) -> None:
+    def record(self, reading: MotionReading, reason: str, skipped: bool, found: int,
+               detections=None) -> None:
         """Count one frame; ``found`` is how many detections passed the filters
-        (unknown, pass 0, when the frame was skipped for real)."""
+        (unknown, pass 0, when the frame was skipped for real). ``detections``
+        are those detections, so a miss can say where it was: one fixed spot
+        all night is a still object the gate is right to skip, boxes that
+        wander are animals."""
         w = self._window
         w["frames"] += 1
         if not reason:
@@ -141,7 +147,10 @@ class MotionGate:
                 w["skipped"] += 1
             elif found:
                 w["missed"] += 1
-                self._log_miss(reading, found)
+                where = self._describe(detections)
+                if where and len(w["missed_at"]) < 5:
+                    w["missed_at"].append(where)
+                self._log_miss(reading, found, where)
         if not reading.fresh:
             w["changed_px"].append(reading.changed_px)
             if found:
@@ -150,15 +159,31 @@ class MotionGate:
         if now - self._window_start >= self.SUMMARY_EVERY_S:
             self._roll_window(now)
 
-    def _log_miss(self, reading: MotionReading, found: int) -> None:
+    def _describe(self, detections) -> str:
+        """The best detection as "species conf at (x,y) size wxh", in fractions of the frame."""
+        if not detections:
+            return ""
+        best = max(detections, key=lambda d: getattr(d, "confidence", 0.0))
+        fw, fh = self._frame_size
+        bbox = getattr(best, "bbox", None)
+        if not bbox or not fw or not fh:
+            return f"{getattr(best, 'species', '?')} {getattr(best, 'confidence', 0.0):.2f}"
+        x1, y1, x2, y2 = bbox
+        return "%s %.2f at (%.2f,%.2f) size %.2fx%.2f" % (
+            getattr(best, "species", "?"), getattr(best, "confidence", 0.0),
+            (x1 + x2) / 2 / fw, (y1 + y2) / 2 / fh, (x2 - x1) / fw, (y2 - y1) / fh,
+        )
+
+    def _log_miss(self, reading: MotionReading, found: int, where: str = "") -> None:
         now = self._clock()
         if now - self._last_miss_log < 60.0:
             return
         self._last_miss_log = now
         LOGGER.info(
             "[MOTION_GATE] %s: the gate would have skipped a frame with %d detection(s) "
-            "(changed_px=%d, needs %d)",
+            "(changed_px=%d, needs %d)%s",
             self.camera_id, found, reading.changed_px, self.MIN_CHANGED_PX,
+            f": {where}" if where else "",
         )
 
     def _roll_window(self, now: float) -> None:
@@ -175,6 +200,7 @@ class MotionGate:
             "changed_px_median": px[len(px) // 2] if px else None,
             "changed_px_p90": px[min(len(px) - 1, int(len(px) * 0.9))] if px else None,
             "hit_px_min": min(w["hit_px"]) if w["hit_px"] else None,
+            "missed_at": list(w["missed_at"]),
             "at": time.time(),
         }
         self.last_summary = summary
@@ -187,5 +213,8 @@ class MotionGate:
                 summary["changed_px_median"], summary["changed_px_p90"], summary["hit_px_min"],
                 self.MIN_CHANGED_PX,
             )
+            if w["missed_at"]:
+                LOGGER.info("[MOTION_GATE] %s: skipped frames with a detection: %s",
+                            self.camera_id, "; ".join(w["missed_at"]))
         self._window_start = now
         self._window = self._empty_window()

@@ -143,6 +143,10 @@ function request(method, endpoint, opts) {
     var type = res.headers.get('Content-Type') || '';
     if (type.indexOf('application/json') < 0) return res.text();
     return res.json().catch(function (err) {
+      /* Cancelled while the body was still arriving (a newer reload took
+         over): the caller's abort, not a bad response. The timeout cannot
+         fire here, it was cleared when the headers came in. */
+      if (isAbort(err)) throw err;
       throw new ApiError('The server sent a malformed response.',
         { status: res.status, endpoint: endpoint, cause: err });
     });

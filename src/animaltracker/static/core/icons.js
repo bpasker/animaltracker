@@ -70,7 +70,9 @@ var PATHS = {
   'sparkle':     ['M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z'],
   'layers':      ['M12 3l9 5-9 5-9-5z', 'M3 13l9 5 9-5'],
   'disk':        ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'],
-  'external':    ['M14 4h6v6', 'M20 4l-9 9', 'M18 14v6H4V6h6']
+  'external':    ['M14 4h6v6', 'M20 4l-9 9', 'M18 14v6H4V6h6'],
+  'expand':      ['M4 9V4h5', 'M15 4h5v5', 'M20 15v5h-5', 'M9 20H4v-5'],
+  'shrink':      ['M9 4v5H4', 'M20 9h-5V4', 'M15 20v-5h5', 'M4 15h5v5']
 };
 
 export var ICON_NAMES = Object.keys(PATHS);

@@ -64,6 +64,27 @@ class FakeDetector:
     backend_name = "megadetector (dev stand-in)"
 
 
+def test_card(width: int = 1600, height: int = 1200):
+    """A still frame the shape of prod cam1 (4:3, where the Otteson cameras
+    and the STREAM DOWN placeholder are 16:9), so /stream and /snapshot have
+    a real picture to encode and the Live page's layout can be judged."""
+    import cv2
+    import numpy as np
+
+    img = np.zeros((height, width, 3), np.uint8)
+    img[..., 0] = np.linspace(40, 160, width, dtype=np.uint8)[None, :]
+    img[..., 1] = np.linspace(60, 140, height, dtype=np.uint8)[:, None]
+    img[..., 2] = 70
+    for x in range(0, width + 1, width // 8):
+        cv2.line(img, (min(x, width - 2), 0), (min(x, width - 2), height), (230, 230, 230), 2)
+    for y in range(0, height + 1, height // 6):
+        cv2.line(img, (0, min(y, height - 2)), (width, min(y, height - 2)), (230, 230, 230), 2)
+    cv2.circle(img, (width // 2, height // 2), height // 4, (255, 255, 255), 4)
+    cv2.putText(img, f"{width}x{height}", (width // 2 - 190, height // 2 + 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 2.4, (255, 255, 255), 5, cv2.LINE_AA)
+    return img
+
+
 class FakeWorker:
     """Just enough of StreamWorker for the web handlers."""
 
@@ -72,7 +93,7 @@ class FakeWorker:
         self.runtime = runtime
         self.detector = FakeDetector()
         self.live = live
-        self.latest_frame = object() if live else None
+        self.latest_frame = test_card() if live else None
         self.latest_frame_ts = time.time() if live else 0.0
         self.stream_connected = live
         self.onvif_client = object() if cam.onvif else None

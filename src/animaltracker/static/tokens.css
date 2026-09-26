@@ -110,6 +110,7 @@
   --c-media-scrim:rgba(11,10,8,.68);
   --c-media-scrim-strong:rgba(11,10,8,.80);
   --c-media-gradient:linear-gradient(to top,rgba(6,5,4,.86),transparent 62%);
+  --c-media-ground:var(--p-loam-1000);  /* the bars round a full-screen picture */
   --c-on-media:#FCFAF6;          /* 6.81:1 on the scrim, worst case        */
   --c-on-media-2:rgba(252,250,246,.78);
   --c-on-media-live:#D3E2C8;     /* 6.05:1 */

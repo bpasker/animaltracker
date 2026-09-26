@@ -4335,6 +4335,54 @@ body.is-locked{
   .ptz--desktop{ background:transparent;padding:0; }
 }
 
+/* --- FULL SCREEN --------------------------------------------------------
+   .is-full pins the stage over the whole window (live.js setFull). iPhone
+   Safari has no Fullscreen API for an <img>; where the API exists it lifts
+   this same pinned stage onto the screen, so one layout serves both. The
+   padding is the safe area. live.js (fitFull) sets --full-w/--full-h to the
+   largest box of the picture's own shape inside it, and the frame and
+   everything drawn over it take that box, centred, so a tap, the crosshair
+   and the stale hatch land on the picture, never on the bars. */
+.cam__stage.is-full{
+  position:fixed;inset:0;z-index:var(--z-modal);
+  /* align-self undoes the desktop focus stage's centring, which engines now
+     apply to a fixed box too: it shrank the stage to its (all absolute)
+     content, 0px tall. */
+  width:auto;max-width:none;margin:0;align-self:stretch;
+  padding:var(--inset-top) var(--inset-right) var(--inset-bottom) var(--inset-left);
+  background:var(--c-media-ground);
+}
+.cam__stage.is-full .frame,
+.cam__stage.is-full .cam__veil,
+.cam__stage.is-full .ptzstage__layer,
+.cam__stage.is-full::after{
+  position:absolute;
+  top:var(--inset-top);right:var(--inset-right);
+  bottom:var(--inset-bottom);left:var(--inset-left);
+  width:var(--full-w,auto);height:var(--full-h,auto);
+  margin:auto;aspect-ratio:auto;border-radius:0;
+}
+.cam__stage.is-full .frame{ background:var(--c-media-ground); }
+.cam__stage.is-full .frame__img{ object-fit:contain; }
+/* The box is already inside the safe area, so the corners drop their own
+   inset; the top two share the exit button's height, so their pills stay
+   on one line. */
+.cam__stage.is-full .frame__tl,
+.cam__stage.is-full .frame__bl{ left:var(--s-3); }
+.cam__stage.is-full .frame__tr,
+.cam__stage.is-full .frame__br{ right:var(--s-3); }
+.cam__stage.is-full .frame__tl,
+.cam__stage.is-full .frame__tr{ min-height:var(--tap); }
+/* LAST FRAME … AGO and the key legend keep to the picture's edges, not the
+   window's. */
+.cam__stage.is-full .cam__age{
+  bottom:calc((100% + var(--inset-bottom) - var(--inset-top) - var(--full-h,100%)) / 2 + var(--s-4));
+}
+.cam__stage.is-full .ptzstage__keys{
+  right:calc((100% + var(--inset-right) - var(--inset-left) - var(--full-w,100%)) / 2 + var(--s-3));
+  bottom:calc((100% + var(--inset-bottom) - var(--inset-top) - var(--full-h,100%)) / 2 + var(--s-3));
+}
+
 
 /* ============================================================================
    10 · VIDEO PLAYER (.player) + SCRUBBER WITH PER-TRACK PRESENCE LANES

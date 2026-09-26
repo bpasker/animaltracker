@@ -352,6 +352,8 @@ function newState() {
     monitor: Object.create(null),
     cards: new Map(),      /* id -> card */
     primary: null,
+    full: null,            /* the card pinned full screen (setFull) */
+    fullApi: false,        /* ...and the Fullscreen API holds it too */
     mode: 'focus',         /* 'focus' | 'grid' */
     desktop: false,
     hidden: false,
@@ -546,8 +548,17 @@ function buildCard(cam) {
   card.handoff.hidden = true;
   card.fsBtn = h('button.icon-btn', {
     type: 'button', 'aria-label': 'Fullscreen ' + card.name + ' (F)'
-  }, icon('external'));
+  }, icon('expand'));
   card.fsBtn.addEventListener('click', function () { toggleFullscreen(card); });
+  /* Full screen covers the head and its button, so the way back out rides
+     on the picture. The stage captures every pointer that lands on it and
+     reads a tap as "centre here"; this one has to stay a button press. */
+  card.exitBtn = h('button.icon-btn.icon-btn--on-media', {
+    type: 'button', 'aria-label': 'Exit full screen (Esc)'
+  }, icon('shrink'));
+  card.exitBtn.hidden = true;
+  card.exitBtn.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+  card.exitBtn.addEventListener('click', function () { toggleFullscreen(card); });
 
   card.headStatus = makeStatusPill(false);
 
@@ -568,6 +579,13 @@ function buildCard(cam) {
     card.loads += 1;
     if (card.loads > 1) CHATTY = true;
     card.lastLoad = Date.now();
+    /* The picture's own shape, which full screen fits (4:3 on cam1, 16:9
+       on the STREAM DOWN placeholder the same socket can switch to). */
+    var nw = card.imgEl.naturalWidth, nh = card.imgEl.naturalHeight;
+    if (nw > 1 && nh > 1 && nw / nh !== card.ratio) {
+      card.ratio = nw / nh;
+      if (S.full === card) fitFull(card);
+    }
     card.imgError = false;
     card.verifying = false;
     card.faultCause = '';
@@ -605,7 +623,7 @@ function buildCard(cam) {
     card.imgEl,
     h('div.frame__scrim'),
     h('div.frame__tl', card.mediaStatus.el),
-    h('div.frame__tr', h('span.mpill', { text: card.name })),
+    h('div.frame__tr', h('span.mpill', { text: card.name }), card.exitBtn),
     h('div.frame__bl', card.clockEl),
     h('div.frame__br', card.rateEl));
 
@@ -1194,6 +1212,10 @@ function wireStage(card) {
     if (ev.button !== undefined && ev.button !== 0) return;
     var p = stagePoint(card, ev);
     if (!p) return;
+    /* Full screen letterboxes the picture, and stagePoint clamps: a tap on
+       a bar would read as its edge and swing the head that way. */
+    if (S.full === card && (ev.clientX < p.rect.left || ev.clientX > p.rect.right ||
+        ev.clientY < p.rect.top || ev.clientY > p.rect.bottom)) return;
     card.dragStart = { x: p.x, y: p.y, id: ev.pointerId, moved: false };
     try { el.setPointerCapture(ev.pointerId); } catch (e) { /* older WebKit */ }
     ev.preventDefault();
@@ -1247,7 +1269,12 @@ function wireStage(card) {
   el.addEventListener('keydown', function (ev) {
     if (ev.altKey || ev.metaKey || ev.ctrlKey) return;
     var k = ev.key;
-    if (k === 'Escape') { stopJog(); return; }
+    if (k === 'Escape') {
+      stopJog();
+      /* The browser's own Escape ends API full screen (fullscreenchange). */
+      if (S.full === card && !S.fullApi) setFull(null);
+      return;
+    }
     if (!card.cam.has_ptz) return;
 
     var vec = null;
@@ -1297,29 +1324,82 @@ function wireStage(card) {
   });
 }
 
+/* ------------------------------------------------------------ full screen --
+   iPhone Safari has no Fullscreen API for anything but a <video>, and this
+   stage is an <img> under the veil, the hatch and the age pill that keep a
+   frozen frame from reading as live, which a native video player would
+   drop. So full screen is the stage pinned over the whole window (.is-full,
+   app.css "FULL SCREEN"), and where the API exists it then lifts the pinned
+   stage onto the screen itself. A refusal leaves it pinned. */
+
 function toggleFullscreen(card) {
-  var el = card.stageEl;
   var doc = document;
-  var current = doc.fullscreenElement || doc.webkitFullscreenElement || null;
-  if (current) {
+  if (doc.fullscreenElement || doc.webkitFullscreenElement) {
     if (doc.exitFullscreen) doc.exitFullscreen();
     else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-    return;
+    return;                        /* fullscreenchange unpins the stage */
   }
+  if (S.full) { setFull(null); return; }
+  setFull(card);
+  var el = card.stageEl;
   var req = el.requestFullscreen || el.webkitRequestFullscreen;
-  if (!req) {
-    toast.info('This browser will not put the video full screen.', {
-      detail: 'On iPhone, rotate the device instead — the stage fills the landscape width.'
-    });
-    return;
-  }
+  if (!req) return;
   try {
     var p = req.call(el);
-    if (p && p.catch) p.catch(function (err) {
-      toast.danger('Full screen was refused.', { detail: String(err && err.message || err) });
-    });
-  } catch (err) {
-    toast.danger('Full screen was refused.', { detail: String(err && err.message || err) });
+    if (p && p.catch) p.catch(function () { /* stays pinned */ });
+  } catch (err) { /* stays pinned */ }
+}
+
+/** Pin one card's stage over the window, or none. */
+function setFull(card) {
+  var prev = S.full;
+  if (prev === card) return;
+  markFull(card);
+  applyLayout();                   /* the stages it covers let their sockets go */
+  var target = card ? card.stageEl : (prev && prev.fsBtn);
+  if (target && target.isConnected) target.focus({ preventScroll: true });
+  announce(card ? card.name + ' full screen' : 'Full screen closed');
+}
+
+/** The pin itself, the only writer of S.full; applyLayout calls it too. */
+function markFull(card) {
+  S.full = card;
+  if (!card) S.fullApi = false;
+  S.cards.forEach(function (c) {
+    toggleClass(c.stageEl, 'is-full', c === card);
+    c.exitBtn.hidden = c !== card;
+  });
+  if (card) fitFull(card);
+}
+
+/**
+ * Size the picture box: the largest rectangle of the picture's own shape
+ * inside the stage's content box (its padding is the safe area). The frame
+ * and everything drawn over it take this box, so taps, the crosshair and the
+ * hatch all land on the picture.
+ */
+function fitFull(card) {
+  var el = card.stageEl;
+  var cs = window.getComputedStyle(el);
+  var boxW = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  var boxH = el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  if (!(boxW > 0 && boxH > 0)) return;
+  var ratio = card.ratio || 16 / 9;
+  var w = boxW;
+  var ht = boxW / ratio;
+  if (ht > boxH) { ht = boxH; w = boxH * ratio; }
+  el.style.setProperty('--full-w', Math.floor(w) + 'px');
+  el.style.setProperty('--full-h', Math.floor(ht) + 'px');
+}
+
+function onFullscreenChange() {
+  if (!S) return;
+  var el = document.fullscreenElement || document.webkitFullscreenElement || null;
+  if (el && S.full && S.full.stageEl === el) {
+    S.fullApi = true;
+    fitFull(S.full);               /* the screen, not the window, now */
+  } else if (!el && S.fullApi) {
+    setFull(null);                 /* Escape, or the browser's own control */
   }
 }
 
@@ -1352,6 +1432,9 @@ function detachStream(card) {
 /** Only the cameras actually on screen as full stages hold an MJPEG socket. */
 function cardWantsStream(card) {
   if (S.hidden) return false;
+  /* A full-screen stage covers every other one; a phone decoding four
+     feeds behind it would only starve the one in view. */
+  if (S.full) return S.full === card;
   if (!S.desktop) return true;
   if (S.mode === 'grid') return true;
   return S.primary === card.id;
@@ -1995,6 +2078,12 @@ function applyLayout() {
     clear(S.strip);
   }
 
+  /* A pinned stage this layout no longer places (its camera removed, a new
+     primary in desktop focus, a phone-width window widened into it) went
+     off the page with its card; left pinned, it would hold every other
+     socket shut. */
+  if (S.full && order.indexOf(S.full) < 0) markFull(null);
+
   /* Streams follow the layout: only visible stages hold a socket. */
   S.cards.forEach(function (card) {
     if (cardWantsStream(card)) {
@@ -2336,6 +2425,12 @@ export const view = {
     reg(on(window, 'pointerup', function () { stopJog(); }));   /* a pulse is bounded; let it run */
     reg(on(window, 'pointercancel', function () { stopJog(); }));
     reg(on(window, 'touchcancel', function () { stopJog(); }));
+
+    /* --- full screen --------------------------------------------------- */
+    reg(on(document, 'fullscreenchange', onFullscreenChange));
+    reg(on(document, 'webkitfullscreenchange', onFullscreenChange));
+    /* Rotating the phone, or Safari's bars sliding away, reshapes the box. */
+    reg(on(window, 'resize', function () { if (S.full) fitFull(S.full); }));
 
     /* The shell already holds a camera list for its rail; painting from it
        first means the operator sees stages, not a skeleton, while the first

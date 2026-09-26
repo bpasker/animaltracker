@@ -2554,9 +2554,17 @@ body.is-locked{
   flex-direction:column;
   align-items:center;
   gap:var(--s-2);
-  padding-left:calc(var(--s-3) + var(--inset-left));
-  padding-right:calc(var(--s-3) + var(--inset-right));
+  /* The page gutter (app.js publishes --page-pad on the root), so a toast's
+     edges line up with the cards above it instead of overhanging them. */
+  padding-left:calc(var(--page-pad, var(--s-4)) + var(--inset-left));
+  padding-right:calc(var(--page-pad, var(--s-4)) + var(--inset-right));
   pointer-events:none;   /* the host must never eat taps on the grid */
+}
+/* The selection bar floats where the host would sit, and a toast covered its
+   Delete and Reanalyze; with the bar up the stack starts above it. The host
+   is <body>'s child, a later sibling of the shell. */
+.shell--selbar ~ .toast-host{
+  bottom:calc(var(--chrome-bottom) + var(--s-3) + var(--float-clear) + var(--s-2));
 }
 
 .toast{
@@ -2567,7 +2575,9 @@ body.is-locked{
   width:100%;
   max-width:440px;
   min-height:var(--tap-lg);
-  padding:var(--s-3) var(--s-2) var(--s-3) var(--s-4);
+  /* Even on both sides; the close button's own margin (below) keeps its ✕
+     as far from the right edge as the icon is from the left. */
+  padding:var(--s-3) var(--s-4);
   border:1px solid var(--c-line);
   border-radius:var(--r-lg);
   background:var(--c-surface);
@@ -2624,6 +2634,7 @@ body.is-locked{
   flex:none;
   width:var(--tap);
   height:var(--tap);
+  margin-right:calc(var(--s-2) * -1);
 }
 
 .toast--success .toast__icon{ background:var(--c-live-wash);   color:var(--c-live-text); }
@@ -3196,8 +3207,8 @@ body.is-locked{
   /* The inset lives in the offsets, not in a margin, so the bar clears the
      notch in landscape (one-sided) as well as the home indicator. Auto
      margins then centre it inside that box once it stops being full-width. */
-  left:calc(var(--s-3) + var(--inset-left));
-  right:calc(var(--s-3) + var(--inset-right));
+  left:calc(var(--page-pad, var(--s-4)) + var(--inset-left));
+  right:calc(var(--page-pad, var(--s-4)) + var(--inset-right));
   bottom:calc(var(--chrome-bottom) + var(--s-3));
   z-index:var(--z-selbar);
   display:flex;

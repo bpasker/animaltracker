@@ -383,9 +383,12 @@ function abortRequest(name) {
   return next ? next.signal : undefined;
 }
 
+/* Its Retry reloads this screen's state, so the toast goes with the screen:
+   left up, the Retry ran against a session that was gone and threw. */
 function reportError(where, err, retry) {
   if (api.isAbort(err)) return;
-  toast.error(where, { detail: api.describe(err), retry: retry });
+  var t = toast.error(where, { detail: api.describe(err), retry: retry });
+  if (S) track(function () { t.close(); });
 }
 
 /* ============================================================================
@@ -980,8 +983,11 @@ function refreshGrid() {
       }
     }).catch(function (err) {
       if (!alive() || api.isAbort(err)) return;
-      /* A background refresh still has to be visible when it fails. */
-      toast('Refresh failed', { kind: 'error', detail: api.describe(err), timeout: 6000 });
+      /* A background refresh still has to be visible when it fails, unless
+         the app-wide "Disconnected" toast already says why; it blocks
+         nothing, so it drains rather than waiting to be dismissed. */
+      if (api.isDisconnected(err)) return;
+      toast.error('Could not refresh the archive', { detail: api.describe(err), timeout: 6000 });
     });
 }
 
@@ -1123,6 +1129,11 @@ function deleteSelection() {
 
   var deadline = Date.now() + UNDO_MS;
   var undone = false;
+  /* One wording from the first frame to the last; it opened on "6 seconds"
+     and turned into "6s" half a second later. */
+  function countdown(secs) {
+    return 'Undo within ' + secs + ' s — the files are removed when this closes.';
+  }
 
   function restore() {
     undone = true;
@@ -1136,7 +1147,7 @@ function deleteSelection() {
 
   var t = toast(plural(paths.length, 'clip') + ' deleted', {
     kind: 'danger',
-    detail: 'Undo within ' + Math.round(UNDO_MS / 1000) + ' seconds — the files are removed when this closes.',
+    detail: countdown(Math.round(UNDO_MS / 1000)),
     timeout: UNDO_MS,
     undo: {
       label: 'Undo',
@@ -1152,7 +1163,7 @@ function deleteSelection() {
   var tick = window.setInterval(function () {
     var left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
     if (left <= 0 || undone) { window.clearInterval(tick); return; }
-    t.update({ detail: 'Undo within ' + left + 's — the files are removed when this closes.' });
+    t.update({ detail: countdown(left) });
   }, 500);
   S.intervals.push(tick);
 }
@@ -1173,8 +1184,8 @@ function commitDelete(batch, restoreTotal) {
     var deleted = paths.filter(function (p) { return refusedPaths.indexOf(p) < 0; });
     if (deleted.length) toast.success(plural(deleted.length, 'clip') + ' removed from disk');
     if (refused.length) {
-      toast.error(plural(refused.length, 'clip') + ' could not be deleted', {
-        detail: refused[0].message || 'The server refused.'
+      toast.error('Could not delete ' + plural(refused.length, 'clip'), {
+        detail: String(refused[0].message || 'The server refused').replace(/[.!?]?$/, '.') + ' They are back in the grid.'
       });
     }
     if (!S) return;
@@ -1194,8 +1205,12 @@ function commitDelete(batch, restoreTotal) {
       S.total = restoreTotal;
       renderGrid();
     }
-    reportError('The server refused to delete those clips', err, function () {
-      commitDelete(batch, restoreTotal);
+    /* Not "the server refused": with no answer at all it never saw them.
+       Not reportError either: this Retry needs no screen, and the clips
+       are still on disk after the screen has gone. */
+    toast.error('Could not delete ' + plural(paths.length, 'clip'), {
+      detail: api.describe(err),
+      retry: function () { commitDelete(batch, restoreTotal); }
     });
   });
 }
@@ -1204,32 +1219,39 @@ function reanalyzeSelection() {
   var paths = [];
   S.selected.forEach(function (p) { paths.push(p); });
   if (!paths.length) return;
-  var done = 0, failed = 0;
+  var done = 0, failed = 0, firstError = null;
   var t = toast.progress('Reanalyzing ' + plural(paths.length, 'clip'), {
-    timeout: 0, detail: '0 of ' + paths.length + ' complete'
+    timeout: 0, detail: '0 of ' + paths.length + ' done'
   });
   setSelectMode(false);
 
+  /* POST /recordings/reprocess answers once the analysis is finished, so
+     every clip counted here has been reanalyzed, not queued: the toasts
+     used to say "queued for SpeciesNet", and "the rest were queued" even
+     when every clip had failed. */
   function step(i) {
     if (i >= paths.length) {
       t.close();
       if (failed) {
-        toast.error(plural(failed, 'clip') + ' could not be reanalyzed', {
-          detail: 'The rest were queued. Monitor shows the post-processor queue.'
+        toast.error('Could not reanalyze ' + plural(failed, 'clip'), {
+          detail: api.describe(firstError) +
+            (done ? ' The other ' + done + (done === 1 ? ' was' : ' were') + ' reanalyzed.' : '')
         });
       } else {
-        toast.success(plural(done, 'clip') + ' queued for SpeciesNet');
+        toast.success(plural(done, 'clip') + ' reanalyzed');
       }
-      /* The clips the operator asked for are queued on the server whether
-         or not this screen is still up; only the refresh needs a grid. */
+      /* The requests run to the end whether or not this screen is still
+         up; only the refresh needs a grid. */
       if (alive()) later(function () { refreshGrid(); }, 1500);
       return;
     }
-    api.reprocess(paths[i], null, {}).then(function () { done++; }, function () { failed++; })
-      .then(function () {
-        t.update({ detail: (done + failed) + ' of ' + paths.length + ' complete' });
-        step(i + 1);
-      });
+    api.reprocess(paths[i], null, {}).then(function () { done++; }, function (err) {
+      failed++;
+      if (!firstError) firstError = err;
+    }).then(function () {
+      t.update({ detail: (done + failed) + ' of ' + paths.length + ' done' });
+      step(i + 1);
+    });
   }
   step(0);
 }

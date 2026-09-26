@@ -187,6 +187,9 @@ The system uses a two-stage detection approach:
   veil and hatch that mark a frozen frame. In full screen the picture is
   letterboxed, so anything drawn over it must take the `--full-w/--full-h`
   box (app.css "FULL SCREEN") or it lands on the bars.
+  Toasts follow the house style at the top of `core/toast.js` (kinds,
+  "Could not …" headlines with no full stop, who closes what and when);
+  `tests/test_client_toast_style.py` checks every call site against it.
 - `configstore.py` - the settings editor's transaction on `config/cameras.yml`:
   read + validate, deep-merge the managed keys, back up, atomic write, apply
   live-safe fields to the running process, diff file vs. runtime for the

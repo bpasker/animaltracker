@@ -22,6 +22,7 @@
      on(target, type, fn, opts?)  -> off()
      delegate(root, type, sel, fn, opts?) -> off()
      keyedList(container, items, spec) -> { nodes: Map, order: [] }
+     copyText(text)               -> Promise   (the clipboard, plain http too)
    ========================================================================= */
 
 /* Tag selector: "div", "li.clip.sp--deer", "a.clip__open", "input#sel-3". */
@@ -278,4 +279,35 @@ export function keyedList(container, items, spec) {
   });
 
   return { nodes: nodes, order: order };
+}
+
+/**
+ * Put text on the clipboard. navigator.clipboard exists only in a secure
+ * context, and the app is served over plain http on the LAN, so a phone
+ * always lands on the fallback: a selected, off-screen, read-only textarea
+ * and execCommand('copy'), which the browser allows inside the tap that
+ * asked for it, so call this straight from the click handler.
+ */
+export function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise(function (resolve, reject) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    /* 16px: below that iOS zooms the page to the field it selects. */
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px;';
+    document.body.appendChild(ta);
+    try {
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);   /* iOS ignores select() alone */
+      if (document.execCommand('copy')) resolve();
+      else reject(new Error('The browser refused the copy; select the text and copy it by hand.'));
+    } catch (err) {
+      reject(err);
+    } finally {
+      document.body.removeChild(ta);
+    }
+  });
 }

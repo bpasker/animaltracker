@@ -181,7 +181,10 @@ def test_both_callers_take_the_filename_from_the_json_body():
     app = (SRC / "static" / "app.js").read_text()
     live = (SRC / "static" / "views" / "live.js").read_text()
     assert "var filename = res && typeof res === 'object' ? res.filename : null;" in app
-    assert "router.go('/recordings', filename ? { q: filename } : {});" in app
+    # View searches for the saved file, and is offered only when there is one,
+    # as on the Live card.
+    assert "action: filename ? { label: 'View'" in app
+    assert "router.go('/recordings', { q: filename });" in app
     assert "var filename = res && typeof res === 'object' ? (res.filename || null) : null;" in live
 
 

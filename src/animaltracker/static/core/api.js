@@ -35,6 +35,8 @@
 
      ApiError                                 { status, endpoint, detail }
      api.describe(err)                        -> one sentence a human can act on
+     api.isDisconnected(err)                  -> the server is gone and the
+                                                 app-wide toast already says so
 
    Every `opts` accepts { signal, timeout } — timeout defaults to 15s, or 0 to
    wait forever (used by nothing today; reprocess passes its own).
@@ -176,9 +178,26 @@ function describe(err) {
   if (err.name === 'ApiError') {
     var text = err.message;
     if (err.detail) text += ' ' + err.detail;
-    return text;
+    return sentence(text);
   }
-  return String(err.message || err);
+  return sentence(String(err.message || err));
+}
+
+/* The server's own words rarely end in a full stop, and callers append a
+   sentence of their own: "CUDA out of memory It is still on disk." */
+function sentence(text) {
+  var t = String(text).trim();
+  return !t || /[.!?…]$/.test(t) ? t : t + '.';
+}
+
+/**
+ * True when the request got no answer while store.connected is false: the
+ * app-wide "Disconnected" toast (app.js) is already up, so a background poll
+ * adds nothing by reporting its own failure. What the user asked for still
+ * reports it, with its Retry.
+ */
+function isDisconnected(err) {
+  return !!err && err.name === 'ApiError' && err.status === 0 && store.get('connected') === false;
 }
 
 /* --- The typed surface --------------------------------------------------- */
@@ -186,6 +205,7 @@ function describe(err) {
 export var api = {
   ApiError: ApiError,
   describe: describe,
+  isDisconnected: isDisconnected,
   isAbort: isAbort,
   encodePath: encodePath,
 

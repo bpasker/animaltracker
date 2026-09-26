@@ -33,7 +33,7 @@
    wholesale re-render of the log list.
    ========================================================================= */
 
-import { h, svg, clear, on, delegate, keyedList } from '../core/dom.js';
+import { h, svg, clear, on, delegate, keyedList, copyText } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { store } from '../core/store.js';
 import { router } from '../core/router.js';
@@ -187,26 +187,6 @@ function logClock(entry, tz) {
   try { return f.format(new Date(epoch * 1000)); } catch (e) { return String(entry.time || '--:--:--'); }
 }
 
-function copyText(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise(function (resolve, reject) {
-    try {
-      var ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      var ok = document.execCommand('copy');
-      document.body.removeChild(ta);
-      ok ? resolve() : reject(new Error('The browser refused the copy.'));
-    } catch (err) { reject(err); }
-  });
-}
-
 /* --- Control factories ---------------------------------------------------- */
 
 function labelledSelect(id, labelText, options, value) {
@@ -347,6 +327,11 @@ export const view = {
     var monitorFailing = false;
     var logsFailing = false;
     var criticalAlerted = {};
+    /* The toasts this page raised about its own polls: each poll closes its
+       own once it recovers, and teardown closes whatever is left, because
+       nothing would ever take them down after that. */
+    var pollToasts = { monitor: null, logs: null };
+    var criticalToasts = {};
     var gpuSamples = [];       /* GPU chip utilisation, last GPU_AVG_N polls */
     var cameraOptionSig = '';
 
@@ -625,16 +610,19 @@ export const view = {
         var name = crossed[i];
         if (criticalAlerted[name]) continue;
         criticalAlerted[name] = true;
-        toast(name + ' is critical', {
-          kind: 'error',
+        criticalToasts[name] = toast.error(name + ' is critical', {
           detail: name + ' has crossed ' + CRIT_AT + '%. Recording may stall.'
         });
       }
       /* Reset the latch once the reading recovers, so a second excursion
-         raises a second toast. */
-      if (num(sys.cpu_percent) !== null && sys.cpu_percent < CRIT_AT) criticalAlerted.CPU = false;
-      if (num(sys.memory_percent) !== null && sys.memory_percent < CRIT_AT) criticalAlerted.Memory = false;
-      if (num(sys.disk_percent) !== null && sys.disk_percent < CRIT_AT) criticalAlerted.Disk = false;
+         raises a second toast, and take the first one down. */
+      [['CPU', sys.cpu_percent], ['Memory', sys.memory_percent], ['Disk', sys.disk_percent]]
+        .forEach(function (reading) {
+          if (num(reading[1]) === null || reading[1] >= CRIT_AT) return;
+          criticalAlerted[reading[0]] = false;
+          if (criticalToasts[reading[0]]) criticalToasts[reading[0]].close();
+          criticalToasts[reading[0]] = null;
+        });
 
       setSubtitle(joinMeta(
         'cpu ' + fmtPct(sys.cpu_percent) + '%',
@@ -975,6 +963,21 @@ export const view = {
       });
     }
 
+    /* A failed poll says so once, on the transition (a press of Refresh
+       always answers); a repeat updates the toast already up. A server that
+       is gone altogether is the app-wide "Disconnected" toast's to report. */
+    function raisePollToast(key, title, err) {
+      if (api.isDisconnected(err)) return;
+      var open = pollToasts[key];
+      if (open && open.isOpen()) open.update({ detail: api.describe(err) });
+      else pollToasts[key] = toast.error(title, { detail: api.describe(err) });
+    }
+
+    function closePollToast(key) {
+      if (pollToasts[key]) pollToasts[key].close();
+      pollToasts[key] = null;
+    }
+
     function loadMonitor(manual) {
       if (dead) return Promise.resolve();
       if (aborts.monitor) aborts.monitor.abort();
@@ -990,7 +993,7 @@ export const view = {
           systemError.hidden = true;
           if (monitorFailing) {
             monitorFailing = false;
-            toast('Monitor reconnected', { kind: 'success' });
+            closePollToast('monitor');
           }
           renderSystem(data);
           renderDetector(data);
@@ -1010,7 +1013,7 @@ export const view = {
              seconds. A manual press always gets an answer. */
           if (!monitorFailing || manual) {
             monitorFailing = true;
-            toast('Could not read system health', { kind: 'error', detail: msg });
+            raisePollToast('monitor', 'Could not read system health', err);
           }
         });
     }
@@ -1084,7 +1087,10 @@ export const view = {
         .then(function (data) {
           if (dead) return;
           if (aborts.logs === ctrl) aborts.logs = null;
-          logsFailing = false;
+          if (logsFailing) {
+            logsFailing = false;
+            closePollToast('logs');
+          }
           logMeta = data;
 
           /* The server ships newest-first; the viewer reads oldest-first so
@@ -1105,7 +1111,7 @@ export const view = {
           logStatus.textContent = 'Log fetch failed — ' + msg;
           if (!logsFailing || manual) {
             logsFailing = true;
-            toast('Could not read the log', { kind: 'error', detail: msg });
+            raisePollToast('logs', 'Could not read the log', err);
           }
         });
     }
@@ -1322,7 +1328,7 @@ export const view = {
     disposers.push(on(btnCopy, 'click', function () {
       var rows = visibleRows();
       if (!rows.length) {
-        toast('Nothing to copy', { kind: 'info', detail: 'The current filter matches no entries.' });
+        toast.info('Nothing to copy', { detail: 'The current filter matches no entries.' });
         return;
       }
       var text = rows.map(function (e) {
@@ -1330,9 +1336,9 @@ export const view = {
           '  ' + String(e.message || '');
       }).join('\n');
       copyText(text).then(function () {
-        toast('Copied ' + plural(rows.length, 'entry', 'entries'), { kind: 'success' });
+        toast.success(plural(rows.length, 'entry', 'entries') + ' copied');
       }, function (err) {
-        toast('Copy failed', { kind: 'error', detail: api.describe(err) });
+        toast.error('Could not copy to the clipboard', { detail: api.describe(err) });
       });
     }));
 
@@ -1341,9 +1347,9 @@ export const view = {
       var row = node.parentElement;
       var text = (row && row._text) || '';
       copyText(text).then(function () {
-        toast('Log line copied', { kind: 'success' });
+        toast.success('Log line copied');
       }, function (err) {
-        toast('Copy failed', { kind: 'error', detail: api.describe(err) });
+        toast.error('Could not copy to the clipboard', { detail: api.describe(err) });
       });
     }));
 
@@ -1467,6 +1473,12 @@ export const view = {
         try { disposers[i](); } catch (e) { /* a disposer must never block teardown */ }
       }
       disposers.length = 0;
+      closePollToast('monitor');
+      closePollToast('logs');
+      for (var name in criticalToasts) {
+        if (criticalToasts[name]) criticalToasts[name].close();
+      }
+      criticalToasts = {};
       logRows = [];
       logMeta = null;
     };

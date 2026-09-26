@@ -23,12 +23,14 @@
      menu(anchor, items, opts)    -> handle { el, close() }
      palette(opts)                -> handle { el, close() }
      isOverlayOpen()              -> boolean
+     requiredField(field, input, message) -> { show() }  inline "needs a value"
 
    dialog(opts)
      { title, body, stakes, tone:'danger'|'plain', icon:'alert',
        content: Node | function(host),         // custom body
        width: 720,                             // px cap, default 440 via CSS
-       actions: [{ label, value, variant, focus:true, disabled }],
+       actions: [{ label, value, variant, focus:true, disabled,
+                   onSelect, keepOpen }],        // keepOpen: onSelect closes
        role: 'alertdialog' | 'dialog',
        dismissible: true,                      // Escape / outside click
        onClose: function (value) {} }
@@ -285,6 +287,31 @@ export function dialog(opts) {
     close: function (value) { finish(value === undefined ? null : value); }
   };
   return handle;
+}
+
+/**
+ * A dialog's "this needs a value" line, shown on the field instead of
+ * closing the dialog over a toast. Pair it with an action that has
+ * keepOpen: true and closes the dialog itself once the value is there.
+ *   var err = requiredField(fieldEl, input, 'A preset needs a name.');
+ *   if (!input.value.trim()) { err.show(); return; }
+ */
+export function requiredField(field, input, message) {
+  var line = h('p.field__error', { role: 'alert' }, icon('alert', { size: 'sm' }),
+    h('span', { text: message }));
+  line.hidden = true;
+  field.appendChild(line);
+  input.addEventListener('input', function () {
+    line.hidden = true;
+    input.removeAttribute('aria-invalid');
+  });
+  return {
+    show: function () {
+      line.hidden = false;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+    }
+  };
 }
 
 /* --- BOTTOM SHEET -------------------------------------------------------- */

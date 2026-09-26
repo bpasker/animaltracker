@@ -40,7 +40,7 @@ import { store } from '../core/store.js';
 import { router } from '../core/router.js';
 import { api } from '../core/api.js';
 import { toast } from '../core/toast.js';
-import { dialog, sheet } from '../core/overlay.js';
+import { dialog, sheet, requiredField } from '../core/overlay.js';
 import { shortAgo, plural } from '../core/format.js';
 
 /* --- tuning -------------------------------------------------------------- */
@@ -112,13 +112,26 @@ function placeChildren(parent, nodes) {
 /* Failure noise control: a poll that fails every 3s must not emit a toast
    every 3s. Inline error text is always updated; the toast is throttled. */
 var lastShout = Object.create(null);
+var shouted = Object.create(null);     /* key -> the toast its shout raised */
 function shout(key, message, err, opts) {
   var now = Date.now();
   if (lastShout[key] && now - lastShout[key] < 30000) return null;
   lastShout[key] = now;
   var o = opts || {};
-  o.detail = api.describe(err);
-  return toast.error(message, o);
+  /* The cause first, then what the caller adds; the caller's words used to
+     be overwritten, so a failed stop never said the head may still move. */
+  o.detail = api.describe(err) + (o.detail ? ' ' + o.detail : '');
+  shouted[key] = toast.error(message, o);
+  return shouted[key];
+}
+
+/* The call behind a shout succeeded again: its toast comes down (it used to
+   stay up, stale, until dismissed), and the next failure is news at once
+   rather than after the 30 s hush. unmount() takes down whatever is left. */
+function hush(key) {
+  if (shouted[key]) shouted[key].close();
+  delete shouted[key];
+  delete lastShout[key];
 }
 
 /* An ApiError with status 0 is a timeout or a network failure: the server
@@ -409,19 +422,19 @@ function ptzIdFor(cam) {
 
 function sendMove(card, vec) {
   api.ptz.move(card.ptzId, vec, { signal: signal(), timeout: 6000 })
-    .catch(function (err) {
+    .then(function () { hush('ptz-move-' + card.ptzId); }, function (err) {
       if (api.isAbort(err)) return;
-      shout('ptz-move-' + card.ptzId, 'PTZ move failed on ' + card.ptzId, err);
+      shout('ptz-move-' + card.ptzId, 'Could not move ' + card.ptzId, err);
     });
 }
 
 function sendStop(card) {
   /* keepalive so a stop issued during pagehide still leaves the machine. */
   api.ptz.stop(card.ptzId, { timeout: 6000, keepalive: true })
-    .catch(function (err) {
+    .then(function () { hush('ptz-stop-' + card.ptzId); }, function (err) {
       if (api.isAbort(err)) return;
-      shout('ptz-stop-' + card.ptzId, 'PTZ stop failed on ' + card.ptzId, err, {
-        detail: 'The camera may still be moving. Try Stop again.'
+      shout('ptz-stop-' + card.ptzId, 'Could not stop ' + card.ptzId, err, {
+        detail: 'The camera may still be moving; press Stop again.'
       });
     });
 }
@@ -938,31 +951,44 @@ function runCalibration(card, btn, spec) {
         t.close();
         busy(btn, false);
         var err = res && res.error;
-        if (err) { toast.error('Calibration failed.', { detail: String(err) }); return; }
-        toast.success('Calibration finished.', {
-          detail: typeof res === 'string' ? res.slice(0, 200) : 'Parameters written to config.'
-        });
+        if (err) { toast.error('Could not calibrate ' + card.ptzId, { detail: String(err) }); return; }
+        toast.success('Calibration finished', { detail: calibrationDetail(res) });
         announce('Calibration finished for ' + card.id);
       })
       .catch(function (err) {
         t.close();
         busy(btn, false);
         if (api.isAbort(err)) return;
-        toast.error('Calibration failed.', { detail: api.describe(err) });
+        toast.error('Could not calibrate ' + card.ptzId, { detail: api.describe(err) });
       });
   });
+}
+
+/* What a calibration actually left behind. It said "Parameters written to
+   config." for both, which neither does: the zoom-FOV run writes its own
+   file (and says where), the grid run only measures. */
+function calibrationDetail(res) {
+  if (res && typeof res === 'object') {
+    if (res.message) return String(res.message);
+    if (res.num_points !== undefined) {
+      return res.num_points + ' positions matched · pan ' + fixed(res.pan_to_pixel_x, 3) +
+        ' · tilt ' + fixed(res.tilt_to_pixel_y, 3) + ' · center ' + fixed(res.center_x) +
+        ', ' + fixed(res.center_y) + '. Measured only: nothing was saved.';
+    }
+  }
+  return typeof res === 'string' ? res.slice(0, 200) : '';
 }
 
 function gotoPreset(card, token, name) {
   if (!token) return;
   api.ptz.gotoPreset(card.ptzId, token, { signal: signal(), timeout: 15000 })
     .then(function () {
-      toast.success('Recalled ' + (name || token) + '.');
+      toast.success('Preset “' + (name || token) + '” recalled');
       announce('Recalled preset ' + (name || token));
     })
     .catch(function (err) {
       if (api.isAbort(err)) return;
-      toast.error('Could not recall that preset.', { detail: api.describe(err) });
+      toast.error('Could not recall preset “' + (name || token) + '”', { detail: api.describe(err) });
     });
 }
 
@@ -972,36 +998,40 @@ function savePresetFlow(card) {
     placeholder: 'Feeder, North gate, …',
     'aria-label': 'Preset name'
   });
+  var field = h('label.field', h('span.field__label', { text: 'Preset name' }), input);
+  var err = requiredField(field, input, 'A preset needs a name.');
+  /* A missing name keeps the dialog open and says so on the field; it used
+     to close the dialog and raise a trash-can toast. */
+  function submit() {
+    if (!input.value.trim()) { err.show(); return; }
+    dlg.close('save');
+  }
   var dlg = dialog({
     role: 'dialog',
     icon: 'bookmark',
     title: 'Save the current position',
     body: 'The head stays where it is; the name is what you will see on the chip.',
-    content: function (box) {
-      box.appendChild(h('label.field',
-        h('span.field__label', { text: 'Preset name' }), input));
-    },
+    content: function (box) { box.appendChild(field); },
     initialFocus: input,
     actions: [
       { label: 'Cancel', value: null },
-      { label: 'Save preset', variant: 'primary', value: 'save' }
+      { label: 'Save preset', variant: 'primary', value: 'save', keepOpen: true, onSelect: submit }
     ]
   });
   input.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter') { ev.preventDefault(); dlg.close('save'); }
+    if (ev.key === 'Enter') { ev.preventDefault(); submit(); }
   });
   dlg.result.then(function (v) {
     if (v !== 'save') return;
-    var name = (input.value || '').trim();
-    if (!name) { toast.danger('A preset needs a name.'); return; }
+    var name = input.value.trim();
     api.ptz.savePreset(card.ptzId, name, { signal: signal(), timeout: 15000 })
       .then(function () {
-        toast.success('Saved preset “' + name + '”.');
+        toast.success('Preset “' + name + '” saved');
         loadPresets(card, true);
       })
-      .catch(function (err) {
-        if (api.isAbort(err)) return;
-        toast.error('Could not save that preset.', { detail: api.describe(err) });
+      .catch(function (e) {
+        if (api.isAbort(e)) return;
+        toast.error('Could not save preset “' + name + '”', { detail: api.describe(e) });
       });
   });
 }
@@ -1020,8 +1050,8 @@ function setMode(card, which, next) {
   }).catch(function (err) {
     if (api.isAbort(err)) return;
     sw.set(!next, false);
-    toast.error('Could not change ' + which + ' on ' + card.ptzId + '.',
-      { detail: api.describe(err) });
+    toast.error('Could not turn ' + (which === 'track' ? 'auto-track' : 'patrol') + ' ' +
+      (next ? 'on' : 'off') + ' for ' + card.ptzId, { detail: api.describe(err) });
   });
 }
 
@@ -1032,16 +1062,16 @@ function setDebug(card, next) {
     .catch(function (err) {
       if (api.isAbort(err)) return;
       card.debugSwitch.set(!next, false);
-      toast.error('Could not toggle PTZ debug logging.', { detail: api.describe(err) });
+      toast.error('Could not turn PTZ debug logging ' + (next ? 'on' : 'off'), { detail: api.describe(err) });
     });
 }
 
 function setReturnDelay(card, seconds) {
   api.ptz.returnDelay(card.ptzId, seconds, { signal: signal(), timeout: 10000 })
-    .then(function () { toast.success('Return to patrol after ' + seconds + ' s.'); })
+    .then(function () { toast.success('Return to patrol set to ' + seconds + ' s'); })
     .catch(function (err) {
       if (api.isAbort(err)) return;
-      toast.error('Could not set the return delay.', { detail: api.describe(err) });
+      toast.error('Could not set the return delay', { detail: api.describe(err) });
     });
 }
 
@@ -1055,7 +1085,7 @@ function applyTrackBanner(card, on) {
 
 function saveClip(card) {
   busy(card.saveBtn, true);
-  var t = toast.progress('Saving the last 30 seconds from ' + card.name + '…', { timeout: 0 });
+  var t = toast.progress('Saving the last 30 s from ' + card.name + '…', { timeout: 0 });
   api.saveClip(card.id, { signal: signal() })
     .then(function (res) {
       t.close();
@@ -1068,8 +1098,8 @@ function saveClip(card) {
         var m = /Clip saved:\s*(.+)$/.exec(String(res || ''));
         filename = m ? m[1].trim() : null;
       }
-      toast.success('Clip saved from ' + card.name + '.', {
-        detail: filename || 'Clip saved.',
+      toast.success('Clip saved from ' + card.name, {
+        detail: filename || '',
         action: filename ? {
           label: 'View', variant: 'secondary',
           onClick: function () { router.go('/recordings', { q: filename }); }
@@ -1081,10 +1111,12 @@ function saveClip(card) {
       t.close();
       busy(card.saveBtn, false);
       if (api.isAbort(err)) return;
-      toast.error('Could not save a clip from ' + card.name + '.', {
+      var et = toast.error('Could not save a clip from ' + card.name, {
         detail: api.describe(err),
         retry: function () { saveClip(card); }
       });
+      /* Its Retry needs this page (its signal, its button). */
+      if (S) reg(function () { et.close(); });
     });
 }
 
@@ -1304,7 +1336,7 @@ function wireStage(card) {
       var idx = parseInt(k, 10) - 1;
       var p = card.presets[idx];
       if (p) gotoPreset(card, p.token, p.name);
-      else toast.info('No preset ' + k + ' on ' + card.ptzId + '.');
+      else toast.info('No preset ' + k + ' on ' + card.ptzId);
       return;
     }
     if (k === 'f' || k === 'F') { ev.preventDefault(); toggleFullscreen(card); return; }
@@ -1630,6 +1662,8 @@ function pollCameras() {
     .then(function (res) {
       S.camsError = null;
       setUnreachable(false);
+      hush('server');
+      hush('cameras');
       S.tz = (res && res.timezone) || '';
       var rows = (res && res.cameras) || [];
       S.cams = rows;
@@ -1648,13 +1682,13 @@ function pollCameras() {
            "Disconnected" toast (core/api.js flips store.connected); a
            timeout is silent there and needs its own words. */
         if (store.get('connected') !== false) {
-          shout('server', 'Can\'t reach the server.', err, {
+          shout('server', 'Could not reach the server', err, {
             retry: function () { pollCameras(); }
           });
         }
         return;
       }
-      shout('cameras', 'Lost the camera list.', err, {
+      shout('cameras', 'Could not refresh the camera list', err, {
         retry: function () { pollCameras(); }
       });
     });
@@ -1667,6 +1701,7 @@ function pollMonitor() {
       var byId = Object.create(null);
       rows.forEach(function (r) { byId[r.id] = r; });
       S.monitor = byId;
+      hush('monitor');
       S.cards.forEach(function (card) { paintTelemetry(card); });
     })
     .catch(function (err) {
@@ -1680,11 +1715,11 @@ function pollMonitor() {
            round before blaming telemetry, so an outage raises one toast,
            not two; the readouts above already show the dashes. */
         later(function () {
-          if (!S.unreachable) shout('monitor', 'Pipeline telemetry is unavailable.', err);
+          if (!S.unreachable) shout('monitor', 'Could not read pipeline telemetry', err);
         }, CAMERAS_MS + 1000);
         return;
       }
-      shout('monitor', 'Pipeline telemetry is unavailable.', err);
+      shout('monitor', 'Could not read pipeline telemetry', err);
     });
 }
 
@@ -1845,6 +1880,7 @@ function loadMode(card) {
   if (!card.cam.has_ptz) return;
   api.ptz.mode(card.ptzId, { signal: signal(), timeout: 8000 })
     .then(function (m) {
+      hush('mode-' + card.ptzId);
       card.mode = m;
       card.trackSwitch.enable();
       card.patrolSwitch.enable();
@@ -1861,7 +1897,7 @@ function loadMode(card) {
       if (api.isAbort(err)) return;
       card.trackSwitch.disable('Unknown');
       card.patrolSwitch.disable('Unknown');
-      shout('mode-' + card.ptzId, 'Could not read the PTZ mode for ' + card.ptzId + '.', err);
+      shout('mode-' + card.ptzId, 'Could not read the PTZ mode for ' + card.ptzId, err);
     });
 }
 
@@ -2481,6 +2517,9 @@ export const view = {
       cancel(card.crossTimer);
       detachStream(card);
     });
+    /* Its failure toasts are about this page's polls and PTZ calls, and
+       nothing here will ever take them down once it has gone. */
+    Object.keys(shouted).forEach(hush);
 
     for (var i = 0; i < S.timers.length; i++) {
       window.clearTimeout(S.timers[i]);

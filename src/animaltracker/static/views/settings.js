@@ -1052,6 +1052,7 @@ function newSession() {
     abort: null,
     refreshAbort: null,
     saving: false,
+    saveToast: null,     /* the last "not saved" toast; the next save closes it */
     restarting: false,
     destroyed: false,
     leaveDialog: null,   /* the "discard unsaved changes?" dialog, while open */
@@ -1652,7 +1653,7 @@ function scheduleEnvCheck(name) {
   S.envPending[name] = 1;
   if (S.envTimer) clearTimeout(S.envTimer);
   S.envTimer = setTimeout(function () {
-    if (!S || !S || S.destroyed) return;
+    if (!S || S.destroyed) return;
     var names = [];
     for (var k in S.envPending) if (Object.prototype.hasOwnProperty.call(S.envPending, k)) names.push(k);
     S.envPending = {};
@@ -1919,8 +1920,8 @@ function destinationsField(o) {
     track(on(setBtn, 'click', function () {
       var cur = list()[idx];
       var name = String(cur && cur[key] || '').trim();
-      if (!name) { toast.info('Name the variable first.'); input.focus(); return; }
-      if (!ENV_RE.test(name)) { toast.info('That is not a variable name.', { detail: 'Letters, digits and underscores only.' }); input.focus(); return; }
+      if (!name) { toast.info('Name the variable first'); input.focus(); return; }
+      if (!ENV_RE.test(name)) { toast.info('That is not a variable name', { detail: 'Letters, digits and underscores only.' }); input.focus(); return; }
       setSecretDialog({
         name: name, live: true,
         used_by: [(key === 'user_key_env' ? 'user key' : 'app token') + ' of destination \'' + titleFor(cur) + '\'']
@@ -1964,7 +1965,7 @@ function destinationsField(o) {
     }
     render();
     onModelChanged();
-    toast.info('Removed ' + titleFor(gone) + ' from the draft', {
+    toast.info(titleFor(gone) + ' removed from the draft', {
       detail: (touched ? 'Unticked on ' + touched + ' ' + plural(touched, 'camera') + '. ' : '') + 'Save to write the change.'
     });
     addBtn.focus();
@@ -2213,7 +2214,7 @@ function addDestinationDialog(onAdd) {
           onAdd(dest);
           dlg.close('added');
           if (writes.length) {
-            toast.success((dest.name || dest.id) + ': key saved', {
+            toast.success('Key saved for ' + (dest.name || dest.id), {
               detail: 'Applied to the running service. Save changes to add the destination itself.'
             });
           }
@@ -2224,7 +2225,7 @@ function addDestinationDialog(onAdd) {
         function write(i) {
           if (i >= writes.length) { done(); return; }
           api.setSecret({ name: writes[i].name, value: writes[i].value }, { signal: S.abort.signal }).then(function () {
-            if (!S || !S || S.destroyed) return;
+            if (!S || S.destroyed) return;
             S.env[writes[i].name] = true;
             refreshEnvTags();
             write(i + 1);
@@ -2460,12 +2461,12 @@ function setSecretDialog(v, file) {
         busy = true;
         api.setSecret({ name: v.name, value: value }, { signal: S.abort.signal }).then(function (res) {
           busy = false;
-          if (!S || !S || S.destroyed) return;
+          if (!S || S.destroyed) return;
           S.env[v.name] = true;
           input.value = '';
           dlg.close('saved');
           refreshEnvTags();
-          toast.success(v.name + ' set', {
+          toast.success(v.name + ' saved', {
             detail: (res && res.live ? 'Applied to the running service.' : 'Saved; read at the next restart.') +
               (res && res.backup ? ' The previous secrets.env is in backups.' : '')
           });
@@ -2495,13 +2496,13 @@ function removeSecretDialog(v, file) {
   dlg.result.then(function (yes) {
     if (yes !== true || !S || S.destroyed) return;
     api.setSecret({ name: v.name, value: '' }, { signal: S.abort.signal }).then(function () {
-      if (!S || !S || S.destroyed) return;
+      if (!S || S.destroyed) return;
       S.env[v.name] = false;
       refreshEnvTags();
-      toast.info(v.name + ' removed from ' + file);
+      toast.success(v.name + ' removed from ' + file);
     }, function (e) {
       if (!S || S.destroyed || api.isAbort(e)) return;
-      toast.error(v.name + ' was not removed.', { detail: api.describe(e) });
+      toast.error('Could not remove ' + v.name, { detail: api.describe(e) });
     });
   });
 }
@@ -2676,7 +2677,7 @@ function probeRow(label, iconName, run) {
     show('busy', 'Testing…');
     run().then(function (res) {
       btn.removeAttribute('aria-busy');
-      if (!S || !S || S.destroyed) return;
+      if (!S || S.destroyed) return;
       show(res.ok ? 'ok' : 'bad', res.text, res.detail || null);
     }, function (err) {
       btn.removeAttribute('aria-busy');
@@ -3097,14 +3098,18 @@ function save(opts) {
   /* The error toast's Retry outlives the page and calls this after unmount. */
   if (!S || S.destroyed || S.saving || !S.draft || !S.baseline) return Promise.resolve(false);
 
+  /* Every way a save can fail says so under one headline, and a new attempt
+     takes the last one down rather than stacking another beside it. */
+  if (S.saveToast) { S.saveToast.close(); S.saveToast = null; }
+
   var problems = validateModel(S.draft);
   if (problems.length) {
     var first = problems[0];
     focusPath(first.path);
     var phit = controllerFor(first.path);
     if (phit && phit.ctl.setError) phit.ctl.setError(first.message, phit.rest);
-    toast.danger('Nothing was saved — ' + problems.length + ' ' + plural(problems.length, 'field') + ' failed validation.', {
-      detail: first.message
+    S.saveToast = toast.error(NOT_SAVED, {
+      detail: problems.length + ' ' + plural(problems.length, 'field') + ' failed validation. ' + first.message
     });
     return Promise.resolve(false);
   }
@@ -3113,8 +3118,8 @@ function save(opts) {
   try {
     payload = buildPayload(S.draft);
   } catch (err) {
-    toast.error('Nothing was sent — the settings payload could not be built.', {
-      detail: String(err && err.message ? err.message : err)
+    S.saveToast = toast.error(NOT_SAVED, {
+      detail: 'The request could not be built: ' + String(err && err.message ? err.message : err)
     });
     return Promise.resolve(false);
   }
@@ -3206,19 +3211,22 @@ function save(opts) {
         var shit = controllerFor(serverPath(serverProblems[p].path));
         if (shit && shit.ctl.setError) shit.ctl.setError(serverProblems[p].message, shit.rest);
       }
-      toast.error('config/cameras.yml was NOT written — the server rejected ' + serverProblems.length + ' ' + plural(serverProblems.length, 'field') + '.', {
-        detail: serverProblems[0].path + ': ' + serverProblems[0].message,
-        retry: save
+      /* No Retry: the same payload would be refused the same way. */
+      S.saveToast = toast.error(NOT_SAVED, {
+        detail: 'The server rejected ' + serverProblems.length + ' ' + plural(serverProblems.length, 'field') + '. ' +
+          serverProblems[0].path + ': ' + serverProblems[0].message
       });
       return false;
     }
-    toast.error('config/cameras.yml was NOT written — your edits are still here.', {
-      detail: api.describe(err),
+    S.saveToast = toast.error(NOT_SAVED, {
+      detail: api.describe(err) + ' Your edits are still here.',
       retry: save
     });
     return false;
   });
 }
+
+var NOT_SAVED = 'Changes not saved to config/cameras.yml';
 
 function resetDraft() {
   var d = computeChanges();
@@ -3580,49 +3588,59 @@ function restartService() {
     if (v !== true || !S || S.destroyed) return;
     S.restarting = true;
     renderBanner();
+    /* The outage that follows is the point; app.js keeps its "Disconnected"
+       toast down while this is set. */
+    store.set({ restarting: true });
     var progress = toast.progress('Restarting Animal Tracker…', { detail: 'Asking systemd to restart the service' });
-    api.restart({ signal: S.abort.signal }).then(function () {
-      if (!S || !S || S.destroyed) return;
+    api.restart().then(function () {
       waitForServer(progress);
     }, function (err) {
-      if (!S || !S || S.destroyed) return;
       progress.close();
-      S.restarting = false;
-      renderBanner();
-      if (api.isAbort(err)) return;
-      toast.error('The service was not restarted.', { detail: api.describe(err) });
+      restartSettled();
+      toast.error('Could not restart the service', { detail: api.describe(err) });
     });
   });
 }
 
+/* The restart is over, one way or another: the shell may say "Disconnected"
+   again, and this page, if it is still up, drops its restarting state. */
+function restartSettled() {
+  store.set({ restarting: false });
+  if (S && !S.destroyed) {
+    S.restarting = false;
+    renderBanner();
+  }
+}
+
+/**
+ * Watch for the service to come back. It runs on without this page: its
+ * progress toast lives in the shell, and leaving Settings mid-restart used
+ * to strand that toast spinning for good.
+ */
 function waitForServer(progress) {
   var started = Date.now();
   var sawDown = false;
   function tick() {
-    if (!S || !S || S.destroyed) return;
     var elapsed = Math.round((Date.now() - started) / 1000);
     if (elapsed > 300) {
       progress.close();
-      S.restarting = false;
-      renderBanner();
-      toast.error('The server has not come back after 5 minutes.', {
-        detail: 'Check it with: journalctl -u animaltracker -n 100'
+      restartSettled();
+      toast.error('The service has not come back', {
+        detail: 'Five minutes after the restart. Check it with: journalctl -u animaltracker -n 100'
       });
       return;
     }
-    api.cameras({ timeout: 3000, signal: S.abort.signal }).then(function () {
-      if (!S || !S || S.destroyed) return;
+    api.cameras({ timeout: 3000 }).then(function () {
       if (sawDown || elapsed > 20) {
         progress.close();
-        S.restarting = false;
+        restartSettled();
         toast.success('Animal Tracker is back', { detail: 'Restarted in about ' + elapsed + ' s' });
-        load({});
+        if (S && !S.destroyed) load({});
         return;
       }
       progress.update({ detail: 'Waiting for the old process to stop… ' + elapsed + ' s' });
       window.setTimeout(tick, 2000);
-    }, function (err) {
-      if (!S || S.destroyed || api.isAbort(err)) return;
+    }, function () {
       sawDown = true;
       progress.update({ detail: 'Waiting for the service to come back… ' + elapsed + ' s' });
       window.setTimeout(tick, 2000);
@@ -3830,7 +3848,7 @@ function load(opts) {
     S.refreshAbort = ctrl;
   }
   return api.config({ signal: ctrl ? ctrl.signal : undefined, timeout: 20000 }).then(function (raw) {
-    if (!S || !S || S.destroyed) return;
+    if (!S || S.destroyed) return;
     S.refreshAbort = null;
     var model = normalize(raw);
     if (o.quiet) {
@@ -3857,12 +3875,17 @@ function load(opts) {
     if (!S || S.destroyed || api.isAbort(err)) return;
     S.refreshAbort = null;
     if (o.quiet) {
-      toast.danger('Could not refresh settings', { detail: api.describe(err) });
+      /* A background reload: it blocks nothing, so it drains, and a server
+         that is gone is the app-wide toast's to report. */
+      if (!api.isDisconnected(err)) {
+        toast.error('Could not refresh settings', { detail: api.describe(err), timeout: 6000 });
+      }
       return;
     }
     clear(S.contentEl);
     S.contentEl.appendChild(errorState(err, function () { load({}); }));
-    toast.error('Settings could not be loaded.', { detail: api.describe(err), retry: function () { load({}); } });
+    var lt = toast.error('Could not load settings', { detail: api.describe(err), retry: function () { load({}); } });
+    track(function () { lt.close(); });
   });
 }
 
@@ -3935,7 +3958,7 @@ function installGuards() {
   }));
 
   track(on(document, 'visibilitychange', function () {
-    if (!S || !S || S.destroyed) return;
+    if (!S || S.destroyed) return;
     if (document.hidden) {
       if (S.refreshAbort) { S.refreshAbort.abort(); S.refreshAbort = null; }
       return;
@@ -4016,6 +4039,8 @@ export var view = {
     S.fields = [];
     S.fieldByKey = {};
     store.setChrome({ selbar: null });
+    /* Its Retry saves this page's draft, which goes with the page. */
+    if (S.saveToast) S.saveToast.close();
     S = null;
   }
 };

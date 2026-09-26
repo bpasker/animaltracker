@@ -26,7 +26,7 @@
    Exports exactly { mount(root, ctx), unmount() }.
    ========================================================================= */
 
-import { h, clear, on, delegate, keyedList } from '../core/dom.js';
+import { h, clear, on, delegate, keyedList, copyText as clipboard } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { api } from '../core/api.js';
 import { toast } from '../core/toast.js';
@@ -91,6 +91,9 @@ function freshState() {
 }
 
 function keep(off) { if (S && typeof off === 'function') S.disposers.push(off); return off; }
+/* A toast whose Retry reloads this page's state goes down with the page:
+   left up, its Retry ran against a session that was gone and threw. */
+function closeWithPage(t) { keep(function () { t.close(); }); return t; }
 
 function later(fn, ms) {
   var id = window.setTimeout(function () { fn(); }, ms);
@@ -348,9 +351,9 @@ function openOverflow(anchor) {
     title: 'Clip actions',
     snap: 'peek',
     items: [
-      { label: 'Copy clip path', icon: 'layers', onSelect: function () { copyText(S.path, 'Clip path copied.'); } },
+      { label: 'Copy clip path', icon: 'layers', onSelect: function () { copyText(S.path, 'Clip path copied'); } },
       { label: 'Copy direct link', icon: 'external', onSelect: function () {
-        copyText(window.location.origin + clipHref(S.path, S.query), 'Link copied.');
+        copyText(window.location.origin + clipHref(S.path, S.query), 'Link copied');
       } },
       { label: 'Open raw file in a new tab', icon: 'film', onSelect: function () {
         window.open(api.clipUrl(S.path), '_blank', 'noopener');
@@ -361,7 +364,7 @@ function openOverflow(anchor) {
       /* The server refuses to delete a clip from under its analysis (409);
          say so here instead of offering a button that cannot work. */
       { label: (clip && (clip.reprocessing || clip.analysis === 'running'))
-          ? 'Delete recording (being analysed)' : 'Delete recording',
+          ? 'Delete clip (being analyzed)' : 'Delete clip',
         icon: 'trash', danger: true,
         disabled: !clip || !!clip.reprocessing || clip.analysis === 'running',
         onSelect: function () {
@@ -382,21 +385,16 @@ function openOverflow(anchor) {
   });
 }
 
+/* core/dom.js copyText has the fallback plain http needs; this page's own
+   copy had none, so on the phone every Copy here failed. */
 function copyText(text, okMessage) {
-  function fail(err) {
-    toast.error('Could not copy to the clipboard.', {
-      detail: (err && err.message) || 'The browser refused clipboard access; select the text and copy by hand.'
+  clipboard(text).then(function () {
+    toast.success(okMessage);
+  }, function (err) {
+    toast.error('Could not copy to the clipboard', {
+      detail: (err && err.message) || 'Select the text and copy it by hand.'
     });
-  }
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () {
-        toast.success(okMessage);
-      }, fail);
-      return;
-    }
-  } catch (e) { /* falls through to the manual path below */ }
-  fail(new Error('This browser exposes no clipboard API over plain HTTP.'));
+  });
 }
 
 /* ------------------------------------------------------------ prev / next */
@@ -439,10 +437,11 @@ function loadNeighbors() {
     if (!S || S.dead || api.isAbort(err)) return;
     S.neighbors = null;
     paintNeighbors();
-    /* Rule 8: a failed fetch is never silent. This one is non-fatal, so it
-       gets one dismissible line rather than a persistent error. */
-    toast.danger('Could not load the surrounding result set.', {
-      detail: api.describe(err) + ' Previous and next are unavailable.'
+    /* Rule 8: a failed fetch is never silent. This one blocks nothing, so
+       it drains rather than waiting to be dismissed. */
+    toast.error('Could not load the previous and next clips', {
+      detail: api.describe(err),
+      timeout: 6000
     });
   });
 }
@@ -475,7 +474,7 @@ function step(dir) {
   if (!n) return;
   var target = dir < 0 ? n.prev : n.next;
   if (!target) {
-    toast.info(dir < 0 ? 'This is the first clip in the set.' : 'This is the last clip in the set.');
+    toast.info(dir < 0 ? 'This is the first clip in the set' : 'This is the last clip in the set');
     return;
   }
   router.navigate(clipHref(target.path, S.query));
@@ -514,7 +513,7 @@ function buildPlayer() {
   var scrub = h('div.scrub', {
     role: 'slider',
     tabIndex: 0,
-    'aria-label': 'Seek within the recording',
+    'aria-label': 'Seek within the clip',
     'aria-valuemin': '0',
     'aria-valuemax': '0',
     'aria-valuenow': '0',
@@ -610,13 +609,13 @@ function wirePlayer() {
       ? 'The browser cannot decode this file — it may still be being written, or the codec is unsupported here.'
       : 'The server stopped sending the clip.';
     showNotice('Playback failed. ' + why);
-    toast.error('Playback failed for this recording.', {
+    closeWithPage(toast.error('Could not play this clip', {
       detail: why + ' The file is still downloadable.',
       retry: function () {
         hideNotice();
         v.load();
       }
-    });
+    }));
   }));
 
   /* Pointer scrubbing. touch-action:none is already on .scrub in CSS. */
@@ -694,7 +693,9 @@ function togglePlay() {
     if (p && p.catch) {
       p.catch(function (err) {
         showNotice('The browser blocked playback. Press play again.');
-        toast.danger('Playback did not start.', { detail: (err && err.message) || 'The browser blocked autoplay.' });
+        toast.error('Could not start playback', {
+          detail: (err && err.message) || 'The browser blocked it.', timeout: 6000
+        });
       });
     }
   } else {
@@ -1127,10 +1128,10 @@ function idleStatusText(clip) {
   if (clip.reprocessing) return 'The post-processor is working on this clip right now.';
   if (clip.analysis === 'queued') {
     return 'This clip\u2019s analysis was interrupted before it finished. The recovery sweep ' +
-      'will analyse it again in the background; this page follows along.';
+      'will analyze it again in the background; this page follows along.';
   }
   if (clip.analysis === 'unfinished') {
-    return 'This clip was never analysed, so it has no species or key frames. Reanalyze it to get them.';
+    return 'This clip was never analyzed, so it has no species or key frames. Reanalyze it to get them.';
   }
   return '';
 }
@@ -1347,7 +1348,7 @@ function parseServerError(err) {
 
 function startReanalyze(overrides) {
   if (S.job) {
-    toast.info('A reanalysis of this clip is already running.', {
+    toast.info('A reanalysis of this clip is already running', {
       detail: 'Progress is shown under the species name.'
     });
     return;
@@ -1384,7 +1385,7 @@ function onReanalyzeDone(payload) {
   stopJobPolling();
 
   if (payload && payload.success === false) {
-    toast.error('The reanalysis failed on the server.', {
+    toast.error('Could not reanalyze this clip', {
       detail: payload.error || 'The post-processor reported no reason.'
     });
     jobLog('Failed: ' + (payload.error || 'no reason given'), 'error');
@@ -1395,7 +1396,7 @@ function onReanalyzeDone(payload) {
   var newSpecies = payload && payload.new_species;
   var detail = joinMeta(
     payload && payload.frames_analyzed !== undefined
-      ? payload.frames_analyzed + ' of ' + payload.total_frames + ' frames analysed' : null,
+      ? payload.frames_analyzed + ' of ' + payload.total_frames + ' frames analyzed' : null,
     payload && payload.tracks_detected !== undefined
       ? plural(payload.tracks_detected, 'track') : null,
     payload && payload.thumbnails_saved !== undefined
@@ -1439,10 +1440,10 @@ function onReanalyzeFail(err) {
   stopJobPolling();
   jobLog('Request failed: ' + api.describe(err), 'error');
   paintJobState();
-  toast.error('Could not reanalyze this recording.', {
+  closeWithPage(toast.error('Could not reanalyze this clip', {
     detail: api.describe(err),
     retry: function () { startReanalyze(null); }
-  });
+  }));
   paintProcessingLog();
 }
 
@@ -1543,7 +1544,7 @@ function followRenamedClip(err) {
   if (!to || to === S.path) return false;
   stopJobPolling();
   dropJob();
-  toast.info('Analysed · this clip was renamed by the post-processor.');
+  toast.info('Analyzed · this clip was renamed by the post-processor');
   router.navigate(clipHref(to, S.query), { replace: true });
   return true;
 }
@@ -1568,8 +1569,8 @@ function buildLogSection() {
   }));
 
   var copy = btn('Copy JSON', { variant: 'ghost', size: 'sm', icon: 'layers', onClick: function () {
-    if (!S.log) { toast.info('There is no sidecar log to copy yet.'); return; }
-    copyText(JSON.stringify(S.log, null, 2), 'Processing log copied as JSON.');
+    if (!S.log) { toast.info('There is no sidecar log to copy yet'); return; }
+    copyText(JSON.stringify(S.log, null, 2), 'Processing log copied as JSON');
   } });
   S.els.logCopy = copy;
 
@@ -1617,10 +1618,10 @@ function loadProcessingLog(quiet) {
     S.logError = err;
     paintProcessingLog();
     if (!quiet) {
-      toast.error('Could not read the processing log.', {
+      closeWithPage(toast.error('Could not read the processing log', {
         detail: api.describe(err),
         retry: function () { loadProcessingLog(false); }
-      });
+      }));
     }
   });
 }
@@ -1743,7 +1744,7 @@ function paintProcessingLog() {
   if (!S.els.logDelegated) {
     S.els.logDelegated = true;
     keep(delegate(body, 'click', '.logrow__copy', function (ev, el) {
-      copyText(el.dataset.line || '', 'Log line copied.');
+      copyText(el.dataset.line || '', 'Log line copied');
     }));
   }
 }
@@ -1762,21 +1763,21 @@ function confirmDelete() {
   /* Optimistic + undo, per the reversibility rule. We leave for the grid at
      once; the toast (which lives in the shell, not in this view) holds the
      DELETE until its deadline. */
-  toast('Recording deleted', {
+  toast('1 clip deleted', {
     kind: 'danger',
     detail: label,
     undo: {
       label: 'Undo',
       onUndo: function () {
         cancelled = true;
-        toast.info('Delete cancelled. The recording is still on disk.');
+        toast.info('Delete cancelled', { detail: species + ' is still on disk.' });
       },
       onExpire: function () {
         if (cancelled) return;
         api.deleteClip(path).then(function () {
-          toast.success('Deleted ' + species + ' · ' + fileSize(clip.size) + ' freed.');
+          toast.success('1 clip removed from disk', { detail: species + ' · ' + fileSize(clip.size) + ' freed' });
         }, function (err) {
-          toast.error('The recording could not be deleted.', {
+          toast.error('Could not delete 1 clip', {
             detail: api.describe(err) + ' It is still on disk.',
             action: {
               label: 'Open the clip',
@@ -1879,7 +1880,7 @@ function applyClip(payload) {
     heading.textContent = (payload.species || 'Clip') + ' — clip detail';
   }
   if (S.els.countLive) {
-    S.els.countLive.textContent = plural(S.tracks.length, 'track') + ' in this recording.';
+    S.els.countLive.textContent = plural(S.tracks.length, 'track') + ' in this clip.';
   }
   if (S.els.downloadLink) {
     S.els.downloadLink.setAttribute('href', api.clipUrl(S.path));
@@ -1988,10 +1989,10 @@ function renderError(err) {
   clear(root);
   root.appendChild(S.els.heading);
   root.appendChild(S.els.live);
-  S.els.live.textContent = 'This recording could not be opened.';
+  S.els.live.textContent = 'This clip could not be opened.';
   root.appendChild(h('div.empty.empty--error',
     h('div.empty__art', icon('image-off', { size: 'lg' })),
-    h('h2.empty__title', { text: 'This recording could not be opened.' }),
+    h('h2.empty__title', { text: 'This clip could not be opened.' }),
     h('p.empty__body', { text: api.describe(err) }),
     h('p.empty__cause', { text: err && err.status === 404
       ? 'The file is not on disk any more — it may have been deleted or renamed by a reanalysis.'
@@ -2053,10 +2054,10 @@ function load() {
     if (!S || S.dead || api.isAbort(err)) return;
     if (followRenamedClip(err)) return;
     renderError(err);
-    toast.error('Could not load this recording.', {
+    closeWithPage(toast.error('Could not load this clip', {
       detail: api.describe(err),
       retry: function () { load(); }
-    });
+    }));
   });
 }
 
@@ -2066,7 +2067,7 @@ function refresh() {
     applyClip(payload);
   }, function (err) {
     if (!S || S.dead || api.isAbort(err)) return;
-    toast.danger('The clip could not be refreshed.', { detail: api.describe(err) });
+    toast.error('Could not refresh this clip', { detail: api.describe(err), timeout: 6000 });
   });
   loadProcessingLog(true);
 }
@@ -2139,10 +2140,17 @@ export const view = {
       try { S.abort.abort(); } catch (e3) {}
     }
 
-    /* A running reanalysis toast belongs to the shell, not to this view: the
-       job is on the server and the user asked for it. It is left alone on
-       purpose, and so is a pending delete's undo deadline. */
-    if (S.job && S.job.toast) S.job.toast.update({ detail: 'Still running on the server.' });
+    /* The reanalysis goes on on the server, but this page was the only thing
+       that could ever close its progress toast: left up, it spun for good,
+       "Still running on the server" long after the job had finished. It
+       hands over to a note that drains. A pending delete's undo deadline is
+       the shell's and is left alone. */
+    if (S.job && S.job.toast) {
+      S.job.toast.close();
+      toast.info('Reanalysis continues on the server', {
+        detail: 'Open the clip again to see the result.'
+      });
+    }
 
     S.els = {};
     S = null;

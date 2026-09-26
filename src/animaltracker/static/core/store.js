@@ -128,6 +128,8 @@ export function createStore(initial) {
      camerasError Error | null — the rail renders a diagnostic row from it
      camerasLoaded true once /api/cameras has answered (or failed) at least once
      connected    false once a fetch has failed; the app bar says so
+     restarting   true while Settings restarts the service on purpose, so the
+                  outage that follows is not reported as a disconnection
      route        { path, params }
      chrome       see above
      savedViews   [{ id, name, query, count }] — persisted in localStorage
@@ -142,6 +144,7 @@ export var store = createStore({
   camerasError: null,
   camerasLoaded: false,
   connected: true,
+  restarting: false,
   route: null,
   visible: true,
   savedViews: [],

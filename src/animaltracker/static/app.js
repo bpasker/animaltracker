@@ -43,8 +43,9 @@
    app.css deliberately gives .main no horizontal padding (it carries only the
    safe-area insets), and .chip-row's edge-bleed is written as a negative
    margin of --s-4 below 640px and --s-6 above. This file reconciles the two:
-   it publishes --page-pad on the shell at the same breakpoint and applies it
-   to .main. A view that wants a full-bleed strip uses
+   it publishes --page-pad on the root element at the same breakpoint and
+   applies it to .main; the toast host and the selection bar take it too. A
+   view that wants a full-bleed strip uses
    `margin-inline: calc(var(--page-pad) * -1)`; everything else just works.
    ========================================================================= */
 
@@ -54,7 +55,7 @@ import { store, readLocal, writeLocal } from './core/store.js';
 import { router } from './core/router.js';
 import { api } from './core/api.js';
 import { toast } from './core/toast.js';
-import { sheet, dialog, palette, closeTop, isOverlayOpen } from './core/overlay.js';
+import { sheet, dialog, palette, closeTop, isOverlayOpen, requiredField } from './core/overlay.js';
 import { shortAgo } from './core/format.js';
 import { view as recordingsView } from './views/recordings.js';
 import { view as liveView } from './views/live.js';
@@ -507,7 +508,14 @@ function promptSaveView(query) {
     placeholder: 'Deer, last 7 days' });
   host.appendChild(h('label.field__label', { for: 'at-savedview-name' }, 'Name this view'));
   host.appendChild(input);
+  var err = requiredField(host, input, 'A saved view needs a name.');
 
+  /* A missing name keeps the dialog open and says so on the field; it used
+     to close the dialog and leave a persistent error toast behind it. */
+  function submit() {
+    if (!input.value.trim()) { err.show(); return; }
+    dlg.close('save');
+  }
   var dlg = dialog({
     role: 'dialog',
     title: 'Save this view',
@@ -515,20 +523,22 @@ function promptSaveView(query) {
     content: host,
     initialFocus: input,
     actions: [
-      { label: 'Save', variant: 'primary', value: 'save' },
+      { label: 'Save', variant: 'primary', value: 'save', keepOpen: true, onSelect: submit },
       { label: 'Cancel', variant: 'secondary', value: null }
     ]
+  });
+  input.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); submit(); }
   });
   dlg.result.then(function (value) {
     if (value !== 'save') return;
     var name = input.value.trim();
-    if (!name) { toast.error('A saved view needs a name.'); return; }
     var views = loadSavedViews();
     views.push({ id: 'sv' + Date.now(), name: name, query: query });
     writeLocal(SAVED_KEY, views);
     store.set({ savedViews: views });
     refreshSavedCounts();
-    toast.success('Saved view “' + name + '”');
+    toast.success('View “' + name + '” saved');
   });
 }
 
@@ -648,21 +658,23 @@ function paletteItems() {
   return items;
 }
 
+/* The same words as the Live card's own Save button (live.js saveClip). */
 function saveClipFrom(cam) {
-  var t = toast.progress('Saving the last 30 s from ' + (cam.name || cam.id) + '…');
+  var name = cam.name || cam.id;
+  var t = toast.progress('Saving the last 30 s from ' + name + '…');
   api.saveClip(cam.id).then(function (res) {
     t.close();
     /* The server answers {filename, path} once the file exists. */
     var filename = res && typeof res === 'object' ? res.filename : null;
-    toast.success('Clip saved from ' + (cam.name || cam.id), {
+    toast.success('Clip saved from ' + name, {
       detail: filename || '',
-      action: { label: 'View', variant: 'secondary', onClick: function () {
-        router.go('/recordings', filename ? { q: filename } : {});
-      } }
+      action: filename ? { label: 'View', variant: 'secondary', onClick: function () {
+        router.go('/recordings', { q: filename });
+      } } : null
     });
   }, function (err) {
     t.close();
-    toast.error('Could not save the clip from ' + (cam.name || cam.id) + '.', {
+    toast.error('Could not save a clip from ' + name, {
       detail: api.describe(err),
       retry: function () { saveClipFrom(cam); }
     });
@@ -723,9 +735,11 @@ function boot() {
   window.__atShell = shell;   /* debugging handle only; nothing reads it */
 
   /* --- the content gutter ------------------------------------------------ */
+  /* On the root element, not the shell: the toast host is a child of <body>
+     beside the shell and lines its toasts up on the same gutter. */
   var wide = window.matchMedia('(min-width: 640px)');
   function syncPad() {
-    root.style.setProperty('--page-pad', wide.matches ? 'var(--s-6)' : 'var(--s-4)');
+    document.documentElement.style.setProperty('--page-pad', wide.matches ? 'var(--s-6)' : 'var(--s-4)');
   }
   syncPad();
   if (wide.addEventListener) wide.addEventListener('change', syncPad);
@@ -808,13 +822,17 @@ function boot() {
   renderSavedViews(shell);
 
   /* --- connection banner ------------------------------------------------- */
+  /* Not while Settings restarts the service: that outage is the point, and
+     its own progress toast says so. The detail used to promise "changes are
+     disabled", which nothing did; an action simply fails with its own toast. */
   var offlineToast = null;
-  store.select(['connected'], function (s) {
-    if (!s.connected && !offlineToast) {
-      offlineToast = toast.error('Disconnected from the Animal Tracker server.', {
-        detail: 'Cached views stay readable; changes are disabled until it answers again.'
+  store.select(['connected', 'restarting'], function (s) {
+    var down = !s.connected && !s.restarting;
+    if (down && !offlineToast) {
+      offlineToast = toast.error('Disconnected from the Animal Tracker server', {
+        detail: 'What is on screen stays readable; anything that needs the server fails until it answers again.'
       });
-    } else if (s.connected && offlineToast) {
+    } else if (!down && offlineToast) {
       offlineToast.close();
       offlineToast = null;
     }

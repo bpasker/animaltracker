@@ -26,9 +26,28 @@
      t.update({ title, detail });
 
    PUBLIC API
-     toast(message, opts) -> handle { close(fireExpire?), update(patch), el }
+     toast(message, opts) -> handle { close(fireExpire?), update(patch),
+                                      isOpen(), el }
      toast.success / .info / .danger / .error / .progress  (kind shorthands)
      toast.clear()
+
+   THE HOUSE STYLE (tests/test_client_toast_style.py holds the call sites to it)
+     success   a change that happened. "3 clips removed from disk".
+     info      news that is not a failure, a validation hint included.
+     danger    a deletion, and only with an Undo: its icon is a trash can.
+     error     a failure: "Could not <verb> <what>", the cause in `detail`,
+               Retry where trying again can help. It stays until dismissed;
+               a failure that blocks nothing (a background refresh, a
+               secondary fetch) passes timeout: 6000 and drains instead.
+     progress  work in flight; the caller closes it, on every path out.
+   The message is a headline: no closing full stop, sentences go in `detail`.
+   A toast about a poll is the poll's to close once it recovers, and a view
+   closes its own on unmount (isOpen() says whether one is still up).
+
+   The same words already on screen are not news: a plain toast (no Undo,
+   action or Retry, whose callbacks cannot be compared, and not progress)
+   that repeats a live one's kind, message and detail re-arms that one and
+   hands back its handle. Three taps used to stack three identical toasts.
    ========================================================================= */
 
 import { h, clear } from './dom.js';
@@ -104,6 +123,13 @@ function resume(entry) {
   startTimer(entry, entry.remaining);
 }
 
+/* A repeat re-arms the toast already up: its time starts again from now. */
+function rearm(entry, ms) {
+  if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+  if (entry.paused) { entry.remaining = ms; return; }   /* resume() starts it */
+  startTimer(entry, ms);
+}
+
 /**
  * message  the headline — always names what changed.
  * opts     { kind, detail, timeout, undo:{label,onUndo,onExpire},
@@ -114,6 +140,18 @@ export function toast(message, opts) {
   var kind = o.kind || 'success';
   var timeout = o.timeout === undefined ? TIMEOUTS[kind] : o.timeout;
   if (o.undo && o.timeout === undefined) timeout = UNDO_MS;
+  var detailText = o.detail || '';
+
+  var plain = !o.undo && !o.action && !o.retry && kind !== 'progress';
+  if (plain) {
+    for (var d = 0; d < live.length; d++) {
+      var twin = live[d];
+      if (twin.plain && twin.kind === kind && twin.title === message && twin.detail === detailText) {
+        rearm(twin, timeout);
+        return twin.handle;
+      }
+    }
+  }
 
   var el = h('div.toast', { 'class': 'toast--' + kind });
   if (kind === 'error') el.setAttribute('role', 'alert');
@@ -131,7 +169,9 @@ export function toast(message, opts) {
   var entry = {
     el: el, done: false, timer: null, paused: false,
     remaining: timeout, startedAt: 0,
-    onExpire: o.undo ? o.undo.onExpire : null
+    onExpire: o.undo ? o.undo.onExpire : null,
+    /* what a repeat is compared on (update() keeps them current) */
+    plain: plain, kind: kind, title: message, detail: detailText, handle: null
   };
 
   if (o.undo) {
@@ -203,24 +243,31 @@ export function toast(message, opts) {
 
   startTimer(entry, timeout);
 
-  return {
+  entry.handle = {
     el: el,
     close: function (fireExpire) { dismiss(entry, !!fireExpire); },
+    isOpen: function () { return !entry.done; },
     update: function (patch) {
       if (!patch) return;
-      if (patch.title !== undefined) titleEl.textContent = patch.title;
+      if (patch.title !== undefined) {
+        titleEl.textContent = patch.title;
+        entry.title = patch.title;
+      }
       if (patch.detail !== undefined) {
         detailEl.textContent = patch.detail;
         detailEl.hidden = !patch.detail;
+        entry.detail = patch.detail || '';
       }
       if (patch.kind && patch.kind !== kind) {
         el.classList.remove('toast--' + kind);
         kind = patch.kind;
+        entry.kind = kind;
         el.classList.add('toast--' + kind);
         clear(iconBox).appendChild(icon(ICONS[kind] || 'info', { size: 'sm' }));
       }
     }
   };
+  return entry.handle;
 }
 
 toast.success = function (msg, opts) { return toast(msg, Object.assign({ kind: 'success' }, opts)); };
@@ -233,9 +280,12 @@ toast.error = function (msg, opts) {
   return toast(msg, Object.assign({ kind: 'error', timeout: 0 }, opts));
 };
 
-/** Fire every pending deadline right now — used on pagehide. */
+/** Fire every pending deadline right now: on pagehide, and when the screen
+    that offered an Undo goes. Only toasts holding a deadline; leaving
+    Recordings used to take the "Disconnected" toast (which then never came
+    back for that outage) and a restart's progress down with them. */
 toast.flush = function () {
-  var pending = live.slice();
+  var pending = live.filter(function (entry) { return !!entry.onExpire; });
   for (var i = 0; i < pending.length; i++) dismiss(pending[i], true);
 };
 

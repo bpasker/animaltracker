@@ -394,6 +394,35 @@ def get_common_name(species: str) -> str:
     return species.replace("_", " ").title()
 
 
+_WORDS = re.compile(r"[a-z0-9]+")
+
+
+def species_words(text: str) -> List[str]:
+    """The lowercase words of a name or label: "Dog/Canid" is dog, canid."""
+    return _WORDS.findall((text or "").lower())
+
+
+def species_matches(species: str, name: str) -> bool:
+    """Whether a clip's species label is the animal a person named.
+
+    ``name`` is what someone picks or types in the settings: the animal as
+    alerts call it ("squirrel", "dog", "raccoon") or a taxon ("sciuridae",
+    "rodentia", "mammalia_rodentia"). It matches when each of its words is a
+    word of the label's common name ("dog" is in "Dog/Canid", "raccoon" in
+    "Raccoon Family"), when it is one of the label's taxonomy levels, or when
+    the label begins with it. Whole words only: "cat" is not "Bobcat".
+    """
+    want = species_words(name)
+    label = species_words(species)
+    if not want or not label:
+        return False
+    if label[:len(want)] == want:
+        return True
+    if len(want) == 1 and _CLASS_TOKENS.get(want[0], want[0]) in species_lineage(species):
+        return True
+    return set(want) <= set(species_words(get_common_name(species)))
+
+
 def format_species_display(species: str, include_scientific: bool = False) -> str:
     """Format a species name for display.
     

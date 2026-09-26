@@ -246,7 +246,7 @@ var GENERAL_SECTIONS = [
   },
   {
     id: 'general.notifications', label: 'Notifications', iconName: 'external',
-    blurb: 'Pushover alerts, and the species that never alert.',
+    blurb: 'Pushover alerts, how often an animal alerts again, and the species that never alert.',
     groups: [
       { id: 'pushover', legend: 'Pushover', hint: 'Only variable names are stored here. The values live in config/secrets.env and can be set under Secrets below.', fields: [
         { key: 'notification.pushover_app_token_env', kind: 'env', required: true,
@@ -261,9 +261,16 @@ var GENERAL_SECTIONS = [
           label: 'Web UI base URL', placeholder: 'http://192.168.1.195:8080',
           hint: 'Makes each alert link straight to its clip.' }
       ] },
+      { id: 'repeat', legend: 'Repeat alerts', hint: 'After an alert, a camera holds back further alerts for the same animal for a while. Every clip is still recorded and analysed; only the Pushover message is skipped.', fields: [
+        { key: 'notification.cooldown_minutes', kind: 'number', min: 0, max: 10080, step: 5, unit: ' min',
+          label: 'Alert again after', hint: 'For every animal without a time of its own below. 0 alerts for every clip.' },
+        { key: 'notification.species_cooldowns', kind: 'cooldowns', max: 10080, step: 5,
+          label: 'Per species', hint: 'A wait of their own for the animals that visit all the time. Each camera keeps its own clock.',
+          emptyMeans: 'No species of their own — every animal uses the time above.' }
+      ] },
       { id: 'exclusions', legend: 'Global exclusions', fields: [
         { key: 'exclusion_list', kind: 'species',
-          label: 'Never alert for these species', hint: 'Applies to every camera, on top of its own exclude list.',
+          label: 'Never alert for these species', hint: 'Applies to every camera, on top of its own exclude list. Their clips are deleted, not kept; to keep the clips and hear about them less, use Repeat alerts.',
           emptyMeans: 'No global exclusions — every species alerts.' }
       ] },
       { id: 'secrets', legend: 'Secrets', custom: 'secrets', fields: [] }
@@ -597,6 +604,19 @@ function destList(v) {
   return out;
 }
 
+/* Per-species repeat-alert waits as the draft holds them: a name and a
+   number of minutes each, nameless rows dropped. */
+function cooldownList(v) {
+  if (!isArray(v)) return [];
+  var out = [];
+  for (var i = 0; i < v.length; i++) {
+    var src = v[i] && typeof v[i] === 'object' ? v[i] : {};
+    var name = String(src.species === null || src.species === undefined ? '' : src.species).trim();
+    if (name) out.push({ species: name, minutes: num(src.minutes, 0) });
+  }
+  return out;
+}
+
 function destinationIds(model) {
   var list = getAt(model, ['general', 'notification', 'destinations']);
   var ids = [];
@@ -644,6 +664,8 @@ function coerce(spec, v) {
       return strList(v);
     case 'destinations':
       return destList(v);
+    case 'cooldowns':
+      return cooldownList(v);
     case 'recipients':
       return isArray(v) ? strList(v) : null;
     default:
@@ -767,6 +789,16 @@ function serialize(spec, v) {
         });
       }
       return outList;
+    }
+    case 'cooldowns': {
+      var waits = cooldownList(v);
+      var outWaits = [];
+      for (var w = 0; w < waits.length; w++) {
+        var mins = Number(waits[w].minutes);
+        if (!isFinite(mins)) throw PayloadError(spec.label + ' — ' + titleCase(waits[w].species) + ' is not a number.');
+        outWaits.push({ species: waits[w].species, minutes: mins });
+      }
+      return outWaits;
     }
     case 'recipients':
       return isArray(v) ? strList(v) : null;
@@ -901,6 +933,23 @@ function validateSpec(spec, value, path, prefix, out) {
         }
         if (d.app_token_env && !ENV_RE.test(d.app_token_env)) {
           out.push({ path: row.concat(['app_token_env']), message: label + ' — ' + who + ': the app token variable must be an environment variable name (letters, digits and underscores).' });
+        }
+      }
+      return;
+    }
+    case 'cooldowns': {
+      var waits = cooldownList(value);
+      var seenSpecies = {};
+      for (var c = 0; c < waits.length; c++) {
+        var what = titleCase(waits[c].species);
+        var low = waits[c].species.toLowerCase();
+        if (seenSpecies[low]) {
+          out.push({ path: path.concat([String(c), 'species']), message: label + ' — ' + what + ' is listed twice.' });
+        }
+        seenSpecies[low] = 1;
+        n = toNumber(waits[c].minutes);
+        if (!isFinite(n) || n < 0 || n > spec.max) {
+          out.push({ path: path.concat([String(c), 'minutes']), message: label + ' — ' + what + ' must be between 0 and ' + spec.max + ' min.' });
         }
       }
       return;
@@ -1838,6 +1887,106 @@ function speciesField(o) {
   };
 }
 
+/* --- Repeat alerts per species (general) -------------------------------- */
+
+/* One row per animal with a wait of its own. Rows are added from the same
+   species catalog as the exclusion lists, names the notifier matches against
+   the alert's own name for the animal ("dog" is in "Dog/Canid"); the minutes
+   take the stepper every other number on the page uses. */
+
+function cooldownsField(o) {
+  var shell = fieldShell({ label: o.label, hint: o.hint, labelTag: 'h3.field__label' });
+  shell.el = h('section.field', { 'aria-labelledby': shell.labelId });
+  var listEl = h('div.stack.stack--tight');
+  var countEl = h('p.field__hint', { role: 'status', 'aria-live': 'polite' });
+  var addSel = h('select.select__el#' + uid('cdadd'), { 'aria-label': 'Add a species to ' + o.label });
+  var addWrap = h('div.select', addSel, h('span.select__chevron', icon('chevron-down', { size: 'sm' })));
+  shell.el.appendChild(shell.labelEl);
+  shell.el.appendChild(shell.hintEl);
+  shell.el.appendChild(shell.errEl);
+  shell.el.appendChild(listEl);
+  shell.el.appendChild(countEl);
+  shell.el.appendChild(addWrap);
+  shell.el.appendChild(shell.statusEl);
+
+  function list() {
+    var v = getAt(S.draft, o.path);
+    if (!isArray(v)) { v = []; setAt(S.draft, o.path, v); }
+    return v;
+  }
+
+  function listed(name) {
+    var cur = list();
+    var low = String(name).toLowerCase();
+    for (var i = 0; i < cur.length; i++) if (String(cur[i].species).toLowerCase() === low) return true;
+    return false;
+  }
+
+  function fillAdd() {
+    clear(addSel);
+    addSel.appendChild(h('option', { value: '' }, 'Add a species…'));
+    for (var c = 0; c < SPECIES_CATALOG.length; c++) {
+      var grp = h('optgroup', { label: SPECIES_CATALOG[c][0] });
+      var names = SPECIES_CATALOG[c][1];
+      for (var s = 0; s < names.length; s++) {
+        if (!listed(names[s])) grp.appendChild(h('option', { value: names[s] }, titleCase(names[s])));
+      }
+      if (grp.firstChild) addSel.appendChild(grp);
+    }
+    addSel.value = '';
+  }
+
+  function removeAt(idx) {
+    var cur = list();
+    if (!cur[idx]) return;
+    cur.splice(idx, 1);
+    render();
+    onModelChanged();
+    addSel.focus();
+  }
+
+  function render() {
+    clear(listEl);
+    var cur = list();
+    for (var i = 0; i < cur.length; i++) {
+      (function (idx) {
+        var name = titleCase(cur[idx].species);
+        var minutes = numberField({
+          path: o.path.concat([idx, 'minutes']), label: name, hint: '',
+          min: 0, max: o.max, step: o.step, unit: ' min'
+        });
+        var removeBtn = h('button.icon-btn.icon-btn--danger', { type: 'button', 'aria-label': 'Remove ' + name },
+          icon('trash', { size: 'sm' }));
+        track(on(removeBtn, 'click', function () { removeAt(idx); }));
+        listEl.appendChild(h('div.row.cooldown-row', h('div.row__grow', minutes.el), removeBtn));
+      })(i);
+    }
+    countEl.textContent = cur.length
+      ? cur.length + ' ' + plural(cur.length, 'species', 'species') + ' with a wait of their own'
+      : (o.emptyMeans || '');
+    fillAdd();
+  }
+
+  track(on(addSel, 'change', function () {
+    var name = addSel.value;
+    if (!name || listed(name)) { addSel.value = ''; return; }
+    list().push({ species: name, minutes: 60 });
+    ctl.setError(null);
+    render();
+    onModelChanged();
+    var inputs = listEl.querySelectorAll('input');
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }));
+
+  var ctl = baseController(shell, o.path, {
+    label: o.label,
+    focus: function () { (listEl.querySelector('input') || addSel).focus(); },
+    sync: function () { render(); ctl.setError(null); }
+  });
+  render();
+  return ctl;
+}
+
 /* --- Pushover destinations (general) ------------------------------------ */
 
 /* The list lives at general.notification.destinations and cameras refer to
@@ -2565,6 +2714,9 @@ function renderField(spec, ctx) {
       break;
     case 'destinations':
       ctl = destinationsField(Object.assign(o, { emptyMeans: spec.emptyMeans }));
+      break;
+    case 'cooldowns':
+      ctl = cooldownsField(Object.assign(o, { emptyMeans: spec.emptyMeans, max: spec.max, step: spec.step }));
       break;
     case 'recipients':
       ctl = recipientsField(o);

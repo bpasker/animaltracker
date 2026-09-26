@@ -279,6 +279,14 @@ backed by `configstore.py`). Rules that keep it safe:
   `pushover_user_key_env` (comma-separated keys allowed) is used. The store
   refuses a camera naming an unknown destination (`check_destination_refs`);
   the pipeline only warns and skips it.
+- Repeat alerts: `general.notification.cooldown_minutes` (every animal) and
+  `species_cooldowns` (`{species, minutes}`, first match wins) hold back a
+  camera's next alert for the same animal; the clip is still recorded,
+  analysed and kept. A name matches through `species_matches` (each word in
+  the alert's common name, "dog" in "Dog/Canid", or a taxon). The clock is
+  the events' start times, kept in `logs_root/alert_times.json` so a restart
+  does not re-alert, and an alert that reached nobody gives its time back.
+  The exclusion lists are not this: they delete the clip.
 - Secrets are write-only: `POST /api/secrets` (`configstore.set_secret`)
   writes `NAME=value` into `config/secrets.env` beside the config (backup,
   atomic replace, 0600 when created) and into `os.environ`, only for names

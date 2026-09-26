@@ -141,11 +141,42 @@ class PushoverDestination(BaseModel):
         return self.name or self.id
 
 
+# The longest a repeat-alert cooldown can be: a week.
+MAX_COOLDOWN_MINUTES = 7 * 24 * 60
+
+
+class SpeciesCooldown(BaseModel):
+    """How long a camera stays quiet about one kind of animal after alerting for it."""
+    species: str = Field(description="The animal as alerts name it (squirrel, rabbit, dog) or a taxon (sciuridae, rodentia)")
+    minutes: float = Field(ge=0, le=MAX_COOLDOWN_MINUTES, description="Minutes after an alert for this animal before the same camera alerts for it again. 0 alerts for every clip.")
+
+    @field_validator("species")
+    @classmethod
+    def _name_the_species(cls, value: str) -> str:
+        safe = (value or "").strip()
+        if not safe:
+            raise ValueError("name the species")
+        return safe
+
+
 class NotificationSettings(BaseModel):
     pushover_app_token_env: str
     pushover_user_key_env: Optional[str] = Field(default=None, description="Fallback: the variable holding the user key(s) every camera alerts while no destinations are defined. Several keys can be comma-separated.")
     destinations: List[PushoverDestination] = Field(default_factory=list, description="Named Pushover recipients. A camera alerts every one of them unless its own notification.destinations lists a subset.")
     web_base_url: Optional[str] = Field(default=None, description="Base URL for web UI (e.g., http://192.168.1.195:8080). Used for clickable links in notifications.")
+    cooldown_minutes: float = Field(default=0.0, ge=0, le=MAX_COOLDOWN_MINUTES, description="Minutes after an alert before the same camera alerts again for the same animal. Every clip is still recorded and analysed; only the alert is held back. 0 alerts for every clip.")
+    species_cooldowns: List[SpeciesCooldown] = Field(default_factory=list, description="Cooldowns of their own for the animals they name, in place of cooldown_minutes. The first entry that matches a clip's species applies.")
+
+    @field_validator("species_cooldowns")
+    @classmethod
+    def _each_species_once(cls, value: List[SpeciesCooldown]) -> List[SpeciesCooldown]:
+        seen: set[str] = set()
+        for entry in value:
+            key = entry.species.lower()
+            if key in seen:
+                raise ValueError(f"'{entry.species}' is listed twice")
+            seen.add(key)
+        return value
 
     @field_validator("pushover_user_key_env")
     @classmethod

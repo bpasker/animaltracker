@@ -19,7 +19,7 @@ from .camera_registry import CameraRegistry
 from .clip_buffer import ClipBuffer
 from .config import CameraConfig, RuntimeConfig
 from .detector import Detection, BaseDetector, create_detector, create_realtime_detector, create_postprocess_detector, cleanup_gpu_memory
-from .notification import NotificationContext, PushoverNotifier
+from .notification import ALERT_TIMES_FILE, NotificationContext, PushoverNotifier
 from .storage import StorageManager, StreamingClipWriter, measured_frame_rate
 from .motion import MotionGate
 from .onvif_client import OnvifClient
@@ -2779,9 +2779,13 @@ class PipelineOrchestrator:
             )
 
         # The notifier keeps the settings object itself (not copies of the
-        # variable names) so destination edits from the settings page apply
-        # without a restart.
-        self.notifier = PushoverNotifier(runtime.general.notification)
+        # variable names) so destination and cooldown edits from the settings
+        # page apply without a restart. When each camera last alerted for each
+        # animal survives a restart in logs_root.
+        self.notifier = PushoverNotifier(
+            runtime.general.notification,
+            alert_times_path=Path(runtime.general.logs_root) / ALERT_TIMES_FILE,
+        )
         self.storage = StorageManager(
             storage_root=Path(self.runtime.general.storage_root),
             logs_root=Path(self.runtime.general.logs_root),

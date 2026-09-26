@@ -125,6 +125,8 @@ GENERAL_FIELDS: Dict[str, bool] = {
     "notification.pushover_user_key_env": True,
     "notification.destinations": True,    # the whole list; the notifier reads it on every send
     "notification.web_base_url": True,
+    "notification.cooldown_minutes": True,
+    "notification.species_cooldowns": True,   # the whole list; read on every send too
     "exclusion_list": True,
 }
 

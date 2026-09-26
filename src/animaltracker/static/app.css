@@ -5171,6 +5171,13 @@ body.is-locked{
 }
 .field__hint--warn{ color:var(--c-stale-text) }
 
+/* -- Repeat alerts: one row per species, its minutes and a remove button --
+   Each row is a number field of its own; its empty hint and status would
+   otherwise add two grid gaps under every stepper. */
+.cooldown-row{ align-items:flex-end; }
+.cooldown-row .field__hint:empty,
+.cooldown-row .field__status:empty{ display:none; }
+
 /* -- Secrets: one row per variable the config names, write-only ---------- */
 .secretlist{ display:grid; gap:var(--s-2); min-width:0 }
 .secretrow{

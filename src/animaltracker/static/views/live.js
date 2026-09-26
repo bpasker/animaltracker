@@ -617,9 +617,9 @@ function buildCard(cam) {
   });
 
   card.mediaStatus = makeStatusPill(true);
-  card.recLabel = h('span');
+  card.recDetail = h('span.mpill__detail');
   card.recEl = h('span.mpill.mpill--rec',
-    h('span.mpill__dot', { 'aria-hidden': 'true' }), card.recLabel);
+    h('span.mpill__dot', { 'aria-hidden': 'true' }), h('span', 'REC', card.recDetail));
   card.recEl.hidden = true;
   card.clockEl = h('span.mpill.mpill--strong', { text: '--:--:--' });
   card.rateEl = h('span.mpill', { text: '—' });
@@ -1776,7 +1776,7 @@ function showRec(card, species, conf) {
   var bits = [];
   if (species) bits.push(species);
   if (conf !== null && conf !== undefined) bits.push(conf.toFixed(2));
-  setText(card.recLabel, bits.length ? 'REC · ' + bits.join(' ') : 'REC');
+  setText(card.recDetail, bits.length ? ' · ' + bits.join(' ') : '');
   card.recEl.hidden = false;
 }
 

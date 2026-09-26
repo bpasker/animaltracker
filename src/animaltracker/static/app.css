@@ -4308,9 +4308,16 @@ body.is-locked{
 }
 
 /* REC rides beside LIVE while an event records (the box is in the video).
-   The corner takes half the picture, so on a narrow one REC drops under
-   LIVE instead of running into the camera's name in the other corner. */
+   On a phone it is just REC, so it stays on LIVE's line in full screen too,
+   where the camera's name sits lower, centred on the exit button; species
+   and confidence are in the readouts under the picture. Wider, the corner
+   takes half the picture, so a narrow card sends REC under LIVE instead of
+   running it into the name in the other corner. */
 .cam__stage .frame__tl{ flex-wrap:wrap;max-width:calc(50% - var(--s-3)); }
+.mpill--rec .mpill__detail{ display:none; }
+@media (min-width:640px){
+  .mpill--rec .mpill__detail{ display:inline; }
+}
 
 /* Keyboard jog legend — a fine-pointer affordance, hidden on touch. */
 .ptzstage__keys{ display:none; }

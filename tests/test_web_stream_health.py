@@ -293,8 +293,8 @@ def test_no_green_box_pixels_on_a_stale_frame(server):
 def test_boxes_are_drawn_when_the_stream_is_live(server, recorder):
     server._render_frame_jpeg(gray_frame(1280, 720), _one_detection(), False, 0.1)
 
-    assert recorder.rectangles[0][:3] == ((600, 300), (700, 400), (0, 255, 0))
-    assert recorder.rectangles[0][3] == 2  # 2px outline
+    assert recorder.rectangles[0][:3] == ((300, 150), (350, 200), (0, 255, 0))
+    assert recorder.rectangles[0][3] == 2  # 2px outline, in the output's pixels
     assert recorder.texts and recorder.texts[0].endswith(' 87%')
 
 
@@ -306,26 +306,49 @@ def test_many_stale_detections_still_draw_nothing(server, recorder):
 
 
 # --------------------------------------------------------------------------
-# detection boxes: original-frame pixel coordinates, drawn before the downscale
+# detection boxes: scaled to the 640px image and drawn after the downscale
 # --------------------------------------------------------------------------
 
-def test_boxes_use_original_pixel_coords_and_are_drawn_before_downscale(server, recorder):
+def test_boxes_are_scaled_and_drawn_after_the_downscale(server, recorder):
     ok, buf = server._render_frame_jpeg(gray_frame(1280, 720), _one_detection(), False, 0.1)
     assert ok
     out = decode(buf.tobytes())
 
-    # The rectangle call used the *original* 1280x720 coordinates ...
-    assert recorder.rectangles[0][0] == (600, 300)
-    assert recorder.rectangles[0][1] == (700, 400)
-    # ... and the resize to 640px wide happened afterwards.
+    # The frame was shrunk to 640px wide ...
     assert out.shape == (360, 640, 3)
+    # ... and the box drawn on it at half the detection's 1280x720 pixels.
+    assert recorder.rectangles[0][0] == (300, 150)
+    assert recorder.rectangles[0][1] == (350, 200)
 
-    # So in the encoded image the box lands at exactly half the coordinates.
+    # In the encoded image: the box's left edge and bottom, nothing below it.
     ys, xs = np.nonzero(green_mask(out))
     assert xs.size > 0
     assert abs(int(xs.min()) - 300) <= 2
-    assert abs(int(xs.max()) - 350) <= 2
     assert abs(int(ys.max()) - 200) <= 2
+
+
+def test_a_box_on_a_wide_camera_is_drawn_in_the_output_s_pixels(server, recorder):
+    # A rabbit on a 2688x1520 camera. Drawn on the camera's frame and then
+    # shrunk to 640px, the 2px outline came out half a pixel wide and the
+    # label about 3px tall: the Live page seemed to have no box at all.
+    det = [Detection(species='animal', confidence=0.87, bbox=[1803.0, 1156.0, 1906.0, 1246.0])]
+    ok, buf = server._render_frame_jpeg(gray_frame(2688, 1520), det, False, 0.1)
+    assert ok
+    assert decode(buf.tobytes()).shape == (361, 640, 3)
+
+    s = 640 / 2688
+    box = recorder.rectangles[0]
+    assert box[:2] == ((round(1803 * s), round(1156 * s)), (round(1906 * s), round(1246 * s)))
+    assert box[3] == 2
+    label_bg = recorder.rectangles[1]
+    assert label_bg[1][1] - label_bg[0][1] >= 14  # a label you can read at 640px
+
+
+def test_label_for_a_box_at_the_right_edge_stays_in_frame(server, recorder):
+    det = [Detection(species='deer', confidence=0.5, bbox=[1250.0, 300.0, 1280.0, 360.0])]
+    server._render_frame_jpeg(gray_frame(1280, 720), det, False, 0.1)
+    label_bg = recorder.rectangles[1]
+    assert label_bg[1][0] <= 640
 
 
 def test_label_is_placed_above_the_box_using_the_common_name(server, recorder):
@@ -336,7 +359,7 @@ def test_label_is_placed_above_the_box_using_the_common_name(server, recorder):
 
 
 def test_label_for_a_box_at_the_top_edge_is_pushed_down_into_frame(server, recorder):
-    # label_y = max(y1 - 10, text_height + 10): a box at y1=0 gets its label
+    # label_y = max(y1 - 6, text_height + 6): a box at y1=0 gets its label
     # drawn *inside* the frame rather than off the top.
     det = [Detection(species='deer', confidence=0.5, bbox=[10.0, 0.0, 110.0, 100.0])]
     server._render_frame_jpeg(gray_frame(1280, 720), det, False, 0.1)
@@ -363,14 +386,21 @@ def test_negative_and_out_of_frame_bbox_does_not_raise(server):
     assert decode(buf.tobytes()) is not None
 
 
-def test_render_frame_jpeg_mutates_the_caller_s_array_when_live(server):
-    # QUIRK: overlays are drawn in place on the array handed in; only the
-    # callers' own .copy() keeps the worker's latest_frame clean — asserted
-    # as-is to detect rewrite drift.
-    img = gray_frame(1280, 720)
-    before = img.copy()
-    server._render_frame_jpeg(img, _one_detection(), False, 0.1)
-    assert not np.array_equal(img, before)
+def test_render_frame_jpeg_draws_in_place_only_when_it_does_not_downscale(server):
+    # QUIRK: a frame 640px wide or less gets its overlays drawn on the array
+    # handed in; only the callers' own .copy() keeps the worker's
+    # latest_frame clean — asserted as-is to detect rewrite drift. A wider
+    # frame is shrunk into a new array first, and the boxes land on that.
+    small = gray_frame(640, 360)
+    before = small.copy()
+    det = [Detection(species='deer', confidence=0.87, bbox=[300.0, 150.0, 350.0, 200.0])]
+    server._render_frame_jpeg(small, det, False, 0.1)
+    assert not np.array_equal(small, before)
+
+    wide = gray_frame(1280, 720)
+    before = wide.copy()
+    server._render_frame_jpeg(wide, _one_detection(), False, 0.1)
+    assert np.array_equal(wide, before)
 
 
 def test_render_frame_jpeg_leaves_the_caller_s_array_alone_when_stale(server):

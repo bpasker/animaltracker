@@ -1939,44 +1939,18 @@ class WebServer:
         return web.Response(body=buffer.tobytes(), content_type='image/jpeg', headers=headers)
 
     def _render_frame_jpeg(self, img, detections, stale, age_seconds, quality=70):
-        """Draw overlays, downscale to 640px wide, encode JPEG.
+        """Downscale to 640px wide, draw overlays, encode JPEG.
 
         Shared by the single-shot /snapshot handler and the /stream MJPEG
         handler so both render identically. Pure function of its arguments;
         safe to call in a worker thread.
+
+        Detection boxes are drawn after the downscale, in the pixels the
+        browser receives. Drawn on the camera's frame and then shrunk, a box
+        on a 2688px camera came out half a pixel wide with a label about 3px
+        tall, and the Live page looked as if it had no box at all.
         """
         height, width = img.shape[:2]
-
-        # Draw bounding boxes only if the stream is live (otherwise the boxes
-        # would be drawn on a stale frame and look misleading).
-        if not stale:
-            for det in detections:
-                if det.bbox:
-                    x1, y1, x2, y2 = [int(v) for v in det.bbox]
-
-                    # Draw bounding box (green)
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                    # Prepare label with species name and confidence
-                    common_name = get_common_name(det.species)
-                    label = f"{common_name} {det.confidence*100:.0f}%"
-
-                    # Calculate text size for background rectangle
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.6
-                    thickness = 2
-                    (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-
-                    # Draw background rectangle for label
-                    label_y = max(y1 - 10, text_height + 10)
-                    cv2.rectangle(img,
-                                  (x1, label_y - text_height - 5),
-                                  (x1 + text_width + 10, label_y + 5),
-                                  (0, 255, 0), -1)
-
-                    # Draw label text (black on green background)
-                    cv2.putText(img, label, (x1 + 5, label_y),
-                                font, font_scale, (0, 0, 0), thickness)
 
         # When the stream is stale, dim the frame and overlay a clear banner
         # so the operator immediately sees there is no live video.
@@ -2028,10 +2002,46 @@ class WebServer:
             )
 
         # Resize for web display
+        scale = 1.0
         if width > 640:
             scale = 640 / width
             new_height = int(height * scale)
             img = cv2.resize(img, (640, new_height), interpolation=cv2.INTER_AREA)
+
+        # Draw bounding boxes only if the stream is live (otherwise the boxes
+        # would be drawn on a stale frame and look misleading). Detections
+        # are in the camera frame's pixels; scale them to this image.
+        if not stale:
+            out_width = img.shape[1]
+            for det in detections:
+                if det.bbox:
+                    x1, y1, x2, y2 = [int(round(v * scale)) for v in det.bbox]
+
+                    # Draw bounding box (green)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    # Prepare label with species name and confidence
+                    common_name = get_common_name(det.species)
+                    label = f"{common_name} {det.confidence*100:.0f}%"
+
+                    # Calculate text size for background rectangle
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.5
+                    thickness = 1
+                    (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+
+                    # Background rectangle for the label, sitting on the box
+                    # and kept inside the image at the top and right edges.
+                    label_x = max(0, min(x1, out_width - text_width - 7))
+                    label_y = max(y1 - 6, text_height + 6)
+                    cv2.rectangle(img,
+                                  (label_x - 1, label_y - text_height - 4),
+                                  (label_x + text_width + 6, label_y + 3),
+                                  (0, 255, 0), -1)
+
+                    # Draw label text (black on green background)
+                    cv2.putText(img, label, (label_x + 3, label_y),
+                                font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
 
         # Encode frame to JPEG
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]

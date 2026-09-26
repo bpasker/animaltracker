@@ -28,6 +28,19 @@
         "cam2"
       ],
       "port": 8082
+    },
+    {
+      "name": "live-dev",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "scripts/dev_web.py",
+        "config/cameras.sample.yml",
+        "--port",
+        "8083",
+        "--recording",
+        "cam1"
+      ],
+      "port": 8083
     }
   ]
 }

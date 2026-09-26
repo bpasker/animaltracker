@@ -617,6 +617,10 @@ function buildCard(cam) {
   });
 
   card.mediaStatus = makeStatusPill(true);
+  card.recLabel = h('span');
+  card.recEl = h('span.mpill.mpill--rec',
+    h('span.mpill__dot', { 'aria-hidden': 'true' }), card.recLabel);
+  card.recEl.hidden = true;
   card.clockEl = h('span.mpill.mpill--strong', { text: '--:--:--' });
   card.rateEl = h('span.mpill', { text: '—' });
   card.ageEl = h('div.cam__age');
@@ -626,16 +630,12 @@ function buildCard(cam) {
   card.crossEl.hidden = true;
   card.marqueeEl = h('div.ptzstage__marquee');
   card.marqueeEl.hidden = true;
-  card.reticleEl = h('div.ptzstage__reticle',
-    h('span.ptzstage__reticle-label'));
-  card.reticleEl.hidden = true;
-  card.reticleLabel = card.reticleEl.firstChild;
 
   card.frameEl = h('div.frame',
     h('div.frame__film.film--day'),
     card.imgEl,
     h('div.frame__scrim'),
-    h('div.frame__tl', card.mediaStatus.el),
+    h('div.frame__tl', card.mediaStatus.el, card.recEl),
     h('div.frame__tr', h('span.mpill', { text: card.name }), card.exitBtn),
     h('div.frame__bl', card.clockEl),
     h('div.frame__br', card.rateEl));
@@ -648,7 +648,7 @@ function buildCard(cam) {
     card.frameEl,
     h('div.cam__veil'),
     card.ageEl,
-    h('div.ptzstage__layer', card.crossEl, card.marqueeEl, card.reticleEl),
+    h('div.ptzstage__layer', card.crossEl, card.marqueeEl),
     h('div.ptzstage__keys',
       h('kbd', '↑↓←→ pan'), h('kbd', '+ / − zoom'),
       h('kbd', '1–9 preset'), h('kbd', '0 stop'), h('kbd', 'F full'), h('kbd', 'S save')));
@@ -1709,6 +1709,8 @@ function pollMonitor() {
       S.cards.forEach(function (card) {
         card.rBuffer.set('—', 'danger', 0, 'buffer unavailable');
         card.rTracks.set('—', 'danger');
+        /* Not knowing is not recording. */
+        card.recEl.hidden = true;
       });
       if (isUnreachable(err)) {
         /* The camera poll decides whether the server is gone. Give it one
@@ -1730,6 +1732,7 @@ function paintTelemetry(card) {
     card.rTracks.set('—');
     card.rTop.set('—', null, 0, 'no detection');
     card.rEvent.set('—');
+    card.recEl.hidden = true;
     return;
   }
   var secs = num(m.buffer_seconds);
@@ -1753,10 +1756,10 @@ function paintTelemetry(card) {
     ? String(m.event_species[0]).split('_').pop() : null;
   if (m.event_active && dur !== null) {
     card.rEvent.set(dur.toFixed(1) + 's', 'live');
-    showReticle(card, species, conf);
+    showRec(card, species, conf);
   } else {
     card.rEvent.set('idle');
-    card.reticleEl.hidden = true;
+    card.recEl.hidden = true;
   }
 
   if (m.status && m.status !== 'connected') {
@@ -1764,19 +1767,17 @@ function paintTelemetry(card) {
   }
 }
 
-function showReticle(card, species, conf) {
-  /* The pipeline gives us the fact of a detection, not its box. The reticle
-     therefore marks the centre third and names the track — it is a "this
-     frame is under machine control" marker, never a fake bounding box. */
-  card.reticleEl.hidden = false;
-  card.reticleEl.style.setProperty('--x', '33%');
-  card.reticleEl.style.setProperty('--y', '33%');
-  card.reticleEl.style.setProperty('--w', '34%');
-  card.reticleEl.style.setProperty('--h', '34%');
+function showRec(card, species, conf) {
+  /* Telemetry says that an event is recording, its species and its top
+     confidence, never where the animal is: the detection box is drawn into
+     the video itself (web.py _render_frame_jpeg). So REC rides beside LIVE
+     and points at nothing. It used to be a labelled box over the centre
+     third, which read as a detection in the wrong place. */
   var bits = [];
   if (species) bits.push(species);
   if (conf !== null && conf !== undefined) bits.push(conf.toFixed(2));
-  setText(card.reticleLabel, 'TRK · ' + (bits.length ? bits.join(' ') : 'active'));
+  setText(card.recLabel, bits.length ? 'REC · ' + bits.join(' ') : 'REC');
+  card.recEl.hidden = false;
 }
 
 function pollPositions() {

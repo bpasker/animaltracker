@@ -3532,7 +3532,7 @@ body.is-locked{
 .mpill--live  { color:var(--c-on-media-live); }
 .mpill--stale { color:var(--c-on-media-stale); }
 .mpill--accent{ color:var(--c-on-media-accent); }
-.mpill--rec   { color:var(--c-on-media-stale); }
+.mpill--rec   { color:var(--c-on-media-stale);white-space:nowrap; }
 .mpill__dot{
   flex:none;width:7px;height:7px;border-radius:var(--r-pill);background:currentColor;
 }
@@ -4307,18 +4307,10 @@ body.is-locked{
   border:1px dashed var(--c-on-media-line);border-radius:2px;
 }
 
-/* Active-detection reticle: "this frame is under machine control". */
-.ptzstage__reticle{
-  position:absolute;
-  left:var(--x,50%);top:var(--y,50%);width:var(--w,20%);height:var(--h,20%);
-  border:1px solid var(--c-on-media-accent);border-radius:var(--r-xs);
-}
-.ptzstage__reticle-label{
-  position:absolute;left:0;top:-20px;
-  padding:1px var(--s-2);border-radius:2px;
-  background:var(--c-media-scrim-strong);color:var(--c-on-media);
-  font-family:var(--font-mono);font-size:var(--t-micro);white-space:nowrap;
-}
+/* REC rides beside LIVE while an event records (the box is in the video).
+   The corner takes half the picture, so on a narrow one REC drops under
+   LIVE instead of running into the camera's name in the other corner. */
+.cam__stage .frame__tl{ flex-wrap:wrap;max-width:calc(50% - var(--s-3)); }
 
 /* Keyboard jog legend — a fine-pointer affordance, hidden on touch. */
 .ptzstage__keys{ display:none; }

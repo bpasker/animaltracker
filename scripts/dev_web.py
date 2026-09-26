@@ -17,7 +17,9 @@ starts this through .claude/launch.json ("settings-dev").
 The archive's analysis states can be exercised too: an ``<epoch>_animal.mp4``
 stub without a ``.log.json`` beside it shows as "Awaiting analysis" (a stand-in
 recovery sweeper reports itself enabled), and ``--analyzing <path>`` marks a
-clip as in flight so it shows as "Analyzing…".
+clip as in flight so it shows as "Analyzing…". ``--recording <camera>`` opens
+an event on a live camera, with a small animal boxed in its stream, for the
+Live page's REC pill (launch config "live-dev").
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from animaltracker import configstore  # noqa: E402
 from animaltracker.analysis_recovery import ClipAnalysisRegistry  # noqa: E402
-from animaltracker.detector import MODEL_BUSY  # noqa: E402
+from animaltracker.detector import MODEL_BUSY, Detection  # noqa: E402
 from animaltracker.web import WebServer  # noqa: E402
 
 
@@ -62,6 +64,21 @@ class FakeDetector:
     """The detector's name, which /api/monitor reports."""
 
     backend_name = "megadetector (dev stand-in)"
+
+
+class FakeEvent:
+    """An open event as /api/monitor reads it (--recording): the Live page
+    shows REC beside LIVE for it."""
+
+    def __init__(self) -> None:
+        self.species = {"animal"}
+        self.max_confidence = 0.89
+        self.tracker = None
+        self.start_ts = time.time()
+
+    @property
+    def duration(self) -> float:
+        return time.time() - self.start_ts
 
 
 def test_card(width: int = 1600, height: int = 1200):
@@ -166,6 +183,9 @@ def main() -> None:
                     help="clip path (relative to storage/clips) to show as being analysed; repeatable")
     ap.add_argument("--blurry", action="append", default=[], metavar="CAMERA",
                     help="camera id whose frames the blur filter rejects (monitor card); repeatable")
+    ap.add_argument("--recording", action="append", default=[], metavar="CAMERA",
+                    help="camera id with an event open and a small animal boxed in its "
+                         "stream (Live's REC pill); repeatable")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -191,6 +211,11 @@ def main() -> None:
     for w in workers.values():
         w.storage = scratch / "storage"
         w.blurry = w.camera.id in args.blurry
+        if w.camera.id in args.recording:
+            # A rabbit-sized box (0.25% of the frame) low on the right.
+            w.event_state = FakeEvent()
+            w.latest_detections = [Detection(species="animal", confidence=0.87,
+                                             bbox=[1100.0, 900.0, 1180.0, 960.0])]
 
     registry = ClipAnalysisRegistry()
     for rel in args.analyzing:

@@ -95,6 +95,37 @@ def test_sample_rate_on_the_command_line_is_an_override(tmp_path, seen):
     assert seen["process_all"]["settings"].sample_rate == 7
 
 
+def test_each_clip_is_named_with_its_own_camera_s_exclusions(tmp_path, seen, monkeypatch):
+    # An excluded animal has no vote in a clip's species, so the command must
+    # know what each clip's camera excludes to name it as the live event did.
+    import animaltracker.postprocess as pp
+
+    cfg = write_config(tmp_path)
+    cfg.write_text(cfg.read_text()
+                   .replace("general:\n", "general:\n  exclusion_list: [mammalia carnivora felidae]\n", 1)
+                   .replace("cameras: []", textwrap.dedent("""\
+                       cameras:
+                         - id: cam1
+                           name: Feeder
+                           rtsp:
+                             uri: rtsp://a.invalid/stream
+                           exclude_species: [mammalia rodentia sciuridae]""")))
+    both = ["mammalia rodentia sciuridae", "mammalia carnivora felidae"]
+
+    cmd_reprocess(args(cfg))
+    exclusions_for = seen["process_all"]["exclusions_for"]
+    assert exclusions_for("cam1") == both
+    assert exclusions_for("cam9") == ["mammalia carnivora felidae"]
+
+    built = []
+    monkeypatch.setattr(pp.ClipPostProcessor, "__init__", lambda self, **kw: built.append(kw["settings"]))
+    monkeypatch.setattr(pp.ClipPostProcessor, "process_clip",
+                        lambda self, clip_path, **kw: SimpleNamespace(success=False, original_path=clip_path,
+                                                                      error="not a real clip"))
+    cmd_reprocess(args(cfg, clip="cam1/2026/09/26/1789000000_animal.mp4"))
+    assert built[-1].exclude_species == both
+
+
 def test_an_explicit_model_still_builds_that_model_on_the_post_processing_backend(tmp_path, seen):
     cmd_reprocess(args(write_config(tmp_path), model="models/big.pt"))
 

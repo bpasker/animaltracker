@@ -90,6 +90,13 @@ The system uses a two-stage detection approach:
   a person's shadow nor part of a track dropped as one (`_evidence_frames`).
   The live path's false-positive gate must use it, never a recount of the
   processing log, which still holds the shadow frames.
+  An excluded species has no vote in the clip's name (`_weigh_exclusions`),
+  nor do generic labels on its branch ("animal", "rodent" beside a squirrel):
+  the clip is named for an excluded animal only when the rest of it falls
+  short of `min_detection_frames`, and that name is what makes the live path
+  delete it. So every caller passes the clip's own camera's exclusions to
+  `build_processing_settings` (`excluded_species_for`), or a later analysis
+  names the clip differently from the live one.
 - `ptz_tracker.py` - PTZ auto-tracking controller, pixel-to-PTZ coordinate mapping
   `PTZTracker._lock` is held for the whole of an update, ONVIF requests
   included, and cam1 and cam2 share one tracker. Nothing the event loop

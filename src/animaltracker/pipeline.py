@@ -1809,50 +1809,22 @@ class StreamWorker:
 
     def _normalize_species(self, species: str) -> str:
         """Normalize species name for comparison (lowercase, underscores)."""
-        return species.lower().replace(' ', '_').replace('-', '_').strip()
+        from .postprocess import normalize_species_label
+        return normalize_species_label(species)
 
     def _species_matches_exclude(self, detection_species: str, excludes: set) -> bool:
         """Check if a detection species matches any exclude pattern.
-        
-        Supports:
-        - Exact match: "mammalia_rodentia_sciuridae" matches "mammalia_rodentia_sciuridae"
-        - Prefix match: "mammalia_rodentia_sciuridae_sciurus" matches "mammalia_rodentia_sciuridae"
-        - Token match: "sciuridae" matches a label with token "sciuridae" (not arbitrary substrings)
-        - Common name match: "mammalia_rodentia_sciuridae" matches "squirrel"
+
+        The one test in ``postprocess.species_matches_exclude``, which the
+        post-processor's species vote uses too: the clip is named for an
+        excluded species only when this check would delete it.
         """
-        from .species_names import get_common_name
-        
-        normalized = self._normalize_species(detection_species)
-        norm_tokens = normalized.split('_')
-        
-        for exclude in excludes:
-            exclude_norm = self._normalize_species(exclude)
-            
-            # Exact match
-            if normalized == exclude_norm:
-                return True
-            
-            # Detection starts with exclude (hierarchical match)
-            # e.g., "mammalia_rodentia_sciuridae_sciurus" starts with "mammalia_rodentia_sciuridae"
-            if normalized.startswith(exclude_norm + '_'):
-                return True
-            
-            # Exclude starts with detection (broader exclusion)
-            # e.g., excluding "mammalia_rodentia" should exclude "mammalia_rodentia_sciuridae"
-            if exclude_norm.startswith(normalized + '_'):
-                return True
-            
-            # Token match (was substring; substring matched too aggressively,
-            # e.g. excluding "bear" would also drop "bearded_dragon").
-            if exclude_norm in norm_tokens:
-                return True
-        
-        # Also check common name match
-        common_name = get_common_name(detection_species).lower()
-        if common_name in excludes:
-            return True
-        
-        return False
+        from .postprocess import species_matches_exclude
+        return species_matches_exclude(detection_species, excludes)
+
+    def _excluded_species(self) -> List[str]:
+        """What this camera excludes, as configured: its own list and the global one."""
+        return list(self.camera.exclude_species or []) + list(self.runtime.general.exclusion_list or [])
 
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
         includes = set(self._normalize_species(s) for s in self.camera.include_species)
@@ -2112,9 +2084,8 @@ class StreamWorker:
         
         # Capture exclusion lists for post-processing check
         # (species may be reclassified by post-processor to an excluded species)
-        camera_excludes = set(self._normalize_species(s) for s in self.camera.exclude_species)
-        global_excludes = set(self._normalize_species(s) for s in self.runtime.general.exclusion_list)
-        all_excludes = camera_excludes | global_excludes
+        excluded_species = self._excluded_species()
+        all_excludes = set(self._normalize_species(s) for s in excluded_species)
         
         # Capture reference to exclusion check method
         species_matches_exclude = self._species_matches_exclude
@@ -2175,9 +2146,12 @@ class StreamWorker:
                         LOGGER.debug("Post-processing with %s detector (cached)", postprocess_detector.backend_name)
 
                         # Settings from config, by the same mapping a reanalysis
-                        # and the recovery sweep use.
+                        # and the recovery sweep use. The exclusions are the
+                        # ones the check below deletes by: an excluded animal
+                        # has no vote in the clip's species, so the clip is
+                        # named for one only when every animal in it is.
                         clip_cfg = self.runtime.general.clip
-                        settings = build_processing_settings(clip_cfg)
+                        settings = build_processing_settings(clip_cfg, exclude_species=excluded_species)
                         processor = ClipPostProcessor(
                             detector=postprocess_detector,
                             storage_root=storage_root,
@@ -2349,7 +2323,11 @@ class StreamWorker:
                         LOGGER.warning("Failed to save PTZ decisions: %s", e)
 
                 # Step 6: Check if final species is excluded (post-processing may have reclassified)
-                # If excluded, delete the clip and skip notification
+                # If excluded, delete the clip and skip notification. Excluded
+                # animals have no vote in the post-processor's species, so it
+                # names the clip for one only when nothing else in it adds up
+                # to min_detection_frames: a squirrel beside a cardinal no
+                # longer takes the cardinal's clip down with it.
                 if all_excludes and species_matches_exclude(final_species, all_excludes):
                     LOGGER.info(
                         "Post-processing identified excluded species '%s' for %s - deleting clip and skipping notification",
@@ -3260,7 +3238,7 @@ class PipelineOrchestrator:
         for the alert has passed, and removing a file hours later is not a
         background job's call. Returns True when the analysis completed.
         """
-        from .postprocess import ClipPostProcessor, build_processing_settings
+        from .postprocess import ClipPostProcessor, build_processing_settings, excluded_species_for
 
         registry = StreamWorker.analysis_registry
         clips_dir = self.storage.storage_root / "clips"
@@ -3285,10 +3263,15 @@ class PipelineOrchestrator:
                     return False
                 LOGGER.info("Recovering interrupted analysis: %s", clip_path)
                 detector = worker._get_postprocess_detector()
+                # The clip's own camera's exclusions (not the stand-in
+                # worker's), so it is named as the live event would have.
                 processor = ClipPostProcessor(
                     detector=detector,
                     storage_root=self.storage.storage_root,
-                    settings=build_processing_settings(self.runtime.general.clip),
+                    settings=build_processing_settings(
+                        self.runtime.general.clip,
+                        exclude_species=excluded_species_for(self.runtime, camera_id),
+                    ),
                 )
                 try:
                     result = processor.process_clip(

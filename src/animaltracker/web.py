@@ -2410,10 +2410,19 @@ class WebServer:
             settings_override = {}
         if not isinstance(settings_override, dict):
             return web.Response(status=400, text="'settings' must be an object")
-        from .postprocess import build_processing_settings
+        from .postprocess import build_processing_settings, excluded_species_for
         clip_cfg = self.runtime.general.clip if self.runtime else None
+        # The clip's camera's exclusions, which decide its name as they did
+        # when the live event analysed it.
         try:
-            settings = build_processing_settings(clip_cfg, settings_override)
+            camera_id = full_path.relative_to(self.storage_root / 'clips').parts[0]
+        except (ValueError, IndexError):
+            camera_id = None
+        try:
+            settings = build_processing_settings(
+                clip_cfg, settings_override,
+                exclude_species=excluded_species_for(self.runtime, camera_id),
+            )
         except Exception as e:  # noqa: BLE001 - whatever a bad value raises is a bad request
             return web.Response(status=400, text=f"Invalid settings: {e}")
 

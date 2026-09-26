@@ -443,7 +443,7 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
     other is analysing; prefer the archive's Reanalyze for a few clips.
     """
     from .detector import create_detector, create_postprocess_detector
-    from .postprocess import process_all_clips, ClipPostProcessor, build_processing_settings
+    from .postprocess import process_all_clips, ClipPostProcessor, build_processing_settings, excluded_species_for
     
     _load_secrets(args.config)
     runtime = load_runtime_config(args.config)
@@ -481,10 +481,18 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
                 # Just a filename, look in storage_root/clips
                 clip_path = storage_root / 'clips' / clip_path
         
+        # Named with its camera's exclusions, as the live event named it.
+        try:
+            camera_id = clip_path.resolve().relative_to((storage_root / 'clips').resolve()).parts[0]
+        except (ValueError, IndexError, OSError):
+            camera_id = None
         processor = ClipPostProcessor(
             detector=detector,
             storage_root=storage_root,
-            settings=settings,
+            settings=build_processing_settings(
+                runtime.general.clip, overrides,
+                exclude_species=excluded_species_for(runtime, camera_id),
+            ),
         )
         
         result = processor.process_clip(
@@ -518,6 +526,7 @@ def cmd_reprocess(args: argparse.Namespace) -> int:
             update_filenames=not args.no_rename,
             regenerate_thumbnails=not args.no_thumbnails,
             settings=settings,
+            exclusions_for=lambda camera_id: excluded_species_for(runtime, camera_id),
         )
         
         # Print summary

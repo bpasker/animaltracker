@@ -9,6 +9,7 @@ clip save and manual reanalysis use this same module.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -16,13 +17,66 @@ import shutil
 import cv2
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import Callable, List, Optional, Dict, Tuple
 
 from .detector import BaseDetector, Detection, create_detector, cleanup_gpu_memory, NON_ANIMAL_REASON_PREFIX
 from .tracker import ObjectTracker, create_tracker
-from .species_names import pick_species_by_lineage, species_rank
+from .species_names import get_common_name, pick_species_by_lineage, species_lineage, species_rank
 
 LOGGER = logging.getLogger(__name__)
+
+
+def normalize_species_label(species: str) -> str:
+    """A species label or a configured name as the exclusion lists compare
+    them: lowercase, words joined by underscores."""
+    return species.lower().replace(' ', '_').replace('-', '_').strip()
+
+
+def species_matches_exclude(species: str, excludes: set) -> bool:
+    """Whether ``species`` is one of the excluded species.
+
+    ``excludes`` holds configured names already passed through
+    ``normalize_species_label``. One test for every place an exclusion list
+    is read: the live detection filter, the post-processor's species vote
+    and the check that deletes a clip named for an excluded species.
+
+    Supports:
+    - Exact match: "mammalia_rodentia_sciuridae" matches "mammalia_rodentia_sciuridae"
+    - Prefix match: "mammalia_rodentia_sciuridae_sciurus" matches "mammalia_rodentia_sciuridae"
+    - Token match: "sciuridae" matches a label with token "sciuridae" (not arbitrary substrings)
+    - Common name match: "mammalia_rodentia_sciuridae" matches "squirrel"
+    """
+    normalized = normalize_species_label(species)
+    norm_tokens = normalized.split('_')
+
+    for exclude in excludes:
+        exclude_norm = normalize_species_label(exclude)
+
+        # Exact match
+        if normalized == exclude_norm:
+            return True
+
+        # Detection starts with exclude (hierarchical match)
+        # e.g., "mammalia_rodentia_sciuridae_sciurus" starts with "mammalia_rodentia_sciuridae"
+        if normalized.startswith(exclude_norm + '_'):
+            return True
+
+        # Exclude starts with detection (broader exclusion)
+        # e.g., excluding "mammalia_rodentia" should exclude "mammalia_rodentia_sciuridae"
+        if exclude_norm.startswith(normalized + '_'):
+            return True
+
+        # Token match (was substring; substring matched too aggressively,
+        # e.g. excluding "bear" would also drop "bearded_dragon").
+        if exclude_norm in norm_tokens:
+            return True
+
+    # Also check common name match
+    common_name = get_common_name(species).lower()
+    if common_name in excludes:
+        return True
+
+    return False
 
 
 def _bbox_iou(a: Optional[List[float]], b: Optional[List[float]]) -> float:
@@ -224,6 +278,17 @@ class ProcessingSettings:
     person_shadow_window: int = 0
     person_shadow_min_fraction: float = 0.5
     
+    # Species the clip's camera excludes: its exclude_species plus
+    # general.exclusion_list, as configured. An excluded animal is still
+    # tracked and keeps its key frame, but it has no vote in the clip's
+    # species, so a squirrel on the feeder all clip long no longer names (and
+    # gets deleted) the clip a cardinal visited. The clip is named for an
+    # excluded animal only when the others do not add up to
+    # ``min_detection_frames`` sampled frames, the live path's bar for a real
+    # animal, and that name is what makes the live path delete it.
+    exclude_species: List[str] = field(default_factory=list)
+    min_detection_frames: int = 2
+
     # Output settings
     max_thumbnails: int = MAX_KEY_FRAMES_PER_SPECIES
     thumbnail_cropped: bool = True  # Crop to detection area (True) or full frame with bbox (False)
@@ -252,6 +317,8 @@ class ProcessingSettings:
             "person_shadow_iou": self.person_shadow_iou,
             "person_shadow_window": self.person_shadow_window,
             "person_shadow_min_fraction": self.person_shadow_min_fraction,
+            "exclude_species": list(self.exclude_species),
+            "min_detection_frames": self.min_detection_frames,
             "max_thumbnails": self.max_thumbnails,
             "thumbnail_cropped": self.thumbnail_cropped,
             "save_processing_log": self.save_processing_log,
@@ -281,13 +348,35 @@ class ProcessingSettings:
             person_shadow_iou=data.get("person_shadow_iou", 0.6),
             person_shadow_window=data.get("person_shadow_window", 0),
             person_shadow_min_fraction=data.get("person_shadow_min_fraction", 0.5),
+            exclude_species=list(data.get("exclude_species") or []),
+            min_detection_frames=data.get("min_detection_frames", 2),
             max_thumbnails=data.get("max_thumbnails", MAX_KEY_FRAMES_PER_SPECIES),
             thumbnail_cropped=data.get("thumbnail_cropped", True),
             save_processing_log=data.get("save_processing_log", True),
         )
 
 
-def build_processing_settings(clip_cfg, overrides: Optional[Dict] = None) -> ProcessingSettings:
+def excluded_species_for(runtime, camera_id: Optional[str]) -> List[str]:
+    """What a camera excludes: its exclude_species plus general.exclusion_list.
+
+    For the callers that have a clip's camera id rather than its worker (a
+    reanalysis, the recovery sweep, the CLI). A camera the configuration no
+    longer has gets the global list alone; no configuration, nothing.
+    """
+    if runtime is None:
+        return []
+    names = list(getattr(runtime.general, 'exclusion_list', None) or [])
+    for camera in getattr(runtime, 'cameras', None) or []:
+        if getattr(camera, 'id', None) == camera_id:
+            return list(getattr(camera, 'exclude_species', None) or []) + names
+    return names
+
+
+def build_processing_settings(
+    clip_cfg,
+    overrides: Optional[Dict] = None,
+    exclude_species: Optional[List[str]] = None,
+) -> ProcessingSettings:
     """The post-processor settings the configuration asks for.
 
     One mapping for every caller — a live event, a reanalysis from the clip
@@ -295,6 +384,9 @@ def build_processing_settings(clip_cfg, overrides: Optional[Dict] = None) -> Pro
     as it would have at the time. ``clip_cfg`` is ``general.clip`` (any object
     with those attributes, or None for the defaults); ``overrides`` are
     ``ProcessingSettings`` field names, as the reanalysis dialog sends them.
+    ``exclude_species`` is what the clip's camera excludes (see
+    ``excluded_species_for``), which decides the name of a clip with an
+    excluded animal in it.
     """
     def get(name, default):
         return getattr(clip_cfg, name, default) if clip_cfg is not None else default
@@ -316,6 +408,8 @@ def build_processing_settings(clip_cfg, overrides: Optional[Dict] = None) -> Pro
         'hierarchical_merge_gap': merge_gap,
         'single_animal_mode': get('single_animal_mode', False),
         'thumbnail_cropped': get('thumbnail_cropped', True),
+        'min_detection_frames': max(1, int(get('min_detection_frames', 2) or 1)),
+        'exclude_species': list(exclude_species or []),
     }
     for key, value in (overrides or {}).items():
         values[key] = value
@@ -336,6 +430,12 @@ def _check_processing_values(values: Dict) -> None:
         value = values.get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
             raise ValueError(f"{name} must be a number between 0 and 1, not {value!r}")
+    frames = values.get('min_detection_frames')
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames < 1:
+        raise ValueError(f"min_detection_frames must be a whole number, 1 or more, not {frames!r}")
+    names = values.get('exclude_species')
+    if not isinstance(names, (list, tuple)) or not all(isinstance(n, str) for n in names):
+        raise ValueError(f"exclude_species must be a list of species names, not {names!r}")
 
 
 @dataclass
@@ -594,8 +694,11 @@ class ClipPostProcessor:
         # under the old name.
         carried_ptz_decisions = self._read_ptz_decisions(clip_path)
 
-        # Determine best species classification
-        new_species, confidence = self._select_best_species(species_results)
+        # Determine best species classification. Species set aside because
+        # the camera excludes them have no vote (see _weigh_exclusions).
+        set_aside = set(video_metadata.get("species_set_aside") or ())
+        new_species, confidence = self._select_best_species(
+            {name: result for name, result in species_results.items() if name not in set_aside})
         
         if not new_species:
             new_species = original_species
@@ -1004,8 +1107,11 @@ class ClipPostProcessor:
             if tracked_results:
                 LOGGER.info("Tracking consolidated %d detections into %d tracked objects",
                            raw_detection_count, len(tracked_results))
-                video_metadata["detection_frames"] = self._evidence_frames(
-                    processing_log, non_animal_boxes, shadow_track_boxes)
+                video_metadata["detection_frames"], set_aside = self._weigh_exclusions(
+                    tracked_results, processing_log, non_animal_boxes, shadow_track_boxes,
+                    frames_inferred, tracker=tracker)
+                if set_aside:
+                    video_metadata["species_set_aside"] = set_aside
                 return tracked_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, tracker
             # Every track resolved to a non-animal. The tracker has explained
             # each detection, so the per-frame votes below must not resurrect
@@ -1020,8 +1126,10 @@ class ClipPostProcessor:
                                 "person_shadow_tracks": shadow_tracks}
 
         # Fallback to non-tracked results
-        video_metadata["detection_frames"] = self._evidence_frames(
-            processing_log, non_animal_boxes, shadow_track_boxes)
+        video_metadata["detection_frames"], set_aside = self._weigh_exclusions(
+            species_results, processing_log, non_animal_boxes, shadow_track_boxes, frames_inferred)
+        if set_aside:
+            video_metadata["species_set_aside"] = set_aside
         return species_results, raw_detection_count, filtered_count, processing_log, tracking_summary, video_metadata, None
     
     def _merge_tracks(self, tracker: ObjectTracker) -> List[ProcessingLogEntry]:
@@ -1394,6 +1502,7 @@ class ClipPostProcessor:
         processing_log: List[ProcessingLogEntry],
         non_animal_boxes: NonAnimalBoxes,
         shadow_track_boxes: set,
+        counts: Optional[Callable[[ProcessingLogEntry], bool]] = None,
     ) -> int:
         """Sampled frames with an accepted detection that may be an animal.
 
@@ -1406,6 +1515,10 @@ class ClipPostProcessor:
         squirrel. A track's first detection is counted like the rest, although
         ByteTrack only reports a track from its second match, so a visit of
         exactly the minimum length still passes.
+
+        ``counts``, when given, is asked about every detection that passes
+        those tests (``_weigh_exclusions`` counts the animals that are not
+        excluded).
         """
         frames = set()
         for entry in processing_log:
@@ -1415,8 +1528,106 @@ class ClipPostProcessor:
                 continue
             if self._is_person_shadow(entry.bbox, entry.frame_idx, non_animal_boxes):
                 continue
+            if counts is not None and not counts(entry):
+                continue
             frames.add(entry.frame_idx)
         return len(frames)
+
+    def _weigh_exclusions(
+        self,
+        species_results: Dict[str, SpeciesResult],
+        processing_log: List[ProcessingLogEntry],
+        non_animal_boxes: NonAnimalBoxes,
+        shadow_track_boxes: set,
+        frames_inferred: int,
+        tracker: Optional[ObjectTracker] = None,
+    ) -> Tuple[int, List[str]]:
+        """The clip's evidence frames, and the species with no vote in its name.
+
+        An animal the camera excludes (``settings.exclude_species``) has no
+        vote in the clip's species. It used to take part like any other: a
+        squirrel at the feeder for forty frames outvoted the cardinal that
+        visited for twelve, named the clip, and the live path deleted it as
+        excluded, cardinal and all. The generic labels on the excluded
+        animal's own branch of the taxonomy ("animal", "mammal", "rodent"
+        beside a squirrel) are set aside with it: the vote reads them as that
+        animal, and left in they would name the squirrel's clip "Animal" and
+        alert.
+
+        The animals that are left name the clip when they add up to
+        ``min_detection_frames`` sampled frames (the live path's bar for a
+        real animal, or every frame of a clip shorter than that); those frames
+        are then the evidence reported. Otherwise the clip is named for the
+        excluded animals, as before, which is what makes the live path delete
+        it: one stray "bird" frame in a squirrel's clip is not a bird. A
+        detection counts for the species of the track it ended up in, and one
+        outside every track for its own label.
+
+        Returns ``(detection_frames, set_aside)``. With no excluded animal in
+        the clip that is ``_evidence_frames`` and nothing, exactly as before.
+        """
+        excludes = {normalize_species_label(s) for s in self.settings.exclude_species}
+        excluded = [s for s in species_results if excludes and species_matches_exclude(s, excludes)]
+        if not excluded:
+            return self._evidence_frames(processing_log, non_animal_boxes, shadow_track_boxes), []
+
+        excluded_branches = [species_lineage(s) for s in excluded]
+
+        def generic_of_excluded(label: str) -> bool:
+            lineage = species_lineage(label)
+            return any(branch[:len(lineage)] == lineage for branch in excluded_branches)
+
+        def votes(label: str) -> bool:
+            return not species_matches_exclude(label, excludes) and not generic_of_excluded(label)
+
+        track_species: Dict[Tuple, str] = {}
+        if tracker is not None:
+            for info in tracker.tracks.values():
+                species = info.get_best_species()[0]
+                for c in info.classifications:
+                    if c.bbox:
+                        track_species[(c.frame_idx, tuple(c.bbox))] = species
+
+        def counts(entry: ProcessingLogEntry) -> bool:
+            return votes(track_species.get((entry.frame_idx, tuple(entry.bbox or ())), entry.species))
+
+        kept = [s for s in species_results if votes(s)]
+        kept_frames = self._evidence_frames(
+            processing_log, non_animal_boxes, shadow_track_boxes, counts=counts)
+        needed = min(max(1, int(self.settings.min_detection_frames or 1)), max(1, frames_inferred))
+        generic = "a generic label on an excluded animal's branch, counted as that animal"
+
+        if kept and kept_frames >= needed:
+            set_aside = [s for s in species_results if s not in kept]
+            detection_frames = kept_frames
+            reasons = {s: "excluded on this camera, so no vote in the clip's species"
+                          if s in excluded else generic for s in set_aside}
+            LOGGER.info(
+                "Leaving %s out of the species vote (the camera excludes %s); "
+                "%d sampled frame(s) of other animals remain",
+                ", ".join(set_aside), ", ".join(excluded), kept_frames,
+            )
+        else:
+            set_aside = [s for s in species_results if s not in excluded]
+            detection_frames = self._evidence_frames(processing_log, non_animal_boxes, shadow_track_boxes)
+            reasons = {s: "excluded on this camera, with nothing else in the clip to name it for"
+                       for s in excluded}
+            for s in set_aside:
+                reasons[s] = generic if generic_of_excluded(s) else (
+                    f"{kept_frames} sampled frame(s) of animals that are not excluded, "
+                    f"{needed} needed to name the clip beside the excluded ones")
+            LOGGER.info(
+                "Every animal in the clip is excluded on this camera (%s): the rest "
+                "adds up to %d sampled frame(s), %d needed",
+                ", ".join(excluded), kept_frames, needed,
+            )
+
+        for species, reason in reasons.items():
+            processing_log.append(ProcessingLogEntry(
+                frame_idx=-1, event="species_excluded", species=species,
+                confidence=species_results[species].confidence, reason=reason,
+            ))
+        return detection_frames, set_aside
 
     def _drop_person_shadow_species(
         self,
@@ -2253,6 +2464,7 @@ def process_all_clips(
     regenerate_thumbnails: bool = True,
     sample_rate: Optional[int] = None,
     settings: Optional[ProcessingSettings] = None,
+    exclusions_for: Optional[Callable[[Optional[str]], List[str]]] = None,
 ) -> List[PostProcessResult]:
     """Process all clips in storage to improve classifications.
     
@@ -2265,6 +2477,8 @@ def process_all_clips(
         sample_rate: Analyze every Nth frame; overrides ``settings`` when given
         settings: The post-processor settings, as ``build_processing_settings``
             makes them from the configuration; the defaults when None
+        exclusions_for: What a camera id excludes (``excluded_species_for``),
+            so each clip is named with its own camera's exclusions
         
     Returns:
         List of PostProcessResult for each clip processed
@@ -2274,27 +2488,35 @@ def process_all_clips(
         LOGGER.warning("Clips directory not found: %s", clips_dir)
         return []
     
-    processor = ClipPostProcessor(
-        detector=detector,
-        storage_root=storage_root,
-        settings=settings,
-        sample_rate=sample_rate,
-    )
-    
+    processors: Dict[Optional[str], ClipPostProcessor] = {}
+
+    def processor_for(camera_id: Optional[str]) -> ClipPostProcessor:
+        if camera_id not in processors:
+            camera_settings = settings
+            if settings is not None and exclusions_for is not None:
+                camera_settings = dataclasses.replace(
+                    settings, exclude_species=list(exclusions_for(camera_id)))
+            processors[camera_id] = ClipPostProcessor(
+                detector=detector,
+                storage_root=storage_root,
+                settings=camera_settings,
+                sample_rate=sample_rate,
+            )
+        return processors[camera_id]
+
     results = []
     clips_processed = 0
 
     # Find all clip files
     for clip_path in clips_dir.rglob('*.mp4'):
+        # Camera ID is first directory under clips/
+        rel_path = clip_path.relative_to(clips_dir)
+        camera_id = rel_path.parts[0] if rel_path.parts else None
         # Skip if camera filter is set and this camera isn't included
-        if camera_filter:
-            # Camera ID is first directory under clips/
-            rel_path = clip_path.relative_to(clips_dir)
-            camera_id = rel_path.parts[0] if rel_path.parts else None
-            if camera_id and camera_id not in camera_filter:
-                continue
+        if camera_filter and camera_id and camera_id not in camera_filter:
+            continue
 
-        result = processor.process_clip(
+        result = processor_for(camera_id).process_clip(
             clip_path,
             update_filename=update_filenames,
             regenerate_thumbnails=regenerate_thumbnails,

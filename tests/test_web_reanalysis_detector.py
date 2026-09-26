@@ -138,6 +138,23 @@ def test_a_retired_camera_s_clip_borrows_any_worker_s_detector(tmp_path, seen):
     assert seen["detectors"] == ["cam9-cached-speciesnet"]
 
 
+def test_it_names_the_clip_with_its_own_camera_s_exclusions(tmp_path, seen):
+    # An excluded animal has no vote in the clip's species, so a reanalysis
+    # must know what the clip's camera excludes, or it renames a clip the
+    # live event named for a cardinal back to the squirrel beside it.
+    server, registry, clip = make_server(tmp_path, {"cam1": FakeWorker("cam1")})
+    server.runtime.general.exclusion_list = ["mammalia carnivora felidae"]
+    server.runtime.cameras = [
+        SimpleNamespace(id="cam2", exclude_species=["mammalia cetartiodactyla cervidae"]),
+        SimpleNamespace(id="cam1", exclude_species=["mammalia rodentia sciuridae"]),
+    ]
+
+    resp, payload, _ = reanalyse(server, {"path": REL})
+
+    assert resp.status == 200
+    assert seen["settings"].exclude_species == ["mammalia rodentia sciuridae", "mammalia carnivora felidae"]
+
+
 def test_a_server_with_no_pipeline_builds_one_from_the_configuration(tmp_path, seen, monkeypatch):
     built: list = []
 

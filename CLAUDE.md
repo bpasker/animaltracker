@@ -75,6 +75,16 @@ The system uses a two-stage detection approach:
   only once that count stays at zero. It never skips while an event is
   open and lets a frame through every `HEARTBEAT_S`; skipped frames do not
   tick the tracker, so a still animal's track does not age out.
+  While an event is open the live detector runs at
+  `thresholds.sustain_confidence` (default 0.2) instead of `confidence`,
+  when it has one threshold (`BaseDetector.single_threshold`: MegaDetector
+  and YOLO, not SpeciesNet). The boxes in between are split off before
+  anything else sees them and only keep the event open
+  (`_sustaining_detections`, `EventState.sustain`), and only within one body
+  length of a full-strength box from the last `SUSTAIN_ANCHOR_S`. They never
+  start an event, never tick the tracker or PTZ, and never add species or key
+  frames. Without this a sitting IR rabbit (0.2-0.45, with an occasional 0.5)
+  split into a clip every minute.
 - `detector.py` - Detection backends: MegaDetector, YOLO, SpeciesNet
   Every forward pass runs under `self.model_lock`, which is the instance's
   own lock plus the process-wide `MODEL_LOAD_GATE` held shared; every model

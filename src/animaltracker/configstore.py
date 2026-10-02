@@ -147,6 +147,7 @@ CAMERA_FIELDS: Dict[str, bool] = {
     "onvif": False,           # the whole block; None removes it
     "thresholds.confidence": True,
     "thresholds.generic_confidence": True,
+    "thresholds.sustain_confidence": True,
     "thresholds.min_frames": True,
     "thresholds.min_duration": True,
     "thresholds.min_detection_area": True,

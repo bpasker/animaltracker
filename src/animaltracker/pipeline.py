@@ -144,6 +144,12 @@ def build_gstreamer_pipeline_nvdec(rtsp_uri: str, transport: str = "tcp", latenc
 # Maximum number of key frames to keep per species
 MAX_KEY_FRAMES_PER_SPECIES = 3
 
+# How long a full-strength box stays a place where a weaker box can sustain
+# the open event (``thresholds.sustain_confidence``). Weak boxes never renew
+# it, so an event that sees nothing at full strength for this long plus
+# ``post_seconds`` closes whatever the weak boxes say.
+SUSTAIN_ANCHOR_S = 60.0
+
 
 def pick_notification_thumbnail(saved: List[Path], clip_path: Path, species: str) -> Optional[Path]:
     """Choose the photo attached to the event alert.
@@ -304,11 +310,23 @@ class EventState:
     # the event keeps extending it after it sits down or walks away and its
     # box shrinks below ``min_detection_area``.
     last_accepted_bboxes: List[List[float]] = field(default_factory=list)
+    # (ts, pixel box) of every detection accepted in the last
+    # ``SUSTAIN_ANCHOR_S``: where a box under ``thresholds.confidence`` may
+    # sustain the event (``StreamWorker._sustaining_detections``). Every
+    # recent box, not just the last frame's, because two rabbits a yard
+    # apart take turns at reaching the threshold.
+    subject_boxes: List[tuple] = field(default_factory=list)
+    # Detection frames on which only a weaker box kept the event open.
+    sustained_frames: int = 0
 
     def update(self, detections: List[Detection], frame_ts: float, frame: np.ndarray, frame_idx: Optional[int] = None) -> None:
         self.last_detection_ts = frame_ts
         if detections:
             self.last_accepted_bboxes = [list(det.bbox) for det in detections]
+            self.subject_boxes.extend((frame_ts, list(det.bbox)) for det in detections)
+        self.subject_boxes = [
+            (t, b) for t, b in self.subject_boxes if frame_ts - t <= SUSTAIN_ANCHOR_S
+        ]
 
         # NOTE: The ObjectTracker is now driven by StreamWorker._process_frame
         # BEFORE the PTZ tracker call, so detections already carry track_ids
@@ -388,6 +406,18 @@ class EventState:
                 key_frames[species] = key_frames[species][:MAX_KEY_FRAMES_PER_SPECIES]
             return key_frames
         return self.species_key_frames
+
+    def recent_subject_bboxes(self, now: float) -> List[List[float]]:
+        return [b for t, b in self.subject_boxes if now - t <= SUSTAIN_ANCHOR_S]
+
+    def sustain(self, frame_ts: float) -> None:
+        """The animal is still there, seen only by a box under the threshold.
+
+        Holds the event open and nothing else: no species, key frame,
+        confidence or subject box comes from a weak box.
+        """
+        self.last_detection_ts = frame_ts
+        self.sustained_frames += 1
 
     @property
     def species_label(self) -> str:
@@ -1487,6 +1517,8 @@ class StreamWorker:
         # space. The original `frame` is left untouched so trackers, the
         # clip buffer, the PTZ tracker, and the live snapshot all continue
         # to operate at the camera's native resolution.
+        entry_conf = self.camera.thresholds.confidence
+        infer_conf = self._live_inference_confidence()
         max_w = int(getattr(self.camera, "inference_max_width", 0) or 0)
         h_orig, w_orig = frame.shape[:2]
         if max_w > 0 and w_orig > max_w:
@@ -1503,7 +1535,7 @@ class StreamWorker:
                 None,
                 lambda: self.detector.infer(
                     small,
-                    conf_threshold=self.camera.thresholds.confidence,
+                    conf_threshold=infer_conf,
                     generic_confidence=self.camera.thresholds.generic_confidence,
                 ),
             )
@@ -1518,7 +1550,7 @@ class StreamWorker:
                 None,
                 lambda: self.detector.infer(
                     frame,
-                    conf_threshold=self.camera.thresholds.confidence,
+                    conf_threshold=infer_conf,
                     generic_confidence=self.camera.thresholds.generic_confidence,
                 ),
             )
@@ -1537,6 +1569,16 @@ class StreamWorker:
         self.perf_frame_age_total += frame_age
         if frame_age > self.perf_frame_age_max:
             self.perf_frame_age_max = frame_age
+
+        # Boxes under the camera's threshold only came back because an event
+        # is open (``_live_inference_confidence``). They may keep it open and
+        # do nothing else; everything below sees the full-strength list.
+        weak = (
+            [d for d in detections if d.confidence < entry_conf]
+            if infer_conf < entry_conf else []
+        )
+        if weak:
+            detections = [d for d in detections if d.confidence >= entry_conf]
 
         # Log raw detections from MegaDetector (before species filtering).
         # The first frame with detections after a quiet gap is INFO so the
@@ -1745,6 +1787,16 @@ class StreamWorker:
             self.ptz_tracker.trim_old_decisions(cutoff)
 
         if not filtered:
+            if weak and self.event_state is not None:
+                sustaining = self._sustaining_detections(weak, frame_w, frame_h, ts)
+                if sustaining:
+                    LOGGER.debug(
+                        "[SUSTAIN] %s: %s under %.2f keeps the event open",
+                        self.camera.id,
+                        ', '.join(f"{d.species}:{d.confidence:.0%}" for d in sustaining[:3]),
+                        entry_conf,
+                    )
+                    self.event_state.sustain(ts)
             # Allow small gaps without resetting the pending counter.
             # Real animals may be briefly undetected (occlusion, motion blur)
             # but leaves tend to flicker on/off every other frame.
@@ -1826,6 +1878,47 @@ class StreamWorker:
     def _excluded_species(self) -> List[str]:
         """What this camera excludes, as configured: its own list and the global one."""
         return list(self.camera.exclude_species or []) + list(self.runtime.general.exclusion_list or [])
+
+    def _live_inference_confidence(self) -> float:
+        """The threshold the live detector runs at for this frame.
+
+        The camera's ``confidence``, lowered to ``sustain_confidence`` while
+        an event is open and the detector applies one threshold to every box
+        (``BaseDetector.single_threshold``), so the boxes in between can be
+        told apart afterwards by score alone.
+        """
+        thresholds = self.camera.thresholds
+        entry = thresholds.confidence
+        if self.event_state is None or not getattr(self.detector, "single_threshold", False):
+            return entry
+        sustain = getattr(thresholds, "sustain_confidence", entry)
+        return min(entry, sustain)
+
+    def _sustaining_detections(
+        self, weak: List[Detection], frame_width: int, frame_height: int, ts: float
+    ) -> List[Detection]:
+        """The boxes under ``confidence`` that show the event's animal is still there.
+
+        A box qualifies when it passes the species lists and the size and
+        shape filters, as any detection must, and its centre lies within one
+        body length of a box the event accepted at full strength in the last
+        ``SUSTAIN_ANCHOR_S`` (``_continues_event_subject``). A sitting rabbit
+        under IR scores 0.2-0.45 on most frames and 0.5 on a few: with the
+        0.5 bar alone a gap over ``post_seconds`` closed the event every
+        minute or so and the animal came out as a dozen clips (jessDahuaBack,
+        2026-10-01 22:30-22:50). A weak box elsewhere in the frame is
+        ignored, so noise cannot hold an event open, and since weak boxes
+        never become anchors they cannot walk the event across the yard.
+        """
+        if self.event_state is None or not weak:
+            return []
+        anchors = self.event_state.recent_subject_bboxes(ts)
+        if not anchors:
+            return []
+        kept = self._filter_false_positives(
+            self._filter_detections(weak), frame_width, frame_height
+        )
+        return [d for d in kept if self._continues_event_subject(d.bbox, anchors)]
 
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
         includes = set(self._normalize_species(s) for s in self.camera.include_species)
@@ -2021,7 +2114,13 @@ class StreamWorker:
         idle = ts - self.event_state.last_detection_ts
         if not force and idle < self.runtime.general.clip.post_seconds:
             return
-        
+        if self.event_state.sustained_frames:
+            LOGGER.info(
+                "[SUSTAIN] %s: %d frame(s) under confidence %.2f kept this %.0f s event open",
+                self.camera.id, self.event_state.sustained_frames,
+                self.camera.thresholds.confidence, ts - self.event_state.start_ts,
+            )
+
         # Offload clip writing, post-analysis, and notification to thread
         loop = asyncio.get_running_loop()
         # "Post-analysis" is the master switch; "analyse the saved file" is the

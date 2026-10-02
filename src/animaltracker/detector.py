@@ -284,6 +284,13 @@ class BaseDetector(ABC):
     # Guards the lazy creation of each instance's model lock.
     _lock_guard = threading.Lock()
 
+    # True when ``infer`` keeps a box on ``conf_threshold`` alone, so the
+    # boxes a lower threshold returns are exactly those scoring between the
+    # two. The live path relies on it to sustain an open event on weaker
+    # boxes (``thresholds.sustain_confidence``); SpeciesNet holds generic
+    # labels to a second bar, so it leaves this False.
+    single_threshold = False
+
     @property
     def model_lock(self) -> "_ForwardGuard":
         """What every forward pass of this instance runs under.
@@ -362,6 +369,8 @@ class YoloDetector(BaseDetector):
     umbrellas, kites, etc.) being detected in outdoor wildlife scenes.
     """
     
+    single_threshold = True  # see BaseDetector
+
     # COCO class IDs that are animals (or ambiguous enough to keep)
     # Full COCO has 80 classes; these are the animal-relevant ones:
     ANIMAL_CLASS_IDS = {
@@ -477,6 +486,8 @@ class MegaDetectorBackend(BaseDetector):
     Performance: ~100-150ms per frame (vs ~300-500ms for full SpeciesNet)
     """
     
+    single_threshold = True  # see BaseDetector
+
     # MegaDetector category mapping
     CATEGORY_MAP = {
         1: "animal",

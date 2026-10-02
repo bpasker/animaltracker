@@ -248,6 +248,7 @@ class RTSPSettings(BaseModel):
 class ThresholdSettings(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
     generic_confidence: float = Field(default=0.9, ge=0, le=1, description="Higher threshold for generic categories like 'animal', 'bird'")
+    sustain_confidence: float = Field(default=0.2, ge=0, le=1, description="Lower bar that keeps an open event going: a box scoring between this and `confidence`, within one body length of where the event's animal was seen in the last minute, counts as the animal still being there. It never opens an event and is never tracked, aimed at or classified. A sitting rabbit under IR scores 0.2-0.45 between its 0.5 frames and used to split into a clip every 10 s. Equal to `confidence` or above turns it off. Ignored by the SpeciesNet live backend, whose generic labels have a bar of their own.")
     min_frames: int = Field(default=3, ge=1)
     min_duration: float = Field(default=2.0, ge=0)
     min_detection_area: float = Field(default=0.005, ge=0.0, le=0.5, description="Ignore detections smaller than this fraction of frame area (0.005 = 0.5%%, filters leaves/noise)")

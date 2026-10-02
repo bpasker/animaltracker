@@ -118,6 +118,10 @@ GENERAL_FIELDS: Dict[str, bool] = {
     "clip.spatial_merge_reach": True,
     "clip.hierarchical_merge_enabled": True,
     "clip.single_animal_mode": True,
+    "clip.review_enabled": True,             # review.py reads these per clip
+    "clip.review_model": True,
+    "clip.review_url": True,
+    "clip.review_timeout_seconds": True,
     "retention.min_days": True,
     "retention.max_days": True,
     "retention.max_utilization_pct": False,

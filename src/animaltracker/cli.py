@@ -428,6 +428,79 @@ def cmd_zoom_calibrate(args: argparse.Namespace) -> int:
     LOGGER.info("  ZoomFOVCalibration.from_dict(json.load(open('%s')))", output_path)
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    """Second opinions from the local vision model on clips already saved.
+
+    Uses ``clip.review_model`` / ``review_url`` whether or not
+    ``review_enabled`` is on: running the command is the request. Clips that
+    already carry a verdict are skipped unless ``--force``. ``--summary``
+    asks nothing and tallies the verdicts already stored. Beside the running
+    service the model shares the GPU with the live detector, like the
+    service's own reviews, one clip at a time.
+    """
+    import time as _time
+    from .review import ReviewConfig, read_sidecar, review_clip, write_review
+
+    runtime = load_runtime_config(args.config)
+    clips_dir = Path(runtime.general.storage_root) / "clips"
+    if args.clip:
+        candidate = Path(args.clip)
+        clips = [candidate if candidate.is_absolute() else clips_dir / candidate]
+    else:
+        cutoff = _time.time() - args.days * 86400
+        cameras = args.camera or sorted(p.name for p in clips_dir.iterdir() if p.is_dir())
+        clips = []
+        for cam in cameras:
+            for p in (clips_dir / cam).rglob("*.mp4"):
+                if p.name.endswith(".tmp.mp4") or not p.with_suffix(".log.json").exists():
+                    continue
+                try:
+                    if p.stat().st_mtime >= cutoff:
+                        clips.append(p)
+                except OSError:
+                    continue
+        clips.sort(key=lambda p: p.name, reverse=True)
+
+    if args.summary:
+        tally: dict = {}
+        for p in clips:
+            rev = read_sidecar(p).get("review")
+            cam = p.relative_to(clips_dir).parts[0] if p.is_relative_to(clips_dir) else "?"
+            row = tally.setdefault(cam, {"clips": 0, "real": 0, "not_animal": 0, "error": 0, "unreviewed": 0})
+            row["clips"] += 1
+            if not rev:
+                row["unreviewed"] += 1
+            elif rev.get("error"):
+                row["error"] += 1
+            elif rev.get("real_animal"):
+                row["real"] += 1
+            else:
+                row["not_animal"] += 1
+                print(f"NOT AN ANIMAL  {p.relative_to(clips_dir)}  ({rev.get('description', '')})")
+        for cam, row in sorted(tally.items()):
+            print(f"{cam}: {row}")
+        return 0
+
+    cfg = ReviewConfig.from_clip_settings(runtime.general.clip)
+    if args.limit:
+        clips = [p for p in clips if args.force or not read_sidecar(p).get("review")][: args.limit]
+    done = 0
+    for p in clips:
+        if not args.force and read_sidecar(p).get("review"):
+            continue
+        record = review_clip(p, cfg)
+        write_review(p, record)
+        done += 1
+        rel = p.relative_to(clips_dir) if p.is_relative_to(clips_dir) else p
+        if record.get("error"):
+            print(f"ERROR          {rel}: {record['error']}")
+        else:
+            verdict = "real animal  " if record["real_animal"] else "NOT AN ANIMAL"
+            print(f"{verdict}  {rel}  {record.get('seconds')}s  {record.get('animal')}: {record.get('description')}")
+    print(f"Reviewed {done} clip(s) with {cfg.model}")
+    return 0
+
+
 def cmd_reprocess(args: argparse.Namespace) -> int:
     """Reprocess clips to improve species classifications.
 
@@ -621,6 +694,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Don't regenerate detection thumbnails",
     )
     reprocess_cmd.set_defaults(func=cmd_reprocess)
+
+    review_cmd = sub.add_parser("review", help="Ask the local vision model whether saved clips hold a real animal")
+    review_cmd.add_argument("--camera", action="append", help="Only this camera (repeatable); default=all")
+    review_cmd.add_argument("--clip", help="One clip (path relative to clips/ or absolute)")
+    review_cmd.add_argument("--days", type=float, default=1.0, help="Clips saved in the last N days (default 1)")
+    review_cmd.add_argument("--limit", type=int, default=0, help="Review at most N clips (newest first); 0 = all")
+    review_cmd.add_argument("--force", action="store_true", help="Review clips that already have a verdict again")
+    review_cmd.add_argument("--summary", action="store_true", help="Tally the stored verdicts instead of reviewing")
+    review_cmd.set_defaults(func=cmd_review)
 
     zoom_cal_cmd = sub.add_parser(
         "zoom-calibrate",

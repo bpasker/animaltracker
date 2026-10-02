@@ -50,6 +50,12 @@ class ClipSettings(BaseModel):
     unified_post_processing: bool = Field(default=True, description="Use unified post-processor for consistent results (recommended)")
     recover_unfinished_clips: bool = Field(default=True, description="Shortly after startup and every 30 minutes, finish analysing clips whose post-processing was interrupted (a restart mid-job leaves a clip unclassified with no key frames); runs newest first while no live event needs the post-processor")
     post_analysis_frames: int = Field(default=0, ge=0, description="Number of frames for post-analysis (0=auto-calculate)")
+    # Second opinion from a local vision model (review.py). Observes only:
+    # the verdict goes into the sidecar and the log, nothing acts on it.
+    review_enabled: bool = Field(default=False, description="After an alerted clip is analysed, ask a local vision model (Ollama) whether the boxed object is really an animal; the verdict is stored in the clip's sidecar and changes nothing else")
+    review_model: str = Field(default="qwen3.5:4b", min_length=1, max_length=200, description="Ollama model that reviews clips")
+    review_url: str = Field(default="http://127.0.0.1:11434", pattern=r"^https?://[^\s/]+(:\d+)?/?$", description="Ollama server the reviewer talks to")
+    review_timeout_seconds: float = Field(default=120.0, ge=10, le=600, description="Give up on one clip's review after this long")
 
 
 class DetectorSettings(BaseModel):

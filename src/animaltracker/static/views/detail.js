@@ -1181,6 +1181,18 @@ function buildMetadata() {
     h('span.overline.overline--strong', { text: 'Capture' }), dl);
 }
 
+/* The local vision model's verdict (review.py), stored in the sidecar as
+   `review`. It only observes, so this is information, not a warning. */
+function reviewText(review) {
+  if (!review || typeof review !== 'object') return '';
+  if (review.error) return 'No verdict (' + review.error + ')';
+  if (typeof review.real_animal !== 'boolean') return '';
+  var head = review.real_animal
+    ? 'Real animal' + (review.animal && review.animal !== 'none' ? ' (' + review.animal + ')' : '')
+    : 'Not an animal';
+  return review.description ? head + ': ' + review.description : head;
+}
+
 function paintMetadata() {
   var clip = S.clip;
   var dl = S.els.meta;
@@ -1203,6 +1215,8 @@ function paintMetadata() {
     ['Tracks', String(S.tracks.length)],
     ['Path', clip.path]
   ];
+  var opinion = reviewText(S.log && S.log.review);
+  if (opinion) rows.splice(rows.length - 1, 0, ['Second opinion', opinion]);
 
   keyedList(dl, rows, {
     key: function (r) { return r[0]; },

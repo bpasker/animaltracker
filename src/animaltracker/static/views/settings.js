@@ -200,6 +200,20 @@ var GENERAL_SECTIONS = [
         { key: 'clip.min_reptile_detection_frames', kind: 'number', min: 1, max: 100, step: 1, int: true, advanced: true,
           label: 'Minimum frames for reptiles', hint: 'Stricter floor for class-only reptile and amphibian labels, which pipes and hoses trigger.' }
       ] },
+      { id: 'review', legend: 'Second opinion',
+        hint: 'A local vision model looks at each alerted clip and says whether the boxed object is really an animal. It only observes: the verdict is shown on the clip page and changes nothing else.',
+        fields: [
+        { key: 'clip.review_enabled', kind: 'switch',
+          label: 'Review alerted clips',
+          hint: 'Runs after the alert is sent, about 10 s a clip, one clip at a time. While it runs the live detector is slower.' },
+        { key: 'clip.review_model', kind: 'text', mono: true, required: true,
+          label: 'Model', placeholder: 'qwen3.5:4b',
+          hint: 'An Ollama vision model already pulled on this machine.' },
+        { key: 'clip.review_url', kind: 'text', mono: true, required: true, advanced: true,
+          label: 'Ollama server', placeholder: 'http://127.0.0.1:11434' },
+        { key: 'clip.review_timeout_seconds', kind: 'number', min: 10, max: 600, step: 10, int: true, advanced: true,
+          label: 'Timeout (seconds)', hint: 'Give up on one clip after this long; the clip is kept either way.' }
+      ] },
       { id: 'merging', legend: 'Track merging', hint: 'How the post-processor joins detections into one animal.', fields: [
         { key: 'clip.tracking_enabled', kind: 'switch',
           label: 'Object tracking',

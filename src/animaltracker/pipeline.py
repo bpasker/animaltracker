@@ -27,6 +27,7 @@ from .tracker import ObjectTracker, create_tracker  # noqa: F401
 from .ptz_tracker import PTZTracker, create_ptz_tracker
 from .web import WebServer
 from .analysis_recovery import RECOVERED_CLIP_LABEL, ClipAnalysisRegistry, RecoverySweeper
+from .review import review_and_record, review_enabled
 
 LOGGER = logging.getLogger(__name__)
 
@@ -2381,6 +2382,9 @@ class StreamWorker:
                 self.notifier.send(ctx, priority=priority, sound=sound, destinations=destinations)
                 LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)",
                            ctx.camera_id, clip_path, final_species, tracks_count)
+                # The clip as it now stands, for the second opinion that
+                # ``analyse`` asks for once this slot is free.
+                return clip_path, final_species
 
         def finalize_event(writer, camera_id, start_ts, clip_format, ctx_base, priority, sound, destinations, species_key_frames, ptz_decisions, detector_config):
             """Save the event's clip now, then queue its analysis and alert.
@@ -2445,11 +2449,20 @@ class StreamWorker:
 
                 def analyse() -> None:
                     try:
-                        _finalize_event_body(
+                        alerted = _finalize_event_body(
                             frame_count, camera_id, start_ts, clip_format, ctx_base,
                             priority, sound, destinations, species_key_frames, ptz_decisions,
                             detector_config, clip_path,
                         )
+                        # A second opinion on the alerted clip (review.py).
+                        # After the post-processing slot is given back, so
+                        # it never delays another clip's analysis, but
+                        # before the claim is: the review rewrites the
+                        # sidecar, which a reanalysis or the recovery sweep
+                        # must not be writing at the same time.
+                        clip_cfg = self.runtime.general.clip
+                        if alerted and review_enabled(clip_cfg):
+                            review_and_record(alerted[0], clip_cfg, camera_id, alerted[1] or "")
                     finally:
                         release()
 

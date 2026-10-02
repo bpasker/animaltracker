@@ -27,6 +27,10 @@ python -m animaltracker.cli --config config/cameras.yml ptz-test --camera cam1 -
 # Reprocess clips with SpeciesNet
 python -m animaltracker.cli --config config/cameras.yml reprocess --camera cam1
 
+# Second opinions from the local vision model (backfill, then tally)
+python -m animaltracker.cli --config config/cameras.yml review --camera Otteson2 --days 7
+python -m animaltracker.cli --config config/cameras.yml review --days 7 --summary
+
 # Cleanup old clips (preview first)
 python -m animaltracker.cli --config config/cameras.yml cleanup --dry-run
 
@@ -163,6 +167,19 @@ The system uses a two-stage detection approach:
   because mid-analysis the outputs carry the new name and the video the old
   one. Any video in the group (even `.tmp.mp4`), a recording in `event_temp`
   for that event, or a file the pipeline does not write holds the group.
+- `review.py` - a second opinion from a local vision model (Ollama on the
+  prod box, `qwen3.5:4b`): four of the clip's accepted detections, boxed,
+  and one question, "is there really a live animal in the box?". It only
+  observes: the verdict goes into the sidecar as `review` and a `[REVIEW]`
+  log line, and the clip page shows it; nothing deletes, renames or holds
+  back an alert on it. `clip.review_enabled` (off by default) runs it on
+  every alerted clip after the post-processing slot is freed but before the
+  clip's analysis claim is released, since it rewrites the sidecar. It reads
+  the clip and sidecar from disk, never the post-processor's result, so the
+  `review` command (backfill, `--summary` to tally verdicts) shares the code.
+  It never creates a sidecar: one holding only a review would tell the
+  recovery sweep the analysis is done. Species names stay SpeciesNet's; the
+  model's are poor at night.
 - `species_names.py` - display names, and the one specificity scale:
   `species_lineage` / `species_rank` read a label's taxonomy depth (0 animal,
   1 class, 2 order, 3 family) and `pick_species_by_lineage` is the vote every

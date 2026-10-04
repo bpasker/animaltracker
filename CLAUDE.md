@@ -74,7 +74,8 @@ The system uses a two-stage detection approach:
   frames it would skip, and those that held a detection ("missed", logged
   as `[MOTION_GATE]`, shown on the Monitor card); switch a camera to `on`
   only once that count stays at zero. It never skips while an event is
-  open and lets a frame through every `HEARTBEAT_S`; skipped frames do not
+  open or the PTZ tracker the camera feeds is following something, and
+  lets a frame through every `HEARTBEAT_S`; skipped frames do not
   tick the tracker, so a still animal's track does not age out.
   While an event is open the live detector runs at
   `thresholds.sustain_confidence` (default 0.2) instead of `confidence`,

@@ -207,6 +207,16 @@ def test_on_skips_the_still_frames():
     assert w.perf_frames_skipped_motion == 5
 
 
+def test_on_checks_every_frame_while_the_ptz_tracker_follows_something():
+    # A skipped frame never reaches the PTZ update, whose lock-miss count
+    # and patrol only advance per call.
+    w, calls = worker("on")
+    w.ptz_drives_tracking = True
+    w.ptz_tracker = SimpleNamespace(is_track_enabled=lambda: True, get_mode=lambda: "tracking")
+    feed(w, [yard()] * 4)
+    assert len(calls) == 4
+
+
 def test_observing_counts_a_detection_on_a_frame_it_would_have_skipped(caplog):
     caplog.set_level(logging.INFO, logger="animaltracker.motion")
     w, calls = worker("observe", found=1)

@@ -1520,8 +1520,11 @@ class StreamWorker:
         # See motion.MotionGate. "observe" (the default) checks every frame
         # as before and only counts what the gate would have skipped, and
         # which of those held a detection that passed the filters; "on"
-        # skips them. Never skips while an event is open, and lets one frame
-        # through every few seconds whatever it measures.
+        # skips them. Never skips while an event is open or while the PTZ
+        # tracker this camera feeds is following something (its lock-miss
+        # count and patrol advance once per update, which a skipped frame
+        # never reaches), and lets one frame through every few seconds
+        # whatever it measures.
         gate_mode = getattr(self.camera.thresholds, 'motion_gate', 'off')
         gate = None
         gate_reading = None
@@ -1534,7 +1537,8 @@ class StreamWorker:
                 LOGGER.debug("Motion gate failed for %s: %s", self.camera.id, e)
                 gate_reading = None
             if gate_reading is not None:
-                gate_reason = gate.wants_check(gate_reading, self.event_state is not None)
+                gate_reason = gate.wants_check(
+                    gate_reading, self.event_state is not None or self._ptz_is_tracking())
                 if gate_reason:
                     gate.note_check()
                 elif gate_mode == 'on':

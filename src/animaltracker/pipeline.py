@@ -149,6 +149,13 @@ MAX_KEY_FRAMES_PER_SPECIES = 3
 # it, so an event that sees nothing at full strength for this long plus
 # ``post_seconds`` closes whatever the weak boxes say.
 SUSTAIN_ANCHOR_S = 60.0
+# How far from a full-strength box a weaker one may sit and still sustain the
+# event: one body length, but never more than this fraction of the frame,
+# and only a box of about the same size (``SUSTAIN_AREA_RATIO`` either way).
+# Uncapped, a deer near the lens covering the middle third of the frame
+# reached every corner, and any noise anywhere held the event open.
+SUSTAIN_REACH_FRAC = 0.1
+SUSTAIN_AREA_RATIO = 4.0
 
 
 def pick_notification_thumbnail(saved: List[Path], clip_path: Path, species: str) -> Optional[Path]:
@@ -1900,9 +1907,10 @@ class StreamWorker:
         """The boxes under ``confidence`` that show the event's animal is still there.
 
         A box qualifies when it passes the species lists and the size and
-        shape filters, as any detection must, and its centre lies within one
-        body length of a box the event accepted at full strength in the last
-        ``SUSTAIN_ANCHOR_S`` (``_continues_event_subject``). A sitting rabbit
+        shape filters, as any detection must, and it is about the size of a
+        box the event accepted at full strength in the last
+        ``SUSTAIN_ANCHOR_S`` with its centre within one body length of it, at
+        most ``SUSTAIN_REACH_FRAC`` of the frame (``_sustains_anchor``). A sitting rabbit
         under IR scores 0.2-0.45 on most frames and 0.5 on a few: with the
         0.5 bar alone a gap over ``post_seconds`` closed the event every
         minute or so and the animal came out as a dozen clips (jessDahuaBack,
@@ -1918,7 +1926,29 @@ class StreamWorker:
         kept = self._filter_false_positives(
             self._filter_detections(weak), frame_width, frame_height
         )
-        return [d for d in kept if self._continues_event_subject(d.bbox, anchors)]
+        return [d for d in kept
+                if self._sustains_anchor(d.bbox, anchors, frame_width, frame_height)]
+
+    @staticmethod
+    def _sustains_anchor(
+        bbox: List[float], anchors: List[List[float]], frame_width: int, frame_height: int
+    ) -> bool:
+        """Whether a weak ``bbox`` could be the animal one of ``anchors`` was."""
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        area = max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+        for x1, y1, x2, y2 in anchors:
+            w, h = x2 - x1, y2 - y1
+            anchor_area = w * h
+            if area <= 0 or anchor_area <= 0:
+                continue
+            if not (1 / SUSTAIN_AREA_RATIO <= area / anchor_area <= SUSTAIN_AREA_RATIO):
+                continue
+            dx = min(w, SUSTAIN_REACH_FRAC * frame_width)
+            dy = min(h, SUSTAIN_REACH_FRAC * frame_height)
+            if (x1 - dx) <= cx <= (x2 + dx) and (y1 - dy) <= cy <= (y2 + dy):
+                return True
+        return False
 
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
         includes = set(self._normalize_species(s) for s in self.camera.include_species)

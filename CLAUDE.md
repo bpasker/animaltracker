@@ -80,8 +80,9 @@ The system uses a two-stage detection approach:
   when it has one threshold (`BaseDetector.single_threshold`: MegaDetector
   and YOLO, not SpeciesNet). The boxes in between are split off before
   anything else sees them and only keep the event open
-  (`_sustaining_detections`, `EventState.sustain`), and only within one body
-  length of a full-strength box from the last `SUSTAIN_ANCHOR_S`. They never
+  (`_sustaining_detections`, `EventState.sustain`), and only when about the
+  size of a full-strength box from the last `SUSTAIN_ANCHOR_S` and within one
+  body length of it, capped at `SUSTAIN_REACH_FRAC` of the frame. They never
   start an event, never tick the tracker or PTZ, and never add species or key
   frames. Without this a sitting IR rabbit (0.2-0.45, with an occasional 0.5)
   split into a clip every minute.

@@ -272,3 +272,23 @@ def test_sustain_at_or_above_confidence_is_off():
         assert _worker(_event())._live_inference_confidence() == 0.5
     finally:
         _Thresholds.sustain_confidence = 0.2
+
+
+def test_a_big_anchor_does_not_reach_the_whole_frame():
+    """A deer near the lens over the middle third reached every corner."""
+    ev = _event()
+    ev.update([_det([W / 3, H / 3, 2 * W / 3, 2 * H / 3], 0.55)], 0.0, FRAME)
+    worker = _worker(ev)
+    corners = [[20, 20, 120, 120], [W - 140, 20, W - 20, 120],
+               [20, H - 140, 120, H - 20], [W - 140, H - 140, W - 20, H - 20]]
+    for box in corners:
+        assert worker._sustaining_detections([_det(box, 0.21)], W, H, 59.0) == []
+    # The same animal, a little to the side and a weaker score, still sustains.
+    beside = [W / 3 + 150, H / 3 + 40, 2 * W / 3 + 150, 2 * H / 3 + 40]
+    assert worker._sustaining_detections([_det(beside, 0.3)], W, H, 5.0)
+
+
+def test_a_small_box_beside_a_big_anchor_does_not_sustain():
+    ev = _event()
+    ev.update([_det([1000, 500, 1600, 1000], 0.6)], 0.0, FRAME)
+    assert _worker(ev)._sustaining_detections([_det([1610, 700, 1680, 760], 0.3)], W, H, 2.0) == []

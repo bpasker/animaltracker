@@ -65,7 +65,8 @@ The system uses a two-stage detection approach:
   `_tracker_lock`, because a close forced from the read loop can run while
   an update is in flight on an executor thread.
   The blur filter (`thresholds.blur_threshold`) only runs on a camera the
-  PTZ tracker moves, within `BLUR_AFTER_MOVE_S` of a move: on a fixed camera
+  PTZ tracker moves, within `BLUR_AFTER_MOVE_S` of a move or during a patrol
+  sweep (`PTZTracker.is_sweeping`): on a fixed camera
   it dropped every night infrared frame (Otteson1 never recorded at night).
   `motion.MotionGate` (`thresholds.motion_gate`: off / observe / on,
   default observe) compares each frame with a 160-px background before the

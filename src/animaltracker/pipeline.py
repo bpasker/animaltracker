@@ -1431,7 +1431,15 @@ class StreamWorker:
             last_move = float(self.ptz_tracker.get_last_move_time() or 0.0)
         except Exception:  # noqa: BLE001 - no move time: treat as moving, as before
             return True
-        return (ts - last_move) < max(self.BLUR_AFTER_MOVE_S, self.camera.thresholds.ptz_settle_time)
+        if (ts - last_move) < max(self.BLUR_AFTER_MOVE_S, self.camera.thresholds.ptz_settle_time):
+            return True
+        # A patrol sweep turns the head for up to 90 s between reversals
+        # without counting as a move.
+        sweeping = getattr(self.ptz_tracker, 'is_sweeping', None)
+        try:
+            return bool(sweeping()) if callable(sweeping) else False
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _process_frame(self, frame: np.ndarray, ts: float, frame_idx: int = 0) -> None:
         loop = asyncio.get_running_loop()

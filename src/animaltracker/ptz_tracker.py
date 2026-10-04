@@ -592,6 +592,17 @@ class PTZTracker:
         """
         return self._last_move_time
 
+    def is_sweeping(self) -> bool:
+        """Whether a patrol ContinuousMove is turning the head right now.
+
+        A sweep does not refresh ``_last_move_time`` (only a reversal does),
+        so the pipeline asks this as well before it lets a frame skip the
+        blur filter. Read without the lock, which the event loop must never
+        wait for.
+        """
+        velocity = self._patrol_velocity
+        return velocity is not None and any(v for v in velocity)
+
     def _arm_tracking_step(self, now: float) -> None:
         """Schedule an automatic Stop after ``tracking_step_duration``.
 

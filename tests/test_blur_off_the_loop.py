@@ -166,3 +166,23 @@ def test_a_ptz_camera_just_after_a_move_is_blur_filtered():
     w = worker(50.0, moved_at=MOVED_AT - 1)
     assert not reaches_detector(w, MOVED_AT)
     assert w.perf_frames_skipped_blur == 1
+
+
+def test_a_ptz_camera_in_a_patrol_sweep_is_blur_filtered():
+    # A sweep turns the head for up to 90 s without refreshing the move time.
+    w = worker(50.0)
+    w.ptz_tracker.is_sweeping = lambda: True
+    assert not reaches_detector(w, MOVED_AT + 60.0)
+    w.ptz_tracker.is_sweeping = lambda: False
+    assert reaches_detector(w, MOVED_AT + 60.0)
+
+
+def test_is_sweeping_reads_the_patrol_velocity():
+    from animaltracker.ptz_tracker import PTZTracker
+    t = object.__new__(PTZTracker)
+    t._patrol_velocity = None
+    assert not t.is_sweeping()
+    t._patrol_velocity = (0.08, 0.0, 0.0)
+    assert t.is_sweeping()
+    t._patrol_velocity = (0.0, 0.0, 0.0)
+    assert not t.is_sweeping()

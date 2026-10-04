@@ -54,6 +54,10 @@ T0 = float(int(time.time()))
     (SQUIRREL, "mammal"),              # the class, under either spelling
     (CARDINAL, "bird"),
     ("mammalia artiodactyla cervidae", "deer"),   # the spaced form recent detections use
+    ("mammalia_rodentia_sciuridae_sciurus_carolinensis", "gray squirrel"),
+    ("mammalia_rodentia_sciuridae_sciurus_carolinensis", "Eastern Gray Squirrel"),
+    ("mammalia_carnivora_canidae_vulpes_vulpes", "fox"),
+    ("mammalia_artiodactyla_bovidae_capra_hircus", "goat"),   # one of "Bovid (Cattle/Goat/Sheep)"
 ])
 def test_a_name_matches_the_animal_it_means(label, name):
     assert species_matches(label, name)
@@ -64,6 +68,8 @@ def test_a_name_matches_the_animal_it_means(label, name):
     (RABBIT, "squirrel"),
     (DEER, "dog"),
     ("bobcat", "cat"),                 # whole words only
+    ("mammalia_rodentia_sciuridae_sciurus_niger", "fox"),     # a Fox Squirrel is no fox
+    ("mammalia_rodentia_sciuridae_sciurus_carolinensis", "eastern"),
     (SQUIRREL, ""),
     ("", "squirrel"),
 ])

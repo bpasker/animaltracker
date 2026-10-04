@@ -407,10 +407,13 @@ def species_matches(species: str, name: str) -> bool:
 
     ``name`` is what someone picks or types in the settings: the animal as
     alerts call it ("squirrel", "dog", "raccoon") or a taxon ("sciuridae",
-    "rodentia", "mammalia_rodentia"). It matches when each of its words is a
-    word of the label's common name ("dog" is in "Dog/Canid", "raccoon" in
-    "Raccoon Family"), when it is one of the label's taxonomy levels, or when
-    the label begins with it. Whole words only: "cat" is not "Bobcat".
+    "rodentia", "mammalia_rodentia"). It matches when it is one of the label's
+    taxonomy levels, when the label begins with it, or when it ends one of
+    the label's common names (``_name_alternatives``): "squirrel" and "gray
+    squirrel" are an Eastern Gray Squirrel, "dog" is "Dog/Canid", "raccoon"
+    is "Raccoon Family". The end, because that word says what the animal is:
+    "fox" is a Red Fox but not a Fox Squirrel. Whole words only: "cat" is
+    not "Bobcat".
     """
     want = species_words(name)
     label = species_words(species)
@@ -420,7 +423,25 @@ def species_matches(species: str, name: str) -> bool:
         return True
     if len(want) == 1 and _CLASS_TOKENS.get(want[0], want[0]) in species_lineage(species):
         return True
-    return set(want) <= set(species_words(get_common_name(species)))
+    return any(words[-len(want):] == want
+               for words in _name_alternatives(get_common_name(species)))
+
+
+def _name_alternatives(common_name: str) -> List[List[str]]:
+    """The words of each name a common name gives the animal.
+
+    "Dog/Canid" names a dog and a canid, "Bovid (Cattle/Goat/Sheep)" a bovid,
+    cattle, a goat and a sheep; a trailing "Family" ("Raccoon Family",
+    "Crow/Jay Family") only says how broad the label is.
+    """
+    names = []
+    for part in re.split(r"[/()]", common_name or ""):
+        words = species_words(part)
+        if words and words[-1] == "family":
+            words = words[:-1]
+        if words:
+            names.append(words)
+    return names
 
 
 def format_species_display(species: str, include_scientific: bool = False) -> str:

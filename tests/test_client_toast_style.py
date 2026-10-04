@@ -138,7 +138,12 @@ def test_poll_toasts_come_down_when_the_poll_recovers_and_when_the_page_goes():
 
 
 def test_background_polls_leave_an_outage_to_the_disconnected_toast():
-    assert "if (api.isDisconnected(err)) return;" in SOURCES["views/monitor.js"]
+    monitor = SOURCES["views/monitor.js"]
+    assert "if (api.isDisconnected(err)) return false;" in monitor
+    # Failing only once a toast is up: a real error right after an outage
+    # is still raised (2026-10-04).
+    assert "monitorFailing = raisePollToast(" in monitor
+    assert "logsFailing = raisePollToast(" in monitor
     assert "if (api.isDisconnected(err)) return;" in SOURCES["views/recordings.js"]
     assert "!api.isDisconnected(err)" in SOURCES["views/settings.js"]
 

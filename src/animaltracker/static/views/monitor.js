@@ -965,12 +965,16 @@ export const view = {
 
     /* A failed poll says so once, on the transition (a press of Refresh
        always answers); a repeat updates the toast already up. A server that
-       is gone altogether is the app-wide "Disconnected" toast's to report. */
+       is gone altogether is the app-wide "Disconnected" toast's to report.
+       Returns whether a toast is up: the caller counts itself as failing
+       only then, or a real error right after an outage would never be
+       raised. */
     function raisePollToast(key, title, err) {
-      if (api.isDisconnected(err)) return;
+      if (api.isDisconnected(err)) return false;
       var open = pollToasts[key];
       if (open && open.isOpen()) open.update({ detail: api.describe(err) });
       else pollToasts[key] = toast.error(title, { detail: api.describe(err) });
+      return true;
     }
 
     function closePollToast(key) {
@@ -1012,8 +1016,7 @@ export const view = {
              only; a two-second poll must not produce a toast every two
              seconds. A manual press always gets an answer. */
           if (!monitorFailing || manual) {
-            monitorFailing = true;
-            raisePollToast('monitor', 'Could not read system health', err);
+            monitorFailing = raisePollToast('monitor', 'Could not read system health', err) || monitorFailing;
           }
         });
     }
@@ -1110,8 +1113,7 @@ export const view = {
           logStatus.hidden = false;
           logStatus.textContent = 'Log fetch failed — ' + msg;
           if (!logsFailing || manual) {
-            logsFailing = true;
-            raisePollToast('logs', 'Could not read the log', err);
+            logsFailing = raisePollToast('logs', 'Could not read the log', err) || logsFailing;
           }
         });
     }

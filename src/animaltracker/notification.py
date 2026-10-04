@@ -59,16 +59,22 @@ def cooldown_for(settings: NotificationSettings, species: str) -> Cooldown:
 
 @dataclass(frozen=True)
 class Claim:
-    """What AlertTimes.claim decided, and what it needs to take it back."""
+    """What AlertTimes.claim decided, and what it needs to settle or take it back."""
     allowed: bool
     camera_id: str
     animal: str
-    last: Optional[float]      # the camera's time for this animal before the claim
+    last: Optional[float]      # the alert time that held this one back, or the latest before it
     stamped: Optional[float]   # what the claim wrote (None when held back)
 
 
+# How long a claim waits for an alert still being sent for the same animal
+# before it gives up and is held back (every Pushover request has a 15 s
+# timeout, and a destination can hold several keys).
+PENDING_WAIT_S = 120.0
+
+
 class AlertTimes:
-    """When each camera last alerted for each animal, kept on disk.
+    """When each camera alerted for each animal, kept on disk.
 
     A camera that has just alerted for an animal holds further alerts for it
     back until that animal's cooldown has passed. The times are the events'
@@ -76,35 +82,48 @@ class AlertTimes:
     analyses does not bunch alerts up; and they live in a small JSON file, so
     a restart does not re-alert for the squirrel of ten minutes ago. Only the
     alert is held back: the clip is recorded, analysed and kept as usual.
+
+    Every alert time within the longest cooldown is kept, not just the
+    latest: analyses finish out of order, and an event between two earlier
+    alerts must be measured against both.
     """
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path) if path else None
-        self._lock = threading.Lock()
-        self._times: Dict[str, Dict[str, float]] = self._load()
+        self._cond = threading.Condition()
+        self._times: Dict[str, Dict[str, List[float]]] = self._load()
+        # (camera, animal, time) of claims whose alert is still being sent.
+        self._pending: set = set()
 
-    def _load(self) -> Dict[str, Dict[str, float]]:
+    def _load(self) -> Dict[str, Dict[str, List[float]]]:
         if self.path is None or not self.path.exists():
             return {}
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            out: Dict[str, Dict[str, float]] = {}
+            out: Dict[str, Dict[str, List[float]]] = {}
             for camera_id, animals in (raw.get("cameras") or {}).items():
-                out[str(camera_id)] = {str(a): float(t) for a, t in animals.items()}
+                out[str(camera_id)] = {
+                    # A single number is the file as it was before the lists.
+                    str(a): sorted(float(x) for x in (t if isinstance(t, list) else [t]))
+                    for a, t in animals.items()
+                }
             return out
         except Exception as err:  # noqa: BLE001 - a bad file costs one repeat alert, never the alert itself
             LOGGER.warning("Could not read the alert times in %s (%s); starting afresh", self.path, err)
             return {}
 
     def _save_locked(self) -> None:
-        if self.path is None:
-            return
         horizon = time.time() - MAX_COOLDOWN_MINUTES * 60
         cameras = {}
         for camera_id, animals in self._times.items():
-            kept = {a: t for a, t in animals.items() if t >= horizon}
-            if kept:
-                cameras[camera_id] = kept
+            for a in list(animals):
+                animals[a] = [t for t in animals[a] if t >= horizon]
+                if not animals[a]:
+                    del animals[a]
+            if animals:
+                cameras[camera_id] = dict(animals)
+        if self.path is None:
+            return
         tmp = self.path.with_name(self.path.name + ".tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,41 +133,64 @@ class AlertTimes:
             LOGGER.warning("Could not save the alert times to %s: %s", self.path, err)
 
     def last(self, camera_id: str, animal: str) -> Optional[float]:
-        with self._lock:
-            return self._times.get(camera_id, {}).get(animal)
+        with self._cond:
+            times = self._times.get(camera_id, {}).get(animal)
+            return max(times) if times else None
 
-    def claim(self, camera_id: str, animal: str, minutes: float, at: float) -> Claim:
+    def claim(self, camera_id: str, animal: str, minutes: float, at: float,
+              wait_s: float = PENDING_WAIT_S) -> Claim:
         """Take the alert for ``animal`` on ``camera_id`` for an event that started ``at``.
 
         Allowed unless the camera alerted for this animal less than
         ``minutes`` before or after ``at`` (an analysis can finish out of
         order). An allowed claim writes its time at once, before the alert
         is sent, so two analyses finishing together cannot both go out;
-        ``release`` takes it back when the alert reached nobody.
+        ``settle`` confirms it once the alert reached someone and
+        ``release`` takes it back when it reached nobody. A claim held back
+        only by alerts still being sent waits (up to ``wait_s``) to see
+        whether they get through, so the second clip is not lost when the
+        first one's alert fails.
         """
-        with self._lock:
-            animals = self._times.setdefault(camera_id, {})
-            last = animals.get(animal)
-            if last is not None and minutes > 0 and abs(at - last) < minutes * 60:
-                return Claim(False, camera_id, animal, last, None)
-            stamped = at if last is None else max(at, last)
-            animals[animal] = stamped
-            self._save_locked()
-            return Claim(True, camera_id, animal, last, stamped)
+        deadline = time.monotonic() + max(0.0, wait_s)
+        with self._cond:
+            while True:
+                times = self._times.setdefault(camera_id, {}).setdefault(animal, [])
+                blocking = [t for t in times if minutes > 0 and abs(at - t) < minutes * 60]
+                if not blocking:
+                    last = max(times) if times else None
+                    times.append(at)
+                    times.sort()
+                    self._pending.add((camera_id, animal, at))
+                    self._save_locked()
+                    return Claim(True, camera_id, animal, last, at)
+                remaining = deadline - time.monotonic()
+                if (any((camera_id, animal, t) not in self._pending for t in blocking)
+                        or remaining <= 0):
+                    if not times:
+                        self._times[camera_id].pop(animal, None)
+                    nearest = min(blocking, key=lambda t: abs(at - t))
+                    return Claim(False, camera_id, animal, nearest, None)
+                self._cond.wait(remaining)
 
-    def release(self, claim: Claim) -> None:
-        """Undo an allowed claim, unless a later one has replaced it."""
+    def settle(self, claim: Claim) -> None:
+        """The claimed alert reached someone: its time stands."""
         if not claim.allowed:
             return
-        with self._lock:
-            animals = self._times.get(claim.camera_id, {})
-            if animals.get(claim.animal) != claim.stamped:
-                return
-            if claim.last is None:
-                animals.pop(claim.animal, None)
-            else:
-                animals[claim.animal] = claim.last
-            self._save_locked()
+        with self._cond:
+            self._pending.discard((claim.camera_id, claim.animal, claim.stamped))
+            self._cond.notify_all()
+
+    def release(self, claim: Claim) -> None:
+        """Undo an allowed claim: its alert reached nobody."""
+        if not claim.allowed:
+            return
+        with self._cond:
+            self._pending.discard((claim.camera_id, claim.animal, claim.stamped))
+            times = self._times.get(claim.camera_id, {}).get(claim.animal)
+            if times and claim.stamped in times:
+                times.remove(claim.stamped)
+                self._save_locked()
+            self._cond.notify_all()
 
 
 class PushoverNotifier:
@@ -291,7 +333,9 @@ class PushoverNotifier:
                         LOGGER.exception("Failed to send Pushover alert to '%s' (user key ending in ...%s): %s",
                                          dest.label, user_key[-4:], exc)
         finally:
-            if not sent:
+            if sent:
+                self.alert_times.settle(claim)
+            else:
                 # Reached nobody: the next clip of this animal may try again.
                 self.alert_times.release(claim)
         return sent

@@ -321,6 +321,8 @@ backed by `configstore.py`). Rules that keep it safe:
   the alert's common name, "dog" in "Dog/Canid", or a taxon). The clock is
   the events' start times, kept in `logs_root/alert_times.json` so a restart
   does not re-alert, and an alert that reached nobody gives its time back.
+  Every alert time in the window is kept (analyses finish out of order), and
+  a clip held back only by an alert still being sent waits for its outcome.
   The exclusion lists are not this: they delete the clip.
 - Secrets are write-only: `POST /api/secrets` (`configstore.set_secret`)
   writes `NAME=value` into `config/secrets.env` beside the config (backup,

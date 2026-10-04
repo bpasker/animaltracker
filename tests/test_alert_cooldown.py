@@ -232,7 +232,7 @@ def test_the_times_survive_a_restart(posts, tmp_path):
     s = settings(cooldown_minutes=60)
     assert PushoverNotifier(s, alert_times_path=path).send(clip(RABBIT, T0)) == 1
     on_disk = json.loads(path.read_text())
-    assert on_disk == {"cameras": {"cam1": {"rabbit": T0}}}
+    assert on_disk == {"cameras": {"cam1": {"rabbit": [T0]}}}
 
     again = PushoverNotifier(s, alert_times_path=path)
     assert again.send(clip(RABBIT, T0 + 10 * MINUTE)) == 0
@@ -246,7 +246,7 @@ def test_a_damaged_file_costs_a_repeat_alert_never_the_alert(posts, tmp_path, ca
         n = PushoverNotifier(settings(cooldown_minutes=60), alert_times_path=path)
     assert "Could not read the alert times" in caplog.text
     assert n.send(clip(RABBIT, T0)) == 1
-    assert json.loads(path.read_text())["cameras"]["cam1"]["rabbit"] == T0
+    assert json.loads(path.read_text())["cameras"]["cam1"]["rabbit"] == [T0]
 
 
 def test_times_older_than_the_longest_cooldown_are_dropped_from_the_file(tmp_path):
@@ -254,7 +254,55 @@ def test_times_older_than_the_longest_cooldown_are_dropped_from_the_file(tmp_pat
     times = AlertTimes(path)
     times.claim("cam1", "deer", 0, 1_000.0)            # decades ago
     times.claim("cam1", "squirrel", 0, 4_000_000_000.0)
-    assert json.loads(path.read_text()) == {"cameras": {"cam1": {"squirrel": 4_000_000_000.0}}}
+    assert json.loads(path.read_text()) == {"cameras": {"cam1": {"squirrel": [4_000_000_000.0]}}}
+
+
+def test_a_file_from_before_the_lists_still_counts(posts, tmp_path):
+    path = tmp_path / "alert_times.json"
+    path.write_text(json.dumps({"cameras": {"cam1": {"rabbit": T0}}}))
+    n = PushoverNotifier(settings(cooldown_minutes=60), alert_times_path=path)
+    assert n.send(clip(RABBIT, T0 + 10 * MINUTE)) == 0
+
+
+def test_an_event_between_two_earlier_alerts_is_measured_against_both(posts):
+    """Analyses finishing out of order: 1000 s, then 0 s, then 300 s."""
+    n = PushoverNotifier(settings(cooldown_minutes=10))
+    assert n.send(clip(SQUIRREL, T0 + 1000)) == 1
+    assert n.send(clip(SQUIRREL, T0)) == 1
+    assert n.send(clip(SQUIRREL, T0 + 300)) == 0, "five minutes after the alert at T0"
+
+
+def test_a_clip_held_back_by_a_failing_alert_goes_out_instead(monkeypatch):
+    """B waits on A's alert, which reaches nobody; B's then goes out."""
+    import threading as _threading
+    a_sending = _threading.Event()
+    let_a_fail = _threading.Event()
+    sent_to = []
+
+    def post(url, data=None, files=None, timeout=None):
+        if data["message"] == str(T0):
+            a_sending.set()
+            let_a_fail.wait(5)
+            raise requests.ConnectionError("pushover is down")
+        sent_to.append(data["message"])
+        return FakeResponse()
+
+    monkeypatch.setattr(notification.requests, "post", post)
+    monkeypatch.setattr(PushoverNotifier, "_format_message", lambda self, ctx: str(ctx.event_started_at))
+    n = PushoverNotifier(settings(cooldown_minutes=60))
+    a, b = clip(SQUIRREL, T0), clip(SQUIRREL, T0 + MINUTE)
+    results = {}
+    t = _threading.Thread(target=lambda: results.setdefault("a", n.send(a)))
+    t.start()
+    assert a_sending.wait(5)
+    tb = _threading.Thread(target=lambda: results.setdefault("b", n.send(b)))
+    tb.start()
+    time.sleep(0.2)                    # B is now waiting on A's claim
+    let_a_fail.set()
+    t.join(5)
+    tb.join(5)
+    assert results == {"a": 0, "b": 1}
+    assert n.alert_times.last("cam1", "squirrel") == T0 + MINUTE
 
 
 # --------------------------------------------------------------------------

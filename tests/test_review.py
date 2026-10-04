@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -181,11 +182,55 @@ def test_the_pipeline_reviews_only_after_an_alert_and_only_when_enabled():
     from animaltracker import pipeline
 
     src = inspect.getsource(pipeline.StreamWorker)
+    assert "if not delivered:" in src, "a held-back or unsent alert is not reviewed"
     assert "return clip_path, final_species" in src
     assert "if alerted and review_enabled(clip_cfg):" in src
-    # The review runs before the clip's claim is released.
+    # The review claims the renamed clip before the old name's claim goes.
     body = src[src.index("def analyse() -> None:"):]
-    assert body.index("review_and_record(") < body.index("release()")
+    assert body.index("_submit_review(") < body.index("release()")
+
+
+def test_a_review_holds_the_renamed_clip_and_runs_off_the_analysis_workers(tmp_path, monkeypatch):
+    import threading
+    from animaltracker import pipeline
+    from animaltracker.analysis_recovery import ClipAnalysisRegistry
+
+    registry = ClipAnalysisRegistry()
+    monkeypatch.setattr(pipeline.StreamWorker, "analysis_registry", registry)
+    monkeypatch.setattr(pipeline.StreamWorker, "_review_workers", pipeline.AnalysisWorkers("t-review"))
+    clip = tmp_path / "1_cardinal.mp4"
+    started, finish, seen = threading.Event(), threading.Event(), {}
+
+    def fake_review(path, cfg, camera_id, species):
+        seen["thread"] = threading.current_thread().name
+        seen["held"] = registry.source_of(path)
+        started.set()
+        finish.wait(5)
+
+    monkeypatch.setattr(pipeline, "review_and_record", fake_review)
+    assert pipeline.StreamWorker._submit_review(clip, None, "cam1", "cardinal")
+    assert started.wait(5)
+    assert not registry.begin(clip, source="reanalyze"), "a reanalysis waits for the review"
+    assert seen == {"thread": "t-review-1", "held": "review"}
+    finish.set()
+    for _ in range(100):
+        if not registry.is_active(clip):
+            break
+        threading.Event().wait(0.02)
+    assert not registry.is_active(clip)
+
+    # A clip someone else holds is not reviewed.
+    registry.begin(clip, source="reanalyze")
+    assert not pipeline.StreamWorker._submit_review(clip, None, "cam1", "cardinal")
+
+
+def test_a_review_keeps_the_sidecar_readable(tmp_path):
+    clip = tmp_path / "1_bird.mp4"
+    side = review.sidecar_path(clip)
+    side.write_text(json.dumps({"processing_log": []}))
+    os.chmod(side, 0o644)
+    assert review.write_review(clip, {"real_animal": True})
+    assert side.stat().st_mode & 0o777 == 0o644
 
 
 def test_a_long_description_is_cut_to_its_first_sentence():

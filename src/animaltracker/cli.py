@@ -489,9 +489,13 @@ def cmd_review(args: argparse.Namespace) -> int:
         if not args.force and read_sidecar(p).get("review"):
             continue
         record = review_clip(p, cfg)
-        write_review(p, record)
-        done += 1
         rel = p.relative_to(clips_dir) if p.is_relative_to(clips_dir) else p
+        try:
+            write_review(p, record)
+        except OSError as err:   # renamed or pruned since the listing: go on
+            print(f"ERROR          {rel}: could not save the review: {err}")
+            continue
+        done += 1
         if record.get("error"):
             print(f"ERROR          {rel}: {record['error']}")
         else:

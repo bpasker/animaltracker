@@ -169,7 +169,8 @@ def ask_model(cfg: ReviewConfig, images: Sequence[str]) -> Dict[str, Any]:
     )
     with urllib.request.urlopen(req, timeout=cfg.timeout_seconds) as resp:
         reply = json.loads(resp.read())
-    answer = json.loads(((reply.get("message") or {}).get("content")) or "{}")
+    message = reply.get("message") if isinstance(reply, dict) else None
+    answer = json.loads((message.get("content") if isinstance(message, dict) else None) or "{}")
     if not isinstance(answer, dict) or not isinstance(answer.get("real_animal"), bool):
         raise ValueError(f"unexpected answer from {cfg.model}: {answer!r}")
     return answer
@@ -193,8 +194,8 @@ def review_clip(clip_path: Path, cfg: ReviewConfig) -> Dict[str, Any]:
             raise ValueError("could not read any of the picked frames")
         with _REVIEW_LOCK:
             answer = ask_model(cfg, images)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        record["error"] = str(getattr(exc, "reason", None) or exc)
+    except Exception as exc:  # noqa: BLE001 - recorded, so a backfill goes on to the next clip
+        record["error"] = str(getattr(exc, "reason", None) or exc) or type(exc).__name__
         record["seconds"] = round(time.monotonic() - started, 1)
         return record
     record["seconds"] = round(time.monotonic() - started, 1)
@@ -226,8 +227,15 @@ def write_review(clip_path: Path, record: Dict[str, Any]) -> bool:
     if not data:
         return False
     data["review"] = record
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o644
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
+        # mkstemp makes the file 0600, and os.replace would carry that over
+        # the sidecar every other reader of the archive can open.
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh, indent=2, default=str)
         os.replace(tmp, path)

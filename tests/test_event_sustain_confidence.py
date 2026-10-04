@@ -292,3 +292,17 @@ def test_a_small_box_beside_a_big_anchor_does_not_sustain():
     ev = _event()
     ev.update([_det([1000, 500, 1600, 1000], 0.6)], 0.0, FRAME)
     assert _worker(ev)._sustaining_detections([_det([1610, 700, 1680, 760], 0.3)], W, H, 2.0) == []
+
+
+def test_anchors_from_before_the_camera_moved_its_own_head_do_not_count():
+    from types import SimpleNamespace
+    ev = _event()
+    ev.update([_det(RABBIT, 0.6)], 0.0, FRAME)
+    worker = _worker(ev)
+    client = object()
+    worker.onvif_client = client
+    worker.ptz_tracker = SimpleNamespace(onvif_client=client, get_last_move_time=lambda: 3.0)
+    assert worker._sustaining_detections([_det(RABBIT, 0.3)], W, H, 5.0) == []
+    # A tracker that moves another camera's head leaves these pixels alone.
+    worker.ptz_tracker = SimpleNamespace(onvif_client=object(), get_last_move_time=lambda: 3.0)
+    assert worker._sustaining_detections([_det(RABBIT, 0.3)], W, H, 5.0)

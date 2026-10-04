@@ -414,8 +414,10 @@ class EventState:
             return key_frames
         return self.species_key_frames
 
-    def recent_subject_bboxes(self, now: float) -> List[List[float]]:
-        return [b for t, b in self.subject_boxes if now - t <= SUSTAIN_ANCHOR_S]
+    def recent_subject_bboxes(self, now: float, since: float = 0.0) -> List[List[float]]:
+        """The anchors for a weak box at ``now``; none from before ``since``
+        (the camera's own head moved then, so their pixels show another spot)."""
+        return [b for t, b in self.subject_boxes if now - t <= SUSTAIN_ANCHOR_S and t >= since]
 
     def sustain(self, frame_ts: float) -> None:
         """The animal is still there, seen only by a box under the threshold.
@@ -1424,6 +1426,16 @@ class StreamWorker:
         client = getattr(self, 'onvif_client', None)
         return tracker is not None and client is not None and tracker.onvif_client is client
 
+    def _own_head_moved_at(self) -> float:
+        """When the PTZ tracker last moved this camera's own head (0 if never,
+        or if it moves another camera's)."""
+        if not self._drives_own_ptz():
+            return 0.0
+        try:
+            return float(self.ptz_tracker.get_last_move_time() or 0.0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     def _ptz_moved_recently(self, ts: float) -> bool:
         if not self._drives_own_ptz():
             return False
@@ -1953,7 +1965,7 @@ class StreamWorker:
         """
         if self.event_state is None or not weak:
             return []
-        anchors = self.event_state.recent_subject_bboxes(ts)
+        anchors = self.event_state.recent_subject_bboxes(ts, since=self._own_head_moved_at())
         if not anchors:
             return []
         kept = self._filter_false_positives(

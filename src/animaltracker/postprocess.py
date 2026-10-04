@@ -21,7 +21,9 @@ from typing import Callable, List, Optional, Dict, Tuple
 
 from .detector import BaseDetector, Detection, create_detector, cleanup_gpu_memory, NON_ANIMAL_REASON_PREFIX
 from .tracker import ObjectTracker, create_tracker
-from .species_names import get_common_name, pick_species_by_lineage, species_lineage, species_rank
+from .species_names import (
+    get_common_name, pick_species_by_lineage, species_lineage, species_matches, species_rank,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,7 +46,14 @@ def species_matches_exclude(species: str, excludes: set) -> bool:
     - Exact match: "mammalia_rodentia_sciuridae" matches "mammalia_rodentia_sciuridae"
     - Prefix match: "mammalia_rodentia_sciuridae_sciurus" matches "mammalia_rodentia_sciuridae"
     - Token match: "sciuridae" matches a label with token "sciuridae" (not arbitrary substrings)
-    - Common name match: "mammalia_rodentia_sciuridae" matches "squirrel"
+    - Common name match: "squirrel" and "eastern gray squirrel" match
+      "mammalia_rodentia_sciuridae_sciurus_carolinensis" (``species_matches``)
+
+    A label broader than an exclusion is not excluded: "mammalia" or
+    "mammalia_rodentia" beside an excluded squirrel could be any mammal or
+    rodent. It used to count as the squirrel, so a camera that excluded
+    squirrels deleted a night deer SpeciesNet could only call "mammalia",
+    and the species vote set every mammal aside with it.
     """
     normalized = normalize_species_label(species)
     norm_tokens = normalized.split('_')
@@ -61,20 +70,13 @@ def species_matches_exclude(species: str, excludes: set) -> bool:
         if normalized.startswith(exclude_norm + '_'):
             return True
 
-        # Exclude starts with detection (broader exclusion)
-        # e.g., excluding "mammalia_rodentia" should exclude "mammalia_rodentia_sciuridae"
-        if exclude_norm.startswith(normalized + '_'):
-            return True
-
         # Token match (was substring; substring matched too aggressively,
         # e.g. excluding "bear" would also drop "bearded_dragon").
         if exclude_norm in norm_tokens:
             return True
 
-    # Also check common name match
-    common_name = get_common_name(species).lower()
-    if common_name in excludes:
-        return True
+        if species_matches(species, exclude_norm):
+            return True
 
     return False
 

@@ -402,3 +402,39 @@ def test_a_camera_s_exclusions_are_its_own_list_and_the_global_one():
     assert excluded_species_for(runtime, "cam2") == ["mammalia carnivora felidae"]
     assert excluded_species_for(runtime, "retired") == ["mammalia carnivora felidae"]
     assert excluded_species_for(None, "cam1") == []
+
+
+# --- a label broader than the exclusion is not the excluded animal (2026-10-04) --------
+
+RABBIT = "mammalia_lagomorpha_leporidae"
+
+
+@pytest.mark.parametrize("label", ["mammalia", "mammalia_rodentia", "animal"])
+def test_a_label_broader_than_the_exclusion_is_not_excluded(label):
+    from animaltracker.postprocess import normalize_species_label, species_matches_exclude
+    excludes = {normalize_species_label(s) for s in NO_SQUIRRELS}
+    assert not species_matches_exclude(label, excludes)
+    assert species_matches_exclude(SQUIRREL + "_sciurus_niger", excludes)
+
+
+def test_a_clip_only_called_mammal_is_kept_on_a_camera_that_excludes_squirrels(tmp_path):
+    # A night deer SpeciesNet could only call "mammalia" used to count as an
+    # excluded squirrel, and the clip was deleted.
+    from animaltracker.postprocess import normalize_species_label, species_matches_exclude
+    result = analyse(tmp_path, visits(("mammalia", LAWN, range(20))))
+    assert result.new_species == "mammalia"
+    assert not species_matches_exclude(
+        result.new_species, {normalize_species_label(s) for s in NO_SQUIRRELS})
+
+
+def test_a_rabbit_beside_a_generic_mammal_names_the_clip(tmp_path):
+    script = visits((RABBIT, LAWN, [5]), ("mammalia", FENCE, range(6, 26)))
+    result = analyse(tmp_path, script, tracking_enabled=False)
+    assert result.new_species == RABBIT
+
+
+@pytest.mark.parametrize("name", ["Eastern Gray Squirrel", "gray squirrel", "squirrel"])
+def test_an_exclusion_by_common_name_matches(name):
+    from animaltracker.postprocess import normalize_species_label, species_matches_exclude
+    assert species_matches_exclude("mammalia_rodentia_sciuridae_sciurus_carolinensis",
+                                   {normalize_species_label(name)})

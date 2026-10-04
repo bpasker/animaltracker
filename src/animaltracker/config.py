@@ -171,7 +171,7 @@ class NotificationSettings(BaseModel):
     destinations: List[PushoverDestination] = Field(default_factory=list, description="Named Pushover recipients. A camera alerts every one of them unless its own notification.destinations lists a subset.")
     web_base_url: Optional[str] = Field(default=None, description="Base URL for web UI (e.g., http://192.168.1.195:8080). Used for clickable links in notifications.")
     cooldown_minutes: float = Field(default=0.0, ge=0, le=MAX_COOLDOWN_MINUTES, description="Minutes after an alert before the same camera alerts again for the same animal. Every clip is still recorded and analysed; only the alert is held back. 0 alerts for every clip.")
-    species_cooldowns: List[SpeciesCooldown] = Field(default_factory=list, description="Cooldowns of their own for the animals they name, in place of cooldown_minutes. The first entry that matches a clip's species applies.")
+    species_cooldowns: List[SpeciesCooldown] = Field(default_factory=list, description="Cooldowns of their own for the animals they name, in place of cooldown_minutes. The entry that names a clip's species most specifically applies (hawk over bird).")
 
     @field_validator("species_cooldowns")
     @classmethod

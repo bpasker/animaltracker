@@ -320,7 +320,8 @@ backed by `configstore.py`). Rules that keep it safe:
   refuses a camera naming an unknown destination (`check_destination_refs`);
   the pipeline only warns and skips it.
 - Repeat alerts: `general.notification.cooldown_minutes` (every animal) and
-  `species_cooldowns` (`{species, minutes}`, first match wins) hold back a
+  `species_cooldowns` (`{species, minutes}`, the most specific match wins,
+  `species_match_depth`) hold back a
   camera's next alert for the same animal; the clip is still recorded,
   analysed and kept. A name matches through `species_matches` (each word in
   the alert's common name, "dog" in "Dog/Canid", or a taxon). The clock is

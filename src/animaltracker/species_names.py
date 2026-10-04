@@ -415,16 +415,37 @@ def species_matches(species: str, name: str) -> bool:
     "fox" is a Red Fox but not a Fox Squirrel. Whole words only: "cat" is
     not "Bobcat".
     """
+    return species_match_depth(species, name) > 0
+
+
+# How specific a match by common name is: below any taxonomy level.
+_COMMON_NAME_DEPTH = 100
+
+
+def species_match_depth(species: str, name: str) -> int:
+    """How specifically ``name`` names ``species``; 0 when it does not.
+
+    A taxon counts by its level (1 for the class, "bird"; 3 for a family,
+    "sciuridae"), the start of the label by its length, and a common name
+    ("hawk", "gray squirrel") above every taxon. So among several names that
+    all match, the deepest is the one meant for this animal: "hawk" over
+    "bird" for a red-tailed hawk.
+    """
     want = species_words(name)
     label = species_words(species)
     if not want or not label:
-        return False
+        return 0
     if label[:len(want)] == want:
-        return True
-    if len(want) == 1 and _CLASS_TOKENS.get(want[0], want[0]) in species_lineage(species):
-        return True
-    return any(words[-len(want):] == want
-               for words in _name_alternatives(get_common_name(species)))
+        return len(want)
+    if len(want) == 1:
+        lineage = species_lineage(species)
+        token = _CLASS_TOKENS.get(want[0], want[0])
+        if token in lineage:
+            return lineage.index(token) + 1
+    if any(words[-len(want):] == want
+           for words in _name_alternatives(get_common_name(species))):
+        return _COMMON_NAME_DEPTH
+    return 0
 
 
 def _name_alternatives(common_name: str) -> List[List[str]]:

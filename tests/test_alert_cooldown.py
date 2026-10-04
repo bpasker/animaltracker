@@ -84,9 +84,10 @@ def test_an_animal_of_its_own_takes_its_wait_and_the_rest_the_default():
     assert cooldown_for(s, DOG) == notification.Cooldown("dog canid", 10.0)
 
 
-def test_the_first_entry_that_matches_applies():
+def test_the_most_specific_entry_that_matches_applies():
     s = settings(species_cooldowns=[{"species": "rodentia", "minutes": 30}, {"species": "squirrel", "minutes": 120}])
-    assert cooldown_for(s, SQUIRREL) == notification.Cooldown("rodentia", 30.0)
+    assert cooldown_for(s, SQUIRREL) == notification.Cooldown("squirrel", 120.0)
+    assert cooldown_for(s, "mammalia_rodentia_muridae") == notification.Cooldown("rodentia", 30.0)
 
 
 # --------------------------------------------------------------------------
@@ -363,3 +364,14 @@ def test_a_joined_name_shares_a_timer_whatever_the_order():
     assert a == b
     entry = settings(species_cooldowns=[{"species": "bird", "minutes": 30}])
     assert cooldown_for(entry, SQUIRREL + "+bird").minutes == 30
+
+
+def test_the_most_specific_entry_wins_whatever_the_order():
+    mallard = "bird_anseriformes_anatidae_anas_platyrhynchos"
+    s = settings(species_cooldowns=[{"species": "bird", "minutes": 60},
+                                    {"species": "anatidae", "minutes": 5}])
+    assert cooldown_for(s, mallard) == notification.Cooldown("anatidae", 5.0)
+    assert cooldown_for(s, CARDINAL) == notification.Cooldown("bird", 60.0)
+    s = settings(species_cooldowns=[{"species": "mammal", "minutes": 60},
+                                    {"species": "squirrel", "minutes": 120}])
+    assert cooldown_for(s, SQUIRREL) == notification.Cooldown("squirrel", 120.0)

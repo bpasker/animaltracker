@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Sequence
 import requests
 
 from .config import MAX_COOLDOWN_MINUTES, NotificationSettings, PushoverDestination
-from .species_names import get_common_name, species_matches, species_rank, species_words
+from .species_names import get_common_name, species_match_depth, species_rank, species_words
 
 LOGGER = logging.getLogger(__name__)
 PUSHOVER_ENDPOINT = "https://api.pushover.net/1/messages.json"
@@ -49,7 +49,13 @@ class Cooldown:
 
 
 def cooldown_for(settings: NotificationSettings, species: str) -> Cooldown:
-    """The first species_cooldowns entry that matches ``species``, else cooldown_minutes.
+    """The species_cooldowns entry that names ``species`` most specifically
+    (``species_match_depth``), else cooldown_minutes.
+
+    The most specific, not the first: with "bird" listed before "hawk" a
+    red-tailed hawk takes the hawk's wait, whatever order the entries were added in
+    (the settings page has no way to reorder them). Equally specific entries
+    go by their order.
 
     A clip named for several animals ("bird+mammalia_rodentia_sciuridae",
     joined in whatever order they came) matches an entry when any of them
@@ -57,9 +63,13 @@ def cooldown_for(settings: NotificationSettings, species: str) -> Cooldown:
     the join never decides which timer it shares.
     """
     parts = sorted({p.strip() for p in (species or "").split("+") if p.strip()}) or [species or ""]
+    best, best_depth = None, 0
     for entry in getattr(settings, "species_cooldowns", None) or []:
-        if any(species_matches(part, entry.species) for part in parts):
-            return Cooldown(" ".join(species_words(entry.species)), float(entry.minutes))
+        depth = max(species_match_depth(part, entry.species) for part in parts)
+        if depth > best_depth:
+            best, best_depth = entry, depth
+    if best is not None:
+        return Cooldown(" ".join(species_words(best.species)), float(best.minutes))
     main = max(parts, key=species_rank)
     return Cooldown(" ".join(species_words(get_common_name(main))),
                     float(getattr(settings, "cooldown_minutes", 0.0) or 0.0))

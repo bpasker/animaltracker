@@ -279,7 +279,7 @@ var GENERAL_SECTIONS = [
         { key: 'notification.cooldown_minutes', kind: 'number', min: 0, max: 10080, step: 5, unit: ' min',
           label: 'Alert again after', hint: 'For every animal without a time of its own below. 0 alerts for every clip.' },
         { key: 'notification.species_cooldowns', kind: 'cooldowns', max: 10080, step: 5,
-          label: 'Per species', hint: 'A wait of their own for the animals that visit all the time. Each camera keeps its own clock.',
+          label: 'Per species', hint: 'A wait of their own for the animals that visit all the time. The most specific one applies: Hawk over Bird. Each camera keeps its own clock.',
           emptyMeans: 'No species of their own — every animal uses the time above.' }
       ] },
       { id: 'exclusions', legend: 'Global exclusions', fields: [

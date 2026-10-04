@@ -354,3 +354,12 @@ def test_a_file_without_cooldowns_is_not_padded_with_them():
         "general": {"notification": {"cooldown_minutes": 0, "species_cooldowns": []}},
     })
     assert new == BASE and changes["general"] == []
+
+
+def test_a_joined_name_shares_a_timer_whatever_the_order():
+    s = settings(cooldown_minutes=10)
+    a = cooldown_for(s, "bird+" + SQUIRREL)
+    b = cooldown_for(s, SQUIRREL + "+bird")
+    assert a == b
+    entry = settings(species_cooldowns=[{"species": "bird", "minutes": 30}])
+    assert cooldown_for(entry, SQUIRREL + "+bird").minutes == 30

@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Sequence
 import requests
 
 from .config import MAX_COOLDOWN_MINUTES, NotificationSettings, PushoverDestination
-from .species_names import get_common_name, species_matches, species_words
+from .species_names import get_common_name, species_matches, species_rank, species_words
 
 LOGGER = logging.getLogger(__name__)
 PUSHOVER_ENDPOINT = "https://api.pushover.net/1/messages.json"
@@ -49,11 +49,19 @@ class Cooldown:
 
 
 def cooldown_for(settings: NotificationSettings, species: str) -> Cooldown:
-    """The first species_cooldowns entry that matches ``species``, else cooldown_minutes."""
+    """The first species_cooldowns entry that matches ``species``, else cooldown_minutes.
+
+    A clip named for several animals ("bird+mammalia_rodentia_sciuridae",
+    joined in whatever order they came) matches an entry when any of them
+    does, and otherwise counts as its most specific animal, so the order of
+    the join never decides which timer it shares.
+    """
+    parts = sorted({p.strip() for p in (species or "").split("+") if p.strip()}) or [species or ""]
     for entry in getattr(settings, "species_cooldowns", None) or []:
-        if species_matches(species, entry.species):
+        if any(species_matches(part, entry.species) for part in parts):
             return Cooldown(" ".join(species_words(entry.species)), float(entry.minutes))
-    return Cooldown(" ".join(species_words(get_common_name(species))),
+    main = max(parts, key=species_rank)
+    return Cooldown(" ".join(species_words(get_common_name(main))),
                     float(getattr(settings, "cooldown_minutes", 0.0) or 0.0))
 
 

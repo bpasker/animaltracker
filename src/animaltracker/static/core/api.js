@@ -120,11 +120,24 @@ function request(method, endpoint, opts) {
   }
   if (o.keepalive) init.keepalive = true;
 
+  function timeoutError(err) {
+    return new ApiError('The request timed out after ' + Math.round(timeout / 1000) + 's.',
+      { status: 0, endpoint: endpoint, cause: err });
+  }
+
+  /* A body that stops arriving is cut off by the same timeout as the
+     headers; one cancelled by the caller stays a cancel. */
+  function bodyFailed(err) {
+    if (timedOut) throw timeoutError(err);
+    if (isAbort(err)) throw err;
+    return null;
+  }
+
   return fetch(endpoint, init).then(function (res) {
-    if (timer) clearTimeout(timer);
     store.set({ connected: true });
     if (!res.ok) {
       return res.text().then(function (text) {
+        if (timer) clearTimeout(timer);
         var body = null;
         if (text && text.charAt(0) === '{') {
           try { body = JSON.parse(text); } catch (e) { body = null; }
@@ -134,29 +147,35 @@ function request(method, endpoint, opts) {
           httpMessage(res.status, endpoint),
           { status: res.status, endpoint: endpoint, detail: detail, body: body }
         );
-      }, function () {
+      }, function (err) {
+        if (timer) clearTimeout(timer);
+        bodyFailed(err);
         throw new ApiError(httpMessage(res.status, endpoint),
           { status: res.status, endpoint: endpoint });
       });
     }
-    if (o.raw) return res;
+    if (o.raw) {
+      /* The caller reads the body itself, past the reach of this timeout. */
+      if (timer) clearTimeout(timer);
+      return res;
+    }
     var type = res.headers.get('Content-Type') || '';
-    if (type.indexOf('application/json') < 0) return res.text();
-    return res.json().catch(function (err) {
+    var body = type.indexOf('application/json') < 0 ? res.text() : res.json();
+    return body.then(function (value) {
+      if (timer) clearTimeout(timer);
+      return value;
+    }, function (err) {
+      if (timer) clearTimeout(timer);
       /* Cancelled while the body was still arriving (a newer reload took
-         over): the caller's abort, not a bad response. The timeout cannot
-         fire here, it was cleared when the headers came in. */
-      if (isAbort(err)) throw err;
+         over): the caller's abort, not a bad response. */
+      bodyFailed(err);
       throw new ApiError('The server sent a malformed response.',
         { status: res.status, endpoint: endpoint, cause: err });
     });
   }, function (err) {
     if (timer) clearTimeout(timer);
     if (isAbort(err) && !timedOut) throw err;         /* caller cancelled */
-    if (timedOut) {
-      throw new ApiError('The request timed out after ' + Math.round(timeout / 1000) + 's.',
-        { status: 0, endpoint: endpoint, cause: err });
-    }
+    if (timedOut) throw timeoutError(err);
     /* A network-level failure is the "server gone" case. */
     store.set({ connected: false });
     throw new ApiError('Could not reach the Animal Tracker server.',

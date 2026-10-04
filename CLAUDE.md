@@ -184,8 +184,11 @@ The system uses a two-stage detection approach:
   observes: the verdict goes into the sidecar as `review` and a `[REVIEW]`
   log line, and the clip page shows it; nothing deletes, renames or holds
   back an alert on it. `clip.review_enabled` (off by default) runs it on
-  every alerted clip after the post-processing slot is freed but before the
-  clip's analysis claim is released, since it rewrites the sidecar. It reads
+  every clip whose alert reached someone, on a worker thread of its own
+  (`StreamWorker._review_workers`) so the next clip's analysis never waits
+  for it. It claims the renamed clip in the analysis registry (source
+  `review`) before the event's claim on the old name is released, since it
+  rewrites the sidecar. It reads
   the clip and sidecar from disk, never the post-processor's result, so the
   `review` command (backfill, `--summary` to tally verdicts) shares the code.
   It never creates a sidecar: one holding only a review would tell the

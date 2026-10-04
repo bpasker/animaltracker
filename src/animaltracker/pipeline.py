@@ -509,6 +509,8 @@ class StreamWorker:
     # One worker per post-processing slot; the semaphore stays the limit the
     # recovery sweep shares.
     _analysis_workers: AnalysisWorkers = AnalysisWorkers()
+    # The vision-model reviews (review.py) run one at a time anyway.
+    _review_workers: AnalysisWorkers = AnalysisWorkers(name="clip-review")
     # The one post-processing detector of this process (see
     # ``_get_postprocess_detector``), shared by every camera.
     _shared_postprocess_detector: Optional[BaseDetector] = None
@@ -531,6 +533,25 @@ class StreamWorker:
         """Queue a clip's analysis job; returns how many were already waiting."""
         cls._analysis_workers.ensure(cls._postprocess_limit)
         return cls._analysis_workers.submit(job)
+
+    @classmethod
+    def _submit_review(cls, clip_path: Path, clip_cfg, camera_id: str, species: str) -> bool:
+        """Queue the second opinion on an alerted clip; False when the clip is taken."""
+        registry = cls.analysis_registry
+        if not registry.begin(clip_path, source='review'):
+            LOGGER.info("[REVIEW] %s: %s is busy (%s); not reviewed",
+                        camera_id, Path(clip_path).name, registry.source_of(clip_path))
+            return False
+
+        def review() -> None:
+            try:
+                review_and_record(clip_path, clip_cfg, camera_id, species)
+            finally:
+                registry.end(clip_path)
+
+        cls._review_workers.ensure(1)
+        cls._review_workers.submit(review)
+        return True
 
     @classmethod
     def _ensure_postprocess_semaphore(cls) -> threading.Semaphore:
@@ -2508,9 +2529,11 @@ class StreamWorker:
                     storage_root=str(storage_root),
                     web_base_url=web_base_url,
                 )
-                self.notifier.send(ctx, priority=priority, sound=sound, destinations=destinations)
+                delivered = self.notifier.send(ctx, priority=priority, sound=sound, destinations=destinations)
                 LOGGER.info("Event for %s closed; clip at %s (species: %s, %d tracks)",
                            ctx.camera_id, clip_path, final_species, tracks_count)
+                if not delivered:
+                    return None   # held back, or no recipient: no alert, no review
                 # The clip as it now stands, for the second opinion that
                 # ``analyse`` asks for once this slot is free.
                 return clip_path, final_species
@@ -2583,15 +2606,17 @@ class StreamWorker:
                             priority, sound, destinations, species_key_frames, ptz_decisions,
                             detector_config, clip_path,
                         )
-                        # A second opinion on the alerted clip (review.py).
-                        # After the post-processing slot is given back, so
-                        # it never delays another clip's analysis, but
-                        # before the claim is: the review rewrites the
-                        # sidecar, which a reanalysis or the recovery sweep
-                        # must not be writing at the same time.
+                        # A second opinion on the alerted clip (review.py),
+                        # on a worker of its own so that the next clip's
+                        # analysis does not wait for the model. The review
+                        # rewrites the sidecar, which a reanalysis or a
+                        # delete must not touch meanwhile, so it claims the
+                        # clip under the name it now has, before this
+                        # job's claim on the old name is let go.
                         clip_cfg = self.runtime.general.clip
                         if alerted and review_enabled(clip_cfg):
-                            review_and_record(alerted[0], clip_cfg, camera_id, alerted[1] or "")
+                            StreamWorker._submit_review(
+                                alerted[0], clip_cfg, camera_id, alerted[1] or "")
                     finally:
                         release()
 

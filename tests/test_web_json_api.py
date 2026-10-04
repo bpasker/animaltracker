@@ -270,6 +270,14 @@ def test_no_cameras_is_an_empty_list_not_an_error(server):
     assert "timezone" in body
 
 
+def test_the_cameras_payload_names_the_process(server):
+    """The settings page compares it across a restart: the same process
+    answering a minute later means the restart never happened."""
+    from animaltracker import web as web_module
+    _, body = call(server.handle_cameras_api)
+    assert body["process"] == web_module.PROCESS_ID
+
+
 # --------------------------------------------------------------------------
 # /api/monitor
 # --------------------------------------------------------------------------

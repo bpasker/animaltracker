@@ -18,6 +18,7 @@ from .analysis_recovery import has_analysis_sidecar, is_unclassified_clip
 from . import configstore
 
 # Server's timezone (configurable or auto-detected)
+import os as _os
 import threading
 import time as _time
 
@@ -141,6 +142,10 @@ def _get_timezone_display_name(tz):
 # Initialize with auto-detect (will be updated when WebServer starts with config)
 LOCAL_TZ = _get_timezone()
 CENTRAL_TZ = LOCAL_TZ  # Backwards compatibility alias
+# Which process is answering: the settings page compares it before and after
+# a restart, so a restart that never happened is not reported as done.
+PROCESS_ID = f"{_os.getpid()}-{int(_time.time() * 1000)}"
+
 TIMEZONE_DISPLAY = _get_timezone_display_name(LOCAL_TZ)
 
 def configure_timezone(tz_name: str = None):
@@ -1861,7 +1866,7 @@ class WebServer:
                 'has_tracker': getattr(worker, 'ptz_tracker', None) is not None,
                 'ptz_target': getattr(ptz, 'target_camera_id', None) if ptz else None,
             })
-        return web.json_response({'cameras': cameras, 'timezone': TIMEZONE_DISPLAY})
+        return web.json_response({'cameras': cameras, 'timezone': TIMEZONE_DISPLAY, 'process': PROCESS_ID})
 
     async def handle_calendar_api(self, request):
         """GET /api/recordings/calendar - Returns full calendar structure as JSON"""
@@ -3551,7 +3556,7 @@ class WebServer:
         loop = asyncio.get_running_loop()
         # Answer first so the client sees the acknowledgement, then let go.
         loop.call_later(0.5, lambda: threading.Thread(target=_go, name='service-restart', daemon=True).start())
-        return web.json_response({'status': 'restarting', 'unit': unit})
+        return web.json_response({'status': 'restarting', 'unit': unit, 'process': PROCESS_ID})
 
     async def handle_set_secret(self, request):
         """POST /api/secrets — write one variable into config/secrets.env and this process.

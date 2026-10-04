@@ -1119,7 +1119,7 @@ function newSession() {
     refreshAbort: null,
     saving: false,
     saveToast: null,     /* the last "not saved" toast; the next save closes it */
-    restarting: false,
+    restarting: !!store.get('restarting'),  /* a restart begun before this mount may still run */
     destroyed: false,
     leaveDialog: null,   /* the "discard unsaved changes?" dialog, while open */
     unapplied: null,     /* live settings in the file the process has not taken */
@@ -1962,9 +1962,22 @@ function cooldownsField(o) {
     addSel.focus();
   }
 
+  /* The rows' listeners, dropped with the rows on every re-render; left on
+     S.offs they piled up there until the page unmounted. */
+  var rowOffs = [];
+  function dropRowListeners() {
+    for (var r = 0; r < rowOffs.length; r++) {
+      try { rowOffs[r](); } catch (e) {}
+    }
+    rowOffs = [];
+  }
+  track(dropRowListeners);
+
   function render() {
+    dropRowListeners();
     clear(listEl);
     var cur = list();
+    var mark = S.offs.length;
     for (var i = 0; i < cur.length; i++) {
       (function (idx) {
         var name = titleCase(cur[idx].species);
@@ -1978,6 +1991,7 @@ function cooldownsField(o) {
         listEl.appendChild(h('div.row.cooldown-row', h('div.row__grow', minutes.el), removeBtn));
       })(i);
     }
+    rowOffs = S.offs.splice(mark);
     countEl.textContent = cur.length
       ? cur.length + ' ' + plural(cur.length, 'species', 'species') + ' with a wait of their own'
       : (o.emptyMeans || '');
@@ -3761,8 +3775,8 @@ function restartService() {
        toast down while this is set. */
     store.set({ restarting: true });
     var progress = toast.progress('Restarting Animal Tracker…', { detail: 'Asking systemd to restart the service' });
-    api.restart().then(function () {
-      waitForServer(progress);
+    api.restart().then(function (res) {
+      waitForServer(progress, res && res.process);
     }, function (err) {
       progress.close();
       restartSettled();
@@ -3786,7 +3800,7 @@ function restartSettled() {
  * progress toast lives in the shell, and leaving Settings mid-restart used
  * to strand that toast spinning for good.
  */
-function waitForServer(progress) {
+function waitForServer(progress, oldProcess) {
   var started = Date.now();
   var sawDown = false;
   function tick() {
@@ -3799,8 +3813,22 @@ function waitForServer(progress) {
       });
       return;
     }
-    api.cameras({ timeout: 3000 }).then(function () {
-      if (sawDown || elapsed > 20) {
+    api.cameras({ timeout: 3000 }).then(function (res) {
+      /* The server names the process that answers: the same one as before
+         means the restart has not happened (or was refused: systemd said no
+         and the unit has no restart policy to fall back on). Without a name
+         to compare, an outage or 20 s is the best evidence there is. */
+      var process = res && res.process;
+      var restarted = oldProcess && process ? process !== oldProcess : (sawDown || elapsed > 20);
+      if (oldProcess && process === oldProcess && elapsed > 60) {
+        progress.close();
+        restartSettled();
+        toast.error('Could not restart the service', {
+          detail: 'The same process is still running a minute later. Check it with: journalctl -u animaltracker -n 100'
+        });
+        return;
+      }
+      if (restarted) {
         progress.close();
         restartSettled();
         toast.success('Animal Tracker is back', { detail: 'Restarted in about ' + elapsed + ' s' });

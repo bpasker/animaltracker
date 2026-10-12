@@ -19,7 +19,10 @@ stub without a ``.log.json`` beside it shows as "Awaiting analysis" (a stand-in
 recovery sweeper reports itself enabled), and ``--analyzing <path>`` marks a
 clip as in flight so it shows as "Analyzing…". ``--recording <camera>`` opens
 an event on a live camera, with a small animal boxed in its stream, for the
-Live page's REC pill (launch config "live-dev").
+Live page's REC pill (launch config "live-dev"). ``--unsaved N`` reports the
+logs directory as a disk of its own, as on the production host where the
+archive is NFS, with N event recordings waiting to be saved (the Monitor's
+"Local disk" gauge, launch config "monitor-dev").
 """
 from __future__ import annotations
 
@@ -36,9 +39,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from animaltracker import configstore  # noqa: E402
+from animaltracker import configstore, web  # noqa: E402
 from animaltracker.analysis_recovery import ClipAnalysisRegistry  # noqa: E402
 from animaltracker.detector import MODEL_BUSY, Detection  # noqa: E402
+from animaltracker.storage import StorageManager  # noqa: E402
 from animaltracker.web import WebServer  # noqa: E402
 
 
@@ -186,6 +190,9 @@ def main() -> None:
     ap.add_argument("--recording", action="append", default=[], metavar="CAMERA",
                     help="camera id with an event open and a small animal boxed in its "
                          "stream (Live's REC pill); repeatable")
+    ap.add_argument("--unsaved", type=int, default=0, metavar="N",
+                    help="report the logs directory as a disk of its own, with N event "
+                         "recordings not saved yet (Monitor's Local disk gauge)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -217,6 +224,16 @@ def main() -> None:
             w.latest_detections = [Detection(species="animal", confidence=0.87,
                                              bbox=[1100.0, 900.0, 1180.0, 960.0])]
 
+    storage = StorageManager(storage_root=scratch / "storage", logs_root=scratch / "logs")
+    if args.unsaved:
+        web._same_filesystem = lambda a, b: False
+        event_temp = scratch / "logs" / "event_temp"
+        event_temp.mkdir(parents=True, exist_ok=True)
+        for i in range(args.unsaved):
+            recording = event_temp / f"cam1_{1789385669 + 300 * i}_{i:08x}.temp.avi"
+            recording.write_bytes(b"\0" * (64 * 1024**2))
+            storage.keep_recording(recording)
+
     registry = ClipAnalysisRegistry()
     for rel in args.analyzing:
         registry.begin(scratch / "storage" / "clips" / rel, source="demo")
@@ -230,6 +247,7 @@ def main() -> None:
         runtime=runtime,
         analysis_registry=registry,
         recovery=FakeRecovery(),
+        storage=storage,
     )
 
     async def run() -> None:

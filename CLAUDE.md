@@ -172,8 +172,15 @@ The system uses a two-stage detection approach:
   whatever a previous run left behind into `<epoch>_animal.mp4` clips
   (`recover_orphan_event_temp`), which the recovery sweep then analyses.
   That is only safe because `run` first takes `claim_event_temp` (a flock
-  in `event_temp`) and refuses to start if another pipeline holds it; a
-  transcode that fails keeps the AVI for the next startup.
+  in `event_temp`) and refuses to start if another pipeline holds it.
+  A transcode that fails keeps the AVI and notes it (`keep_recording`), and
+  `_save_unsaved_recordings` tries it again every 10 minutes once the archive
+  has room for it (after three failures, at the next startup). Only startup
+  used to: in October 2026 the archive filled, 16 GB of kept AVIs filled the
+  local disk, and every clip stopped short for three days. `cv2.VideoWriter`
+  drops frames silently on a full disk, so the writer checks that its file
+  grows (`stalled_at`, an ERROR line), and the Monitor shows the local disk
+  beside the archive's, with the recordings not saved yet.
   Retention is `prune_clips`, run by `cleanup` from the daily
   `ssd-cleaner.timer`. Its `find_leftovers` sweeps key frames and logs whose
   clip is gone; it groups files by directory and event epoch, never by name,

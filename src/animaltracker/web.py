@@ -417,9 +417,15 @@ def _journal_grep_pattern(log_type, level):
     return _LEVEL_GREP.get(level)
 
 
+def _same_filesystem(a: Path, b: Path) -> bool:
+    """Whether two paths live on one filesystem (raises OSError if either is missing)."""
+    return _os.stat(a).st_dev == _os.stat(b).st_dev
+
+
 _EMPTY_SYSTEM_STATS = {
     'cpu_percent': 0, 'memory_percent': 0, 'memory_used_gb': 0, 'memory_total_gb': 0,
     'disk_percent': 0, 'disk_used_gb': 0, 'disk_total_gb': 0,
+    'recording_disk': None, 'unsaved_recordings': {'count': 0, 'gb': 0},
 }
 _EMPTY_GPU_STATS = {
     'available': False, 'name': None, 'utilization': 0, 'memory_percent': 0,
@@ -429,10 +435,13 @@ _EMPTY_GPU_STATS = {
 
 class WebServer:
     def __init__(self, workers: Dict[str, 'StreamWorker'], storage_root: Path, logs_root: Path, port: int = 8080, config_path: Path = None, runtime = None,
-                 analysis_registry=None, recovery=None):
+                 analysis_registry=None, recovery=None, storage=None):
         self.workers = workers
         self.storage_root = storage_root
         self.logs_root = logs_root
+        # The pipeline's StorageManager, for the recordings it could not save
+        # yet (``kept_recordings``); None without a pipeline.
+        self.storage = storage
         self.port = port
         self.config_path = config_path
         self.runtime = runtime
@@ -2703,6 +2712,44 @@ class WebServer:
             return None
         return str(matches[0].relative_to(self.storage_root / 'clips'))
 
+    def _recording_disk_stats(self):
+        """The disk events record to first, when it is not the archive's; else None.
+
+        Every event streams into ``logs_root/event_temp`` and reaches the
+        archive only once it closes. When that disk filled in October 2026,
+        every clip stopped where its recording ran out of room, and this page
+        said nothing: its Disk gauge reads the archive.
+        """
+        import psutil
+        try:
+            if _same_filesystem(self.logs_root, self.storage_root):
+                return None
+            disk = psutil.disk_usage(str(self.logs_root))
+        except Exception as err:  # noqa: BLE001 - telemetry is best effort
+            LOGGER.debug("Recording disk figures unavailable: %s", err)
+            return None
+        return {
+            'percent': disk.percent,
+            'used_gb': round(disk.used / (1024**3), 1),
+            'total_gb': round(disk.total / (1024**3), 1),
+            'free_gb': round(disk.free / (1024**3), 1),
+        }
+
+    def _unsaved_recordings_stats(self):
+        """Event recordings whose clip could not be saved yet, and their size."""
+        count, size = 0, 0
+        if self.storage is not None:
+            try:
+                for recording in self.storage.kept_recordings():
+                    try:
+                        size += recording.stat().st_size
+                    except OSError:
+                        continue
+                    count += 1
+            except Exception as err:  # noqa: BLE001 - telemetry is best effort
+                LOGGER.debug("Unsaved recordings unavailable: %s", err)
+        return {'count': count, 'gb': round(size / (1024**3), 1)}
+
     def _monitor_host_stats(self):
         """System, GPU, detector and recent-clip figures for /api/monitor.
 
@@ -2742,7 +2789,9 @@ class WebServer:
                 'disk_used_gb': 0,
                 'disk_total_gb': 0,
             }
-        
+        system['recording_disk'] = self._recording_disk_stats()
+        system['unsaved_recordings'] = self._unsaved_recordings_stats()
+
         # GPU stats (NVIDIA)
         gpu = {
             'available': False,

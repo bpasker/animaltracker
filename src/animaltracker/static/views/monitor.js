@@ -2,7 +2,8 @@
    views/monitor.js — system health and logs.  Route: /app/monitor
 
    WHAT THIS SCREEN OWES THE OPERATOR
-   · Resource gauges (CPU / memory / disk) with a 60-sample sparkline,
+   · Resource gauges (CPU / memory / archive disk, and the local disk events
+     record to when that is another disk) with a 60-sample sparkline,
      a threshold WORD as well as a colour, and a once-per-crossing error toast
      rather than one toast every two seconds.
    · The detector's load: the share of the last minute each model ran, how
@@ -225,9 +226,8 @@ function makeGauge(label, unit) {
   var unitEl = h('span.readout__unit', { text: unit || '' });
   var valueEl = h('span.readout__value', valueText, unitEl);
 
-  var readout = h('div.readout',
-    h('span.readout__label', { text: label }),
-    valueEl);
+  var labelEl = h('span.readout__label', { text: label });
+  var readout = h('div.readout', labelEl, valueEl);
 
   var stateEl = h('span.gauge__state', { text: '' });
   var meterEl = h('div.gauge__meter.meter.meter--tall', {
@@ -249,6 +249,13 @@ function makeGauge(label, unit) {
 
   return {
     el: el,
+    /** The next set() speaks under this name; the label shows it now. */
+    rename: function (next) {
+      if (next === label) return;
+      label = next;
+      labelEl.textContent = next;
+      el.setAttribute('aria-label', next);
+    },
     /** state word is appended so the reading is never colour-only. */
     set: function (percent, subtitle, opts) {
       var o = opts || {};
@@ -373,13 +380,19 @@ export const view = {
     var gCpu = makeGauge('CPU', '%');
     var gMem = makeGauge('Memory', '%');
     var gDisk = makeGauge('Disk', '%');
+    /* Events record to the local disk and reach the archive only when they
+       close; shown when the two are different disks. When it filled, every
+       clip stopped short and the archive's gauge read 84%. */
+    var gRec = makeGauge('Local disk', '%');
+    gRec.el.hidden = true;
 
     var systemError = h('p.empty__cause.t-danger', { hidden: true, role: 'status' });
+    var gaugeRow = h('div.gaugerow.stack', gCpu.el, gMem.el, gDisk.el, gRec.el);
 
     page.appendChild(h('section.stack.stack--tight', { 'aria-label': 'System resources' },
       h('h2.overline.overline--strong', { text: 'System' }),
       systemError,
-      h('div.gaugerow.stack', gCpu.el, gMem.el, gDisk.el)));
+      gaugeRow));
 
     /* --- 2 · detector panel ---------------------------------------------- */
 
@@ -592,9 +605,26 @@ export const view = {
         joinMeta(fmtGb(sys.memory_used_gb) + ' of ' + fmtGb(sys.memory_total_gb) + ' GB'), {});
       if (c) crossed.push('Memory');
 
+      /* Recordings the pipeline could not save yet sit on the local disk (or
+         the only disk) until the archive takes them. */
+      var rec = sys.recording_disk || null;
+      var unsaved = sys.unsaved_recordings || {};
+      var unsavedText = num(unsaved.count)
+        ? plural(unsaved.count, 'recording', 'recordings') + ' (' + fmtGb(unsaved.gb) + ' GB) not saved yet'
+        : '';
+      var diskName = rec ? 'Archive disk' : 'Disk';
+      gDisk.rename(diskName);
       c = gDisk.set(sys.disk_percent,
-        joinMeta(fmtGb(sys.disk_used_gb) + ' of ' + fmtGb(sys.disk_total_gb) + ' GB'), {});
-      if (c) crossed.push('Disk');
+        joinMeta(fmtGb(sys.disk_used_gb) + ' of ' + fmtGb(sys.disk_total_gb) + ' GB',
+          rec ? '' : unsavedText), {});
+      if (c) crossed.push(diskName);
+
+      gRec.el.hidden = !rec;
+      gaugeRow.classList.toggle('gaugerow--four', !!rec);
+      if (rec) {
+        c = gRec.set(rec.percent, joinMeta(fmtGb(rec.free_gb) + ' GB free', unsavedText), {});
+        if (c) crossed.push('Local disk');
+      }
 
       /* The chip reading, averaged over the last minute of polls, for the
          detector card's fine print. */
@@ -611,12 +641,16 @@ export const view = {
         if (criticalAlerted[name]) continue;
         criticalAlerted[name] = true;
         criticalToasts[name] = toast.error(name + ' is critical', {
-          detail: name + ' has crossed ' + CRIT_AT + '%. Recording may stall.'
+          detail: name === 'Local disk'
+            ? 'Local disk has crossed ' + CRIT_AT + '%. Events record here first, ' +
+              'and a clip stops where this disk runs out of room.'
+            : name + ' has crossed ' + CRIT_AT + '%. Recording may stall.'
         });
       }
       /* Reset the latch once the reading recovers, so a second excursion
          raises a second toast, and take the first one down. */
-      [['CPU', sys.cpu_percent], ['Memory', sys.memory_percent], ['Disk', sys.disk_percent]]
+      [['CPU', sys.cpu_percent], ['Memory', sys.memory_percent], [diskName, sys.disk_percent],
+        ['Local disk', rec ? rec.percent : null]]
         .forEach(function (reading) {
           if (num(reading[1]) === null || reading[1] >= CRIT_AT) return;
           criticalAlerted[reading[0]] = false;

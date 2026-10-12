@@ -4845,6 +4845,12 @@ body.is-locked{
     display:grid;gap:var(--s-4);
     grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
   }
+  /* With the local disk shown, four gauges: two by two rather than three
+     and one left over, until there is room for all four in a row. */
+  .gaugerow--four{ grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (min-width:1200px){
+  .gaugerow--four{ grid-template-columns:repeat(4,minmax(0,1fr)); }
 }
 
 /* --- Detector load (monitor.js): the live detector's share of the last

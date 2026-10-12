@@ -53,6 +53,14 @@ def measured_frame_rate(timestamps: Sequence[float]) -> Optional[float]:
     return rate if 1.0 <= rate <= 120.0 else None
 
 
+def _free_space_text(path: Path) -> str:
+    """The free space on ``path``'s filesystem, for a log line."""
+    try:
+        return f"{shutil.disk_usage(path).free / 1024**3:.1f} GB"
+    except OSError:
+        return "unknown"
+
+
 class StreamingClipWriter:
     """Streams frames straight to a temp MJPG AVI as they arrive.
 
@@ -79,7 +87,16 @@ class StreamingClipWriter:
     is for an encoder that cannot keep up. Shedding frames at random when
     the backlog fills (``dropped_frames``) leaves gaps a truthful stamp
     would play fast.
+
+    ``cv2.VideoWriter.write`` reports nothing when the disk is full: the
+    frames are simply not there. From 2026-10-09 to 10-12 the production
+    disk was full and every clip ended where its file stopped growing, with
+    the animal in view and the event open for minutes more, while the log
+    said nothing. So every ``GROWTH_CHECK_FRAMES`` the writer checks that
+    the file grew, and logs an error once (``stalled_at``) when it did not.
     """
+
+    GROWTH_CHECK_FRAMES = 30
 
     def __init__(self, temp_path: Path, fps: float = 15, max_pending: int = 300,
                  stride: int = 1) -> None:
@@ -99,6 +116,11 @@ class StreamingClipWriter:
         self.dropped_frames: int = 0
         self._offered: int = 0         # every frame seen, seed and live, for the stride
         self.write_errors: int = 0
+        # Frames encoded when the file was last seen to grow and its size
+        # then; ``stalled_at`` is that count once a check found no growth.
+        self.stalled_at: Optional[int] = None
+        self._checked_frames: int = 0
+        self._checked_size: int = 0
         self._failed: bool = False
         self._pending: deque[np.ndarray] = deque()
         self._cv = threading.Condition()
@@ -174,6 +196,13 @@ class StreamingClipWriter:
             self.discard()
             return None
         if not self.temp_path.exists() or self.temp_path.stat().st_size == 0:
+            # Frames were encoded and none reached the file: a full disk.
+            # The empty file used to stay behind, one per lost event.
+            LOGGER.error(
+                "Recording %s is empty though %d frames were encoded: no room on its disk (%s free)",
+                self.temp_path.name, self.frame_count, _free_space_text(self.temp_path.parent),
+            )
+            self.discard()
             return None
         return self.temp_path
 
@@ -210,6 +239,8 @@ class StreamingClipWriter:
                 return
             self._writer.write(frame)
             self.frame_count += 1
+            if self.frame_count - self._checked_frames >= self.GROWTH_CHECK_FRAMES:
+                self._check_growth()
         except Exception as e:
             # Keep draining so close() still completes and whatever was
             # written before the error survives to be transcoded.
@@ -217,6 +248,22 @@ class StreamingClipWriter:
             log = LOGGER.warning if self.write_errors == 1 else LOGGER.debug
             log("Streaming writer error for %s (%d so far): %s",
                 self.temp_path.name, self.write_errors, e)
+
+    def _check_growth(self) -> None:
+        """Note, once, that frames are being encoded into a file that does not grow."""
+        try:
+            size = self.temp_path.stat().st_size
+        except OSError:
+            return
+        if size <= self._checked_size and self.stalled_at is None:
+            self.stalled_at = self._checked_frames
+            LOGGER.error(
+                "Recording %s stopped growing after about %d frames: no room on its disk "
+                "(%s free). Every frame from here on is lost, though the event stays open",
+                self.temp_path.name, self.stalled_at, _free_space_text(self.temp_path.parent),
+            )
+        self._checked_frames = self.frame_count
+        self._checked_size = max(size, self._checked_size)
 
     def _ensure_open(self, frame: np.ndarray) -> bool:
         if self._writer is not None:
@@ -311,6 +358,12 @@ class PruneReport:
 _EVENT_TEMP_RE = re.compile(r"^(?P<camera>.+)_(?P<ts>\d{6,12})_(?P<tag>[0-9a-f]{8})\.temp\.avi$")
 
 
+def _event_temp_order(path: Path) -> tuple:
+    """Sort key for event recordings: oldest event first, then by name."""
+    match = _EVENT_TEMP_RE.match(path.name)
+    return (int(match.group("ts")) if match else 0, path.name)
+
+
 @dataclass
 class StorageManager:
     storage_root: Path
@@ -327,6 +380,33 @@ class StorageManager:
         # and with it deleted the running service's open recordings. What a
         # previous run left behind is the pipeline's to deal with, once, at
         # its own startup (``list_orphan_event_temps``).
+        self._kept_lock = threading.Lock()
+        self._kept: Dict[str, Path] = {}
+
+    def keep_recording(self, temp_avi: Path) -> None:
+        """Note an event recording whose clip could not be saved, to try it again.
+
+        The pipeline retries these while it runs
+        (``PipelineOrchestrator._save_unsaved_recordings``). Only the next
+        startup used to: in October 2026 the archive filled, four 5-minute
+        recordings (16 GB) waited in ``event_temp`` for a restart that did
+        not come for three days, and the local disk filled behind them.
+        """
+        with self._kept_lock:
+            self._kept[str(temp_avi)] = temp_avi
+
+    def kept_recordings(self) -> List[Path]:
+        """The recordings ``keep_recording`` noted that are still on disk, oldest event first."""
+        with self._kept_lock:
+            for key, path in list(self._kept.items()):
+                if not path.exists():
+                    del self._kept[key]
+            paths = list(self._kept.values())
+        return sorted(paths, key=_event_temp_order)
+
+    def _forget_recording(self, temp_avi: Path) -> None:
+        with self._kept_lock:
+            self._kept.pop(str(temp_avi), None)
 
     def build_clip_path(self, camera_id: str, species: str, event_ts: float, ext: str = "mp4") -> Path:
         ts = time.strftime("%Y/%m/%d", time.localtime(event_ts))
@@ -540,12 +620,7 @@ class StorageManager:
         tmp_dir = self.logs_root / "event_temp"
         if not tmp_dir.is_dir():
             return []
-
-        def event_ts(path: Path) -> int:
-            match = _EVENT_TEMP_RE.match(path.name)
-            return int(match.group("ts")) if match else 0
-
-        return sorted(tmp_dir.glob("*.temp.avi"), key=lambda path: (event_ts(path), path.name))
+        return sorted(tmp_dir.glob("*.temp.avi"), key=_event_temp_order)
 
     def recover_orphan_event_temp(self, temp_avi: Path, label: str) -> Optional[Path]:
         """Save the clip of an event whose process died before transcoding it.
@@ -563,7 +638,8 @@ class StorageManager:
         name is not ours, the file is empty, the event's clip already exists
         (the old process died between the rename and the unlink) or the
         recording cannot be read. A recording that could not be transcoded
-        is kept for the next startup; every other outcome removes it.
+        is kept, and noted for another try (``keep_recording``); every
+        other outcome removes it.
         """
         match = _EVENT_TEMP_RE.match(temp_avi.name)
         if match is None:
@@ -605,7 +681,8 @@ class StorageManager:
         event close. The AVI is deleted once the MP4 is in place, and kept
         when the transcode fails: until then it is the event's only copy,
         and the failure is often passing (a full disk, the NFS archive
-        briefly away). The next startup's orphan recovery tries it again.
+        briefly away). A kept AVI is noted (``keep_recording``) and the
+        pipeline tries it again while it runs, as does the next startup.
 
         Returns True on success.
         """
@@ -677,6 +754,7 @@ class StorageManager:
                         ok = True
         finally:
             if ok:
+                self._forget_recording(temp_avi)
                 try:
                     if temp_avi.exists():
                         temp_avi.unlink()
@@ -684,9 +762,10 @@ class StorageManager:
                     LOGGER.warning("Failed to remove temp AVI %s: %s", temp_avi, e)
             else:
                 LOGGER.warning(
-                    "Keeping the recording %s: its clip was not saved; the next "
-                    "startup will try again", temp_avi,
+                    "Keeping the recording %s: its clip was not saved; it will be "
+                    "tried again", temp_avi,
                 )
+                self.keep_recording(temp_avi)
                 if tmp_mp4.exists():
                     try:
                         tmp_mp4.unlink()

@@ -231,9 +231,10 @@ def test_a_failed_transcode_keeps_the_recording(tmp_path, monkeypatch):
     assert recording.exists()
     assert not clip.exists()
     assert not clip.with_suffix(".tmp.mp4").exists()
+    assert storage.kept_recordings() == [recording]     # to be tried again
 
 
-def test_an_orphan_that_fails_to_transcode_waits_for_the_next_startup(tmp_path, monkeypatch):
+def test_an_orphan_that_fails_to_transcode_is_kept_for_another_try(tmp_path, monkeypatch):
     _failing_ffmpeg(tmp_path, monkeypatch)
     storage = _storage(tmp_path)
     orphan = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
@@ -242,6 +243,43 @@ def test_an_orphan_that_fails_to_transcode_waits_for_the_next_startup(tmp_path, 
 
     assert orphan.exists()
     assert storage.list_orphan_event_temps() == [orphan]
+    assert storage.kept_recordings() == [orphan]
+
+
+def _working_ffmpeg(tmp_path: Path, monkeypatch) -> None:
+    """Put an ffmpeg on PATH that writes something to its last argument."""
+    bin_dir = tmp_path / "bin-ok"
+    bin_dir.mkdir()
+    ffmpeg = bin_dir / "ffmpeg"
+    ffmpeg.write_text('#!/bin/sh\nfor last; do :; done\necho mp4 > "$last"\n')
+    ffmpeg.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+
+
+def test_a_kept_recording_is_forgotten_once_its_clip_is_saved(tmp_path, monkeypatch):
+    _failing_ffmpeg(tmp_path, monkeypatch)
+    storage = _storage(tmp_path)
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    clip = storage.build_clip_path("cam1", "animal", EVENT_TS)
+    assert storage.transcode_avi_to_mp4(recording, clip) is False
+
+    _working_ffmpeg(tmp_path, monkeypatch)
+    assert storage.transcode_avi_to_mp4(recording, clip) is True
+
+    assert clip.exists() and not recording.exists()
+    assert storage.kept_recordings() == []
+
+
+def test_kept_recordings_are_the_ones_still_on_disk_oldest_event_first(tmp_path):
+    storage = _storage(tmp_path)
+    later = _temp(storage, f"cam1_{EVENT_TS + 60}_1b2c3d4e.temp.avi")
+    earlier = _temp(storage, f"cam2_{EVENT_TS}_0a1b2c3d.temp.avi")
+    gone = _temp(storage, f"cam1_{EVENT_TS + 120}_2c3d4e5f.temp.avi")
+    for recording in (later, earlier, gone):
+        storage.keep_recording(recording)
+    gone.unlink()
+
+    assert storage.kept_recordings() == [earlier, later]
 
 
 def test_a_real_recording_is_transcoded_end_to_end(tmp_path):
@@ -327,6 +365,125 @@ def test_a_stopping_pipeline_leaves_the_remaining_orphans_for_next_time(tmp_path
     orch._recover_orphan_recordings([orphan], sweeper)
 
     assert orphan.exists() and sweeper.sweeps_requested == 0
+
+
+# --- recordings the running pipeline could not save are tried again ------------------
+# On 2026-10-09 the archive filled and four recordings (16 GB) waited in
+# event_temp for a restart that came three days later; the local disk filled
+# behind them and every clip from then on stopped short.
+
+def _passes(orch: PipelineOrchestrator, monkeypatch, n: int) -> None:
+    """Let the retry loop run ``n`` passes without pausing, then stop it."""
+    loop_waits = iter([False] * n + [True])
+
+    def wait(timeout=None):
+        # Any other pause is a recovery's "let the clips age", waited out at once.
+        return next(loop_waits) if timeout == orch.UNSAVED_RETRY_S else False
+
+    monkeypatch.setattr(orch._orphan_stop, "wait", wait)
+
+
+def _roomy(orch: PipelineOrchestrator, monkeypatch) -> None:
+    monkeypatch.setattr(orch, "_archive_free_bytes", lambda: 10**12)
+
+
+def test_a_recording_whose_clip_could_not_be_saved_is_saved_on_a_later_pass(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode([]))
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    storage.keep_recording(recording)        # the live save failed: the archive was full
+    orch = _orchestrator(storage)
+    _roomy(orch, monkeypatch)
+    _passes(orch, monkeypatch, 1)
+    sweeper = FakeSweeper()
+
+    orch._save_unsaved_recordings([], sweeper)
+
+    clips = [p.name for p in (storage.storage_root / "clips").rglob("*.mp4")]
+    assert clips == [f"{EVENT_TS}_animal.mp4"] and not recording.exists()
+    assert storage.kept_recordings() == [] and sweeper.sweeps_requested == 1
+
+
+def test_an_orphan_startup_could_not_save_is_tried_again_while_running(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    outcomes = iter([False, True])           # the archive is full at startup, not later
+
+    def transcode(temp_avi: Path, output_path: Path) -> bool:
+        if not next(outcomes):
+            storage.keep_recording(temp_avi)
+            return False
+        temp_avi.unlink()
+        output_path.write_bytes(b"mp4")
+        return True
+
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", transcode)
+    orphan = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    orch = _orchestrator(storage)
+    _roomy(orch, monkeypatch)
+    _passes(orch, monkeypatch, 1)
+    sweeper = FakeSweeper()
+
+    orch._save_unsaved_recordings([orphan], sweeper)
+
+    assert not orphan.exists() and sweeper.sweeps_requested == 1
+
+
+def test_a_recording_waits_until_the_archive_has_room_for_it(tmp_path, monkeypatch, caplog):
+    storage = _storage(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode(calls))
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi", payload=b"x" * 1000)
+    storage.keep_recording(recording)
+    orch = _orchestrator(storage)
+    free = iter([100, 100, 10**12])          # bytes free on the archive, pass by pass
+    monkeypatch.setattr(orch, "_archive_free_bytes", lambda: next(free))
+    _passes(orch, monkeypatch, 3)
+
+    orch._save_unsaved_recordings([], FakeSweeper())
+
+    # Not tried while it could only fail, and it held up no live transcode.
+    assert len(calls) == 1 and not recording.exists()
+    waits = [r for r in caplog.records if "waits for room" in r.getMessage()]
+    assert len(waits) == 1                   # said once, not every ten minutes
+
+
+def test_an_unreadable_archive_counts_as_no_room(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    calls: list = []
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", _fake_transcode(calls))
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    storage.keep_recording(recording)
+    orch = _orchestrator(storage)
+    monkeypatch.setattr(orch, "_archive_free_bytes", lambda: None)
+    _passes(orch, monkeypatch, 2)
+
+    orch._save_unsaved_recordings([], FakeSweeper())
+
+    assert calls == [] and recording.exists()
+
+
+def test_a_recording_that_keeps_failing_is_left_for_the_next_startup(tmp_path, monkeypatch, caplog):
+    _failing_ffmpeg(tmp_path, monkeypatch)
+    storage = _storage(tmp_path)
+    tries: list = []
+    real = storage.transcode_avi_to_mp4
+
+    def counted(temp_avi: Path, output_path: Path) -> bool:
+        tries.append(temp_avi.name)
+        return real(temp_avi, output_path)
+
+    monkeypatch.setattr(storage, "transcode_avi_to_mp4", counted)
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    storage.keep_recording(recording)
+    orch = _orchestrator(storage)
+    _roomy(orch, monkeypatch)
+    _passes(orch, monkeypatch, orch.UNSAVED_MAX_TRIES + 2)
+
+    orch._save_unsaved_recordings([], FakeSweeper())
+
+    assert len(tries) == orch.UNSAVED_MAX_TRIES
+    assert recording.exists() and storage.list_orphan_event_temps() == [recording]
+    assert sum("Giving up on recording" in r.getMessage() for r in caplog.records) == 1
 
 
 # --- a closing event saves its clip before it queues --------------------------
@@ -536,6 +693,37 @@ def test_an_event_with_no_recording_is_dropped_without_waiting_for_a_slot(tmp_pa
     worker.event_state.clip_writer = None
 
     assert worker._save_event_clip(None, storage.build_clip_path("cam1", "animal", EVENT_TS)) is False
+
+
+def test_an_event_with_no_clip_path_leaves_its_recording_to_be_tried_again(tmp_path, monkeypatch):
+    storage = _storage(tmp_path)
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    worker = _closing_worker(storage, recording, FakeNotifier())
+
+    def archive_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(storage, "build_clip_path", archive_full)
+
+    async def close_event() -> None:
+        await worker._maybe_close_event(float(EVENT_TS + 30), force=True)
+        loop = asyncio.get_running_loop()
+        assert await loop.run_in_executor(
+            None, _wait_for, lambda: storage.kept_recordings() == [recording])
+
+    asyncio.run(close_event())
+
+    assert recording.exists()
+
+
+def test_an_event_dropped_after_an_error_leaves_its_recording_to_be_tried_again(tmp_path):
+    storage = _storage(tmp_path)
+    recording = _temp(storage, f"cam1_{EVENT_TS}_0a1b2c3d.temp.avi")
+    worker = _closing_worker(storage, recording, FakeNotifier())
+
+    worker._close_and_keep(FakeWriter(recording))
+
+    assert storage.kept_recordings() == [recording]
 
 
 # --- a waiting analysis is a queue entry, not a thread ---------------------------

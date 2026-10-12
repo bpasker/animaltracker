@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 import functools
@@ -1017,7 +1018,8 @@ class StreamWorker:
         An event that was open is closed, so what it recorded so far is
         saved and alerts. If even that fails, the event is dropped: the
         camera must be able to start a new one after the restart, and the
-        recording, if there is one, is recovered at the next startup.
+        recording, if there is one, is saved later by the retry of unsaved
+        recordings (``PipelineOrchestrator._save_unsaved_recordings``).
         """
         self.stream_connected = False
         self._reset_pending_detection()
@@ -1032,10 +1034,16 @@ class StreamWorker:
             if writer is not None:
                 # Its thread and file handle would otherwise live as long as
                 # the process. Closed, the recording waits in event_temp for
-                # the next startup's recovery. Not awaited: a drain can take
-                # a while and the camera should restart now.
+                # the retry. Not awaited: a drain can take a while and the
+                # camera should restart now.
                 event.clip_writer = None
-                asyncio.get_running_loop().run_in_executor(None, writer.close)
+                asyncio.get_running_loop().run_in_executor(None, self._close_and_keep, writer)
+
+    def _close_and_keep(self, writer: StreamingClipWriter) -> None:
+        """Drain the writer of an event that is not being saved now; note its recording for a retry."""
+        recording = writer.close()
+        if recording is not None:
+            self.storage.keep_recording(recording)
 
     def _reset_pending_detection(self) -> None:
         """Forget a run of detections that has not opened an event yet."""
@@ -2587,10 +2595,10 @@ class StreamWorker:
             except Exception:  # noqa: BLE001
                 LOGGER.exception(
                     "No clip path for %s event @ %s; its recording stays in event_temp "
-                    "for the next startup", camera_id, start_ts,
+                    "to be tried again", camera_id, start_ts,
                 )
                 if writer is not None:
-                    writer.close()
+                    self._close_and_keep(writer)
                 return
             registry.live_begin()
             claimed = registry.begin(clip_path, source='event')
@@ -3325,15 +3333,15 @@ class PipelineOrchestrator:
             runtime=self.runtime,
             analysis_registry=StreamWorker.analysis_registry,
             recovery=recovery,
+            storage=self.storage,
         )
         
         recovery.start()
-        if orphan_event_temps:
-            threading.Thread(
-                target=self._recover_orphan_recordings,
-                args=(orphan_event_temps, recovery),
-                name="orphan-recordings", daemon=True,
-            ).start()
+        threading.Thread(
+            target=self._save_unsaved_recordings,
+            args=(orphan_event_temps, recovery),
+            name="unsaved-recordings", daemon=True,
+        ).start()
         try:
             await asyncio.gather(
                 web_server.start(),
@@ -3390,8 +3398,79 @@ class PipelineOrchestrator:
                 pass
             delay = min(delay * 2, self._WORKER_RESTART_DELAY_MAX)
 
+    # How often a recording whose clip could not be saved is tried again, and
+    # how many failed tries (with room on the archive) before it is left for
+    # the next startup: a file ffmpeg cannot read would otherwise be decoded
+    # every ten minutes for ever, holding up the live transcodes each time.
+    UNSAVED_RETRY_S = 10 * 60.0
+    UNSAVED_MAX_TRIES = 3
+
+    def _save_unsaved_recordings(self, orphans: List[Path], recovery: RecoverySweeper) -> None:
+        """Thread body: save what the last run left behind, then whatever this run could not.
+
+        At startup every recording in ``event_temp`` belongs to a run that
+        is gone. After that, a recording whose clip could not be saved (the
+        archive full or away when its event closed, noted by
+        ``StorageManager.keep_recording``) is tried again every
+        ``UNSAVED_RETRY_S`` once the archive has room for it. Only startup
+        used to try: on 2026-10-09 the archive filled, four recordings (16 GB)
+        waited three days for a restart, and the local disk filled behind
+        them, so every clip after that stopped where its file ran out of room.
+        """
+        if orphans:
+            LOGGER.info("Found %d event recording(s) the last run never saved", len(orphans))
+            self._recover_orphan_recordings(orphans, recovery)
+        failures: Dict[str, int] = {}
+        waiting: set = set()
+        while not self._orphan_stop.wait(self.UNSAVED_RETRY_S):
+            due = []
+            for recording in self.storage.kept_recordings():
+                key = str(recording)
+                if failures.get(key, 0) >= self.UNSAVED_MAX_TRIES:
+                    continue
+                free = self._archive_free_bytes()
+                try:
+                    size = recording.stat().st_size
+                except OSError:
+                    continue
+                # The MP4 is about a tenth of the MJPG recording; half leaves
+                # a margin without waiting on a nearly full archive.
+                if free is None or free < size // 2:
+                    if key not in waiting:
+                        waiting.add(key)
+                        LOGGER.warning(
+                            "Recording %s (%.1f GB) waits for room on the archive (%s free) "
+                            "before its clip is saved",
+                            recording.name, size / 1024**3,
+                            "unknown" if free is None else f"{free / 1024**3:.1f} GB",
+                        )
+                    continue
+                waiting.discard(key)
+                due.append(recording)
+            if not due:
+                continue
+            LOGGER.info("Trying again to save %d event recording(s) whose clip could not be saved", len(due))
+            self._recover_orphan_recordings(due, recovery)
+            for recording in due:
+                if not recording.exists():
+                    continue
+                key = str(recording)
+                failures[key] = failures.get(key, 0) + 1
+                if failures[key] >= self.UNSAVED_MAX_TRIES:
+                    LOGGER.warning(
+                        "Giving up on recording %s after %d failed tries; the next startup "
+                        "tries it again", recording.name, failures[key],
+                    )
+
+    def _archive_free_bytes(self) -> Optional[int]:
+        """Free space on the clip archive; None when it cannot be read."""
+        try:
+            return shutil.disk_usage(self.storage.storage_root).free
+        except OSError:
+            return None
+
     def _recover_orphan_recordings(self, orphans: List[Path], recovery: RecoverySweeper) -> None:
-        """Save the recordings the last run left behind, then have them analysed.
+        """Save recordings that never became clips, then have them analysed.
 
         Each becomes ``<epoch>_animal.mp4`` in its camera's archive
         (``StorageManager.recover_orphan_event_temp``), which is exactly what
@@ -3400,7 +3479,6 @@ class PipelineOrchestrator:
         Off the event loop and one file at a time, behind the same lock as
         the live transcodes, so a backlog never delays camera startup.
         """
-        LOGGER.info("Found %d event recording(s) the last run never saved", len(orphans))
         recovered = 0
         for temp_avi in orphans:
             if self._orphan_stop.is_set():

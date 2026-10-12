@@ -25,7 +25,9 @@
         "--analyzing",
         "cam1/2026/09/14/1789385669_animal.mp4",
         "--blurry",
-        "cam2"
+        "cam2",
+        "--unsaved",
+        "2"
       ],
       "port": 8082
     },
